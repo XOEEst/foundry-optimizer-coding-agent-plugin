@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError, model_validator
 
 from foundry_opt.bootstrap.canonical import canonical_sha256, safe_persisted_document
 from foundry_opt.bootstrap.contracts import (
@@ -24,13 +24,17 @@ from foundry_opt.bootstrap.contracts import (
 from foundry_opt.bootstrap.errors import BootstrapConfigError
 
 _TRACE_MIN_GENERATED_SAMPLES = 15
-_MIN_DEVELOPMENT_COUNT = 10
-_MIN_VALIDATING_COUNT = 5
+_MIN_DEVELOPMENT_CASES = 10
+_MIN_VALIDATING_CASES = 5
 _DEVELOPMENT_RATIO = 2 / 3
 _ALLOWED_PROVENANCE = "auto_generated_unreviewed"
+_CONTENT_SAFETY_EVALUATOR_ID = "azureai://built-in/evaluators/content_safety"
 _CAMEL_SEGMENT_RE = re.compile(r"[A-Z]?[a-z0-9]+|[A-Z]+(?![a-z])")
 _PROHIBITED_PART_SEQUENCES = (
+    ("dataset", "row"),
     ("dataset", "rows"),
+    ("token",),
+    ("tokens",),
     ("prompt",),
     ("prompts",),
     ("response",),
@@ -143,8 +147,8 @@ class DeploymentDefaults(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     environment: str
-    require_aligned_binding: bool
-    enabled: bool
+    require_aligned_binding: StrictBool
+    enabled: StrictBool
     hard_guardrail_names: tuple[str, ...]
 
 
@@ -157,12 +161,41 @@ class ReplacementOperation(BaseModel):
     repository_identity: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
 
-class ActivationReceipt(BaseModel):
+class ActivationRun(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    attempted: bool
-    activated: bool
+    phase: Literal["development", "validating"]
+    evaluator_id: str
+    executable: StrictBool
+    score: float | StrictBool
+    normalization_kind: Literal["scalar", "pass_fail"]
+    source_min: float | None = None
+    source_max: float | None = None
+    passed: StrictBool | None = None
+
+
+class ActivationCleanup(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    completed: StrictBool
+
+
+class ActivationReceipt(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    attempted: StrictBool
+    activated: StrictBool
     status: Literal["succeeded", "failed"]
+    operation_id: str
+    runtime_repository: str
+    runtime_commit: str
+    repository_identity: str
+    bundle_objective_hash: str
+    split_lineage_hash: str
+    development_definition_id: str
+    validating_definition_id: str
+    runs: list[ActivationRun]
+    cleanup: ActivationCleanup
     detail: str | None = None
 
     @model_validator(mode="after")
@@ -209,7 +242,7 @@ def assess_dataset_suitability(candidate: Mapping[str, object], *, expected_sche
     if version is None or not _parse_bool(item.get("immutable_version", False), field="dataset.immutable_version"):
         reasons.append("not_immutable")
     sample_count = _require_int(item.get("sample_count"), field="dataset.sample_count")
-    if sample_count < (_MIN_DEVELOPMENT_COUNT + _MIN_VALIDATING_COUNT):
+    if sample_count < (_MIN_DEVELOPMENT_CASES + _MIN_VALIDATING_CASES):
         reasons.append("insufficient_samples")
     if requires_labels is True and not _parse_bool(item.get("has_labels", False), field="dataset.has_labels"):
         reasons.append("missing_labels")
@@ -269,55 +302,70 @@ def split_dataset_rows(rows: Sequence[Mapping[str, object]]) -> DatasetSplitResu
         group_id = _optional_string(item.get("group_id"), field="dataset_row.group_id") or row_id.casefold()
         category = _optional_string(item.get("category"), field="dataset_row.category") or ""
         row_key = row_id.casefold()
+        group_key = group_id.casefold()
         existing_group = row_to_group.get(row_key)
-        if existing_group is not None and existing_group != group_id.casefold():
+        if existing_group is not None and existing_group != group_key:
             raise BootstrapConfigError("row_id must belong to exactly one group")
-        row_to_group[row_key] = group_id.casefold()
-        entry = grouped_rows.setdefault(group_id.casefold(), {"group_id": group_id, "category": category, "row_ids": set()})
+        row_to_group[row_key] = group_key
+        entry = grouped_rows.setdefault(group_key, {"group_id": group_id, "category": category, "row_ids": {}})
         existing_category = str(entry["category"])
-        if existing_category != category:
+        if existing_category.casefold() != category.casefold():
             if existing_category and category:
                 raise BootstrapConfigError("group metadata category conflicts across rows")
             if category:
                 entry["category"] = category
-        if row_key in {value.casefold() for value in entry["row_ids"]}:  # type: ignore[arg-type]
-            continue
-        entry["row_ids"].add(row_id)  # type: ignore[union-attr]
+        stored_rows: dict[str, str] = entry["row_ids"]  # type: ignore[assignment]
+        if row_key in stored_rows and stored_rows[row_key] != row_id:
+            raise BootstrapConfigError("row_id casefold collision detected")
+        stored_rows[row_key] = row_id
     groups = [
-        _canonical_group_record(str(value["group_id"]), str(value["category"]), sorted({str(row_id) for row_id in value["row_ids"]}, key=str.casefold))
+        _canonical_group_record(str(value["group_id"]), str(value["category"]), tuple(sorted(cast_values := tuple(value["row_ids"].values()), key=str.casefold)))
         for _, value in sorted(grouped_rows.items(), key=lambda item: (str(item[1]["category"]).casefold(), str(item[1]["group_id"]).casefold()))
     ]
-    if len(groups) < (_MIN_DEVELOPMENT_COUNT + _MIN_VALIDATING_COUNT):
-        raise BootstrapConfigError("dataset requires at least 15 unique groups")
-    total_groups = len(groups)
-    development_target = max(_MIN_DEVELOPMENT_COUNT, math.ceil(total_groups * _DEVELOPMENT_RATIO))
-    development_target = min(total_groups - _MIN_VALIDATING_COUNT, development_target)
-    validating_target = total_groups - development_target
-    if development_target < _MIN_DEVELOPMENT_COUNT or validating_target < _MIN_VALIDATING_COUNT:
-        raise BootstrapConfigError("dataset split must satisfy 10/5 minimums")
-    categories: dict[str, list[tuple[str, str, tuple[str, ...]]]] = defaultdict(list)
-    for group in groups:
-        categories[group[1]].append(group)
+    if len(groups) < 1:
+        raise BootstrapConfigError("dataset must not be empty")
+    total_cases = sum(len(group[2]) for group in groups)
+    if total_cases < (_MIN_DEVELOPMENT_CASES + _MIN_VALIDATING_CASES):
+        raise BootstrapConfigError("dataset requires at least 15 unique cases")
+    target_development_cases = max(_MIN_DEVELOPMENT_CASES, round(total_cases * _DEVELOPMENT_RATIO))
+    target_development_cases = min(total_cases - _MIN_VALIDATING_CASES, target_development_cases)
+    target_validating_cases = total_cases - target_development_cases
+    if target_development_cases < _MIN_DEVELOPMENT_CASES or target_validating_cases < _MIN_VALIDATING_CASES:
+        raise BootstrapConfigError("dataset split must satisfy 10/5 minimum case counts")
+    sorted_groups = sorted(groups, key=lambda item: (item[1].casefold(), item[0].casefold(), item[2]))
     development_groups: list[tuple[str, str, tuple[str, ...]]] = []
     validating_groups: list[tuple[str, str, tuple[str, ...]]] = []
-    ordered_categories = sorted(categories, key=str.casefold)
-    for category in ordered_categories:
-        bucket = sorted(categories[category], key=lambda item: (item[0].casefold(), item[2]))
-        category_development_target = math.ceil(len(bucket) * _DEVELOPMENT_RATIO)
-        minimum_for_validating = 1 if len(bucket) > 1 else 0
-        category_development_target = min(len(bucket) - minimum_for_validating, category_development_target)
-        remaining_dev = development_target - len(development_groups)
-        category_development_target = min(category_development_target, max(0, remaining_dev))
-        development_groups.extend(bucket[:category_development_target])
-        validating_groups.extend(bucket[category_development_target:])
-    if len(development_groups) < development_target:
-        movable = list(validating_groups)
-        while len(development_groups) < development_target and movable and len(validating_groups) > _MIN_VALIDATING_COUNT:
-            candidate = movable.pop(0)
-            validating_groups.remove(candidate)
-            development_groups.append(candidate)
-    if len(development_groups) != development_target or len(validating_groups) < _MIN_VALIDATING_COUNT:
-        raise BootstrapConfigError("dataset split must satisfy target group counts")
+    development_cases = 0
+    validating_cases = total_cases
+    for group in sorted_groups:
+        group_cases = len(group[2])
+        projected_ratio = abs((development_cases + group_cases) - target_development_cases)
+        current_ratio = abs(development_cases - target_development_cases)
+        can_move = validating_cases - group_cases >= _MIN_VALIDATING_CASES
+        if can_move and (development_cases < _MIN_DEVELOPMENT_CASES or projected_ratio <= current_ratio):
+            development_groups.append(group)
+            development_cases += group_cases
+            validating_cases -= group_cases
+        else:
+            validating_groups.append(group)
+    while development_cases < _MIN_DEVELOPMENT_CASES:
+        if not validating_groups:
+            raise BootstrapConfigError("dataset split must satisfy minimum development cases")
+        candidate = validating_groups.pop(0)
+        if validating_cases - len(candidate[2]) < _MIN_VALIDATING_CASES:
+            raise BootstrapConfigError("dataset split cannot satisfy validating minimum")
+        development_groups.append(candidate)
+        development_cases += len(candidate[2])
+        validating_cases -= len(candidate[2])
+    while validating_cases < _MIN_VALIDATING_CASES:
+        if not development_groups:
+            raise BootstrapConfigError("dataset split must satisfy minimum validating cases")
+        candidate = development_groups.pop()
+        development_cases -= len(candidate[2])
+        validating_cases += len(candidate[2])
+        if development_cases < _MIN_DEVELOPMENT_CASES:
+            raise BootstrapConfigError("dataset split cannot satisfy development minimum")
+        validating_groups.append(candidate)
     development_groups = sorted(development_groups, key=lambda item: (item[1].casefold(), item[0].casefold(), item[2]))
     validating_groups = sorted(validating_groups, key=lambda item: (item[1].casefold(), item[0].casefold(), item[2]))
     development_group_ids = {group[0] for group in development_groups}
@@ -332,20 +380,21 @@ def split_dataset_rows(rows: Sequence[Mapping[str, object]]) -> DatasetSplitResu
             raise BootstrapConfigError("development split must retain labeled category coverage")
         if len(labeled_categories) > 1 and not val_categories:
             raise BootstrapConfigError("validating split must retain labeled category coverage")
-        if not labeled_categories.issubset(dev_categories | val_categories):
-            raise BootstrapConfigError("dataset split lost labeled category coverage")
     development_rows = tuple(row_id for _, _, row_ids in development_groups for row_id in row_ids)
     validating_rows = tuple(row_id for _, _, row_ids in validating_groups for row_id in row_ids)
     normalized_groups = tuple(sorted(groups, key=lambda item: (item[1].casefold(), item[0].casefold(), item[2])))
     split_payload = {
-        "algorithm_version": "evaluation-core-split/v3",
+        "algorithm_version": "evaluation-core-split/v4",
         "normalized_groups": normalized_groups,
-        "development_groups": tuple(group[0] for group in development_groups),
-        "validating_groups": tuple(group[0] for group in validating_groups),
+        "development_group_ids": tuple(group[0] for group in development_groups),
+        "validating_group_ids": tuple(group[0] for group in validating_groups),
+        "development_case_count": len(development_rows),
+        "validating_case_count": len(validating_rows),
     }
+    split_hash = canonical_sha256(split_payload)
     return DatasetSplitResult(
-        algorithm_version="evaluation-core-split/v3",
-        split_hash=canonical_sha256(split_payload),
+        algorithm_version="evaluation-core-split/v4",
+        split_hash=split_hash,
         development=development_rows,
         validating=validating_rows,
         development_groups=tuple(group[0] for group in development_groups),
@@ -355,7 +404,25 @@ def split_dataset_rows(rows: Sequence[Mapping[str, object]]) -> DatasetSplitResu
 
 
 def compute_split_lineage_hash(split_result: DatasetSplitResult) -> str:
-    return split_result.split_hash
+    development_group_ids = tuple(sorted(split_result.development_groups, key=str.casefold))
+    validating_group_ids = tuple(sorted(split_result.validating_groups, key=str.casefold))
+    if set(group.casefold() for group in development_group_ids) & set(group.casefold() for group in validating_group_ids):
+        raise BootstrapConfigError("development and validating groups must not casefold-collide")
+    if len({row.casefold() for row in split_result.development}) != len(split_result.development):
+        raise BootstrapConfigError("development case IDs must not casefold-collide")
+    if len({row.casefold() for row in split_result.validating}) != len(split_result.validating):
+        raise BootstrapConfigError("validating case IDs must not casefold-collide")
+    payload = {
+        "algorithm_version": split_result.algorithm_version,
+        "normalized_groups": tuple(sorted(split_result.normalized_groups, key=lambda item: (item[1].casefold(), item[0].casefold(), item[2]))),
+        "development_group_ids": development_group_ids,
+        "validating_group_ids": validating_group_ids,
+        "development_case_ids": tuple(sorted(split_result.development, key=str.casefold)),
+        "validating_case_ids": tuple(sorted(split_result.validating, key=str.casefold)),
+        "development_case_count": len(split_result.development),
+        "validating_case_count": len(split_result.validating),
+    }
+    return canonical_sha256(payload)
 
 
 def validate_generated_rubric(document: Mapping[str, object]) -> None:
@@ -424,12 +491,13 @@ def validate_activation(*, cases: Sequence[Mapping[str, object]], guardrails: Se
             raise BootstrapConfigError(f"unsupported activation normalization kind: {kind}")
     if not (saw_scalar_headroom or saw_pass_fail_headroom):
         raise BootstrapConfigError("activation requires measurable headroom")
-    safety_rates = []
+    content_safety_rates = []
     for index, guardrail in enumerate(guardrails):
         item = _require_mapping(guardrail, field=f"guardrails[{index}]")
-        if _require_string(item.get("name"), field=f"guardrails[{index}].name").casefold() == "content safety":
-            safety_rates.append(_require_finite_number(item.get("pass_rate"), field=f"guardrails[{index}].pass_rate"))
-    if not safety_rates or any(rate != 1.0 for rate in safety_rates):
+        evaluator_id = _require_string(item.get("evaluator_id"), field=f"guardrails[{index}].evaluator_id")
+        if evaluator_id == _CONTENT_SAFETY_EVALUATOR_ID:
+            content_safety_rates.append(_require_finite_number(item.get("pass_rate"), field=f"guardrails[{index}].pass_rate"))
+    if not content_safety_rates or any(rate != 1.0 for rate in content_safety_rates):
         raise BootstrapConfigError("Content Safety must be 100%")
     if generated_bundle is not None:
         bundle = _require_mapping(generated_bundle, field="generated_bundle")
@@ -516,24 +584,50 @@ def build_scoring_evidence(subject: Literal["baseline", "candidate", "validating
 
 
 def select_default_deployment_contract(defaults: Mapping[str, object]) -> DeploymentDefaults:
-    payload = dict(_require_mapping(defaults, field="defaults"))
+    payload = _require_mapping(defaults, field="defaults")
     _reject_prohibited_fields(payload, field="defaults")
     safe_persisted_document(payload)
-    hard_guardrails = payload.get("hard_guardrail_names")
-    if not isinstance(hard_guardrails, Sequence) or isinstance(hard_guardrails, (str, bytes)) or not hard_guardrails:
-        raise BootstrapConfigError("defaults.hard_guardrail_names must be a non-empty sequence")
-    names = tuple(_require_string(item, field="defaults.hard_guardrail_names[]") for item in hard_guardrails)
-    if len({name.casefold() for name in names}) != len(names):
-        raise BootstrapConfigError("defaults.hard_guardrail_names must be unique")
     try:
-        return DeploymentDefaults(
-            environment=_require_string(payload.get("environment"), field="defaults.environment"),
-            require_aligned_binding=_parse_bool(payload.get("require_aligned_binding"), field="defaults.require_aligned_binding"),
-            enabled=_parse_bool(payload.get("enabled"), field="defaults.enabled"),
-            hard_guardrail_names=names,
-        )
+        return DeploymentDefaults.model_validate(payload)
     except ValidationError as exc:
         raise BootstrapConfigError(str(exc)) from exc
+
+
+def _validate_activation_receipt(
+    receipt: ActivationReceipt,
+    *,
+    operation: ReplacementOperation,
+    generated_bundle: DefaultEvaluatorBundle,
+    canonical_split_lineage: str,
+    definitions: tuple[ImmutableDefinitionReference, ImmutableDefinitionReference],
+) -> None:
+    if receipt.operation_id != operation.operation_id:
+        raise BootstrapConfigError("activation receipt must match operation_id")
+    if receipt.runtime_repository != operation.runtime_repository:
+        raise BootstrapConfigError("activation receipt must match runtime_repository")
+    if receipt.runtime_commit != operation.runtime_commit:
+        raise BootstrapConfigError("activation receipt must match runtime_commit")
+    if receipt.repository_identity != operation.repository_identity:
+        raise BootstrapConfigError("activation receipt must match repository_identity")
+    if receipt.bundle_objective_hash != generated_bundle.objective.objective_hash:
+        raise BootstrapConfigError("activation receipt must match bundle objective hash")
+    if receipt.split_lineage_hash != canonical_split_lineage:
+        raise BootstrapConfigError("activation receipt must match split lineage hash")
+    development_definition, validating_definition = definitions
+    if development_definition.definition_id == validating_definition.definition_id:
+        raise BootstrapConfigError("development and validating definitions must be distinct")
+    if receipt.development_definition_id != development_definition.definition_id:
+        raise BootstrapConfigError("activation receipt must match development definition")
+    if receipt.validating_definition_id != validating_definition.definition_id:
+        raise BootstrapConfigError("activation receipt must match validating definition")
+    phases = {run.phase for run in receipt.runs}
+    if phases != {"development", "validating"}:
+        raise BootstrapConfigError("activation receipt must include development and validating runs")
+    content_safety_runs = [run for run in receipt.runs if run.evaluator_id == _CONTENT_SAFETY_EVALUATOR_ID]
+    if not content_safety_runs or any(run.passed is not True for run in content_safety_runs):
+        raise BootstrapConfigError("activation receipt must include passing content safety runs")
+    if receipt.cleanup.completed is not True:
+        raise BootstrapConfigError("activation receipt cleanup must be completed")
 
 
 def choose_default_evaluator_bundle(
@@ -553,7 +647,7 @@ def choose_default_evaluator_bundle(
     canonical_split_lineage = compute_split_lineage_hash(split_result)
     if development_dataset.dataset_id == validating_dataset.dataset_id:
         raise BootstrapConfigError("development and validating datasets must be distinct immutable references")
-    if persisted_split_lineage_hash != canonical_split_lineage or split_result.split_hash != canonical_split_lineage:
+    if persisted_split_lineage_hash != canonical_split_lineage:
         raise BootstrapConfigError("generated evaluator bundle split lineage hash mismatch")
     if existing_bundle is not None and not explicit_replace:
         return EvaluatorLifecycleResult(
@@ -593,7 +687,24 @@ def choose_default_evaluator_bundle(
         if parsed_operation is None:
             raise BootstrapConfigError("explicit replace requires operation metadata")
         if parsed_receipt is None:
-            raise BootstrapConfigError("explicit replace requires activation receipt")
+            return EvaluatorLifecycleResult(
+                action="replace",
+                active_bundle=existing_bundle,
+                previous_bundle=existing_bundle,
+                lineage_hash=canonical_sha256(existing_bundle.model_dump(mode="json")),
+                split_hash=canonical_split_lineage,
+                status=f"pending_activation:{parsed_operation.operation_id}",
+                attempted_bundle=generated_bundle,
+                activated_bundle=None,
+                retained_bundle=existing_bundle,
+            )
+        _validate_activation_receipt(
+            parsed_receipt,
+            operation=parsed_operation,
+            generated_bundle=generated_bundle,
+            canonical_split_lineage=canonical_split_lineage,
+            definitions=expected_definitions,
+        )
         if parsed_receipt.status == "failed":
             return EvaluatorLifecycleResult(
                 action="replace",
@@ -614,6 +725,7 @@ def choose_default_evaluator_bundle(
                 "repository_identity": parsed_operation.repository_identity,
                 "bundle_hash": canonical_sha256(generated_bundle.model_dump(mode="json")),
                 "activation_status": parsed_receipt.status,
+                "split_lineage_hash": canonical_split_lineage,
             }
         )
         return EvaluatorLifecycleResult(
@@ -627,14 +739,33 @@ def choose_default_evaluator_bundle(
             activated_bundle=generated_bundle,
             retained_bundle=existing_bundle,
         )
+    if parsed_operation is not None and parsed_receipt is not None:
+        _validate_activation_receipt(
+            parsed_receipt,
+            operation=parsed_operation,
+            generated_bundle=generated_bundle,
+            canonical_split_lineage=canonical_split_lineage,
+            definitions=expected_definitions,
+        )
+        return EvaluatorLifecycleResult(
+            action="generate",
+            active_bundle=generated_bundle if parsed_receipt.status == "succeeded" else existing_bundle or generated_bundle,
+            previous_bundle=existing_bundle,
+            lineage_hash=canonical_sha256(generated_bundle.model_dump(mode="json")),
+            split_hash=canonical_split_lineage,
+            status="generated_activated" if parsed_receipt.status == "succeeded" else "generated_activation_failed",
+            attempted_bundle=generated_bundle,
+            activated_bundle=generated_bundle if parsed_receipt.status == "succeeded" else None,
+            retained_bundle=existing_bundle,
+        )
     return EvaluatorLifecycleResult(
         action="generate",
-        active_bundle=generated_bundle,
+        active_bundle=existing_bundle or generated_bundle,
         previous_bundle=existing_bundle,
         lineage_hash=canonical_sha256(generated_bundle.model_dump(mode="json")),
         split_hash=canonical_split_lineage,
         status="generated_pending_activation",
         attempted_bundle=generated_bundle,
-        activated_bundle=generated_bundle,
+        activated_bundle=None,
         retained_bundle=existing_bundle,
     )

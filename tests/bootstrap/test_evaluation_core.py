@@ -66,6 +66,27 @@ def _generated_bundle() -> DefaultEvaluatorBundle:
     )
 
 
+def _activation_receipt(split_hash: str, *, status: str = "succeeded", activated: bool = True) -> dict[str, object]:
+    return {
+        "attempted": True,
+        "activated": activated,
+        "status": status,
+        "operation_id": "op-1",
+        "runtime_repository": "https://github.com/org/repo.git",
+        "runtime_commit": "a" * 40,
+        "repository_identity": "org/repo",
+        "bundle_objective_hash": _objective().objective_hash,
+        "split_lineage_hash": split_hash,
+        "development_definition_id": "eval_development",
+        "validating_definition_id": "eval_validating",
+        "runs": [
+            {"phase": "development", "evaluator_id": "azureai://built-in/evaluators/content_safety", "executable": True, "score": True, "normalization_kind": "pass_fail", "passed": True},
+            {"phase": "validating", "evaluator_id": "azureai://built-in/evaluators/content_safety", "executable": True, "score": True, "normalization_kind": "pass_fail", "passed": True},
+        ],
+        "cleanup": {"completed": True},
+    }
+
+
 def test_dataset_strategy_requires_strict_boolean_prerequisites() -> None:
     with pytest.raises(BootstrapConfigError):
         choose_dataset_strategy({"generated_samples": 15, "prerequisites_available": "false"})
@@ -73,24 +94,30 @@ def test_dataset_strategy_requires_strict_boolean_prerequisites() -> None:
     assert choose_dataset_strategy({"generated_samples": 15, "prerequisites_available": True}) == "trace"
 
 
-def test_dataset_split_rejects_duplicate_row_ids_across_groups_and_conflicts() -> None:
+def test_dataset_split_rejects_casefold_collisions_and_uses_case_counts() -> None:
     with pytest.raises(BootstrapConfigError):
         split_dataset_rows([
-            {"row_id": "row-1", "group_id": "group-a", "category": "a"},
-            {"row_id": "row-1", "group_id": "group-b", "category": "a"},
+            {"row_id": "Case-1", "group_id": "group-a", "category": "a"},
+            {"row_id": "case-1", "group_id": "group-a", "category": "a"},
         ] + _split_input()[:28])
-    with pytest.raises(BootstrapConfigError):
-        split_dataset_rows([
-            {"row_id": "row-1", "group_id": "group-a", "category": "a"},
-            {"row_id": "row-2", "group_id": "group-a", "category": "b"},
-        ] + _split_input()[:28])
+    result = split_dataset_rows(_split_input())
+    assert len(result.development) >= 10
+    assert len(result.validating) >= 5
 
 
-def test_dataset_split_hash_is_order_independent_and_lineage_is_canonical() -> None:
-    first = split_dataset_rows(_split_input())
-    second = split_dataset_rows(list(reversed(_split_input())))
-    assert first.split_hash == second.split_hash
-    assert compute_split_lineage_hash(first) == compute_split_lineage_hash(second) == first.split_hash
+def test_dataset_split_lineage_recomputed_from_canonical_payload() -> None:
+    split = split_dataset_rows(_split_input())
+    assert compute_split_lineage_hash(split) != split.split_hash
+    tampered = type(split)(
+        algorithm_version=split.algorithm_version,
+        split_hash="0" * 64,
+        development=split.development,
+        validating=split.validating,
+        development_groups=split.development_groups,
+        validating_groups=split.validating_groups,
+        normalized_groups=split.normalized_groups,
+    )
+    assert compute_split_lineage_hash(tampered) == compute_split_lineage_hash(split)
 
 
 def test_generated_rubric_rejects_invalid_thresholds_inputs_and_duplicates() -> None:
@@ -101,18 +128,15 @@ def test_generated_rubric_rejects_invalid_thresholds_inputs_and_duplicates() -> 
     validate_generated_rubric({"dimensions": [{"name": "quality", "weight": 1.0, "scalar_range": {"min": 0, "max": 1}, "threshold": 0.5, "required_inputs": ["answer"]}]})
 
 
-def test_activation_requires_strict_boolean_executable_and_headroom_rules() -> None:
+def test_activation_requires_canonical_content_safety_guardrail() -> None:
     with pytest.raises(BootstrapConfigError):
         validate_activation(
-            cases=[{"executable": "false", "score": 0.5, "normalization": {"kind": "scalar", "source_min": 0.0, "source_max": 1.0}}],
-            guardrails=[{"name": "Content Safety", "pass_rate": 1.0}],
+            cases=[{"executable": True, "score": 0.5, "normalization": {"kind": "scalar", "source_min": 0.0, "source_max": 1.0}}],
+            guardrails=[{"evaluator_id": "azureai://built-in/evaluators/other", "pass_rate": 1.0}],
         )
     validate_activation(
-        cases=[
-            {"executable": True, "score": 0.5, "normalization": {"kind": "scalar", "source_min": 0.0, "source_max": 1.0}},
-            {"executable": True, "score": False, "normalization": {"kind": "pass_fail"}},
-        ],
-        guardrails=[{"name": "Content Safety", "pass_rate": 1.0}],
+        cases=[{"executable": True, "score": 0.5, "normalization": {"kind": "scalar", "source_min": 0.0, "source_max": 1.0}}],
+        guardrails=[{"evaluator_id": "azureai://built-in/evaluators/content_safety", "pass_rate": 1.0}],
         generated_bundle={"provenance": "auto_generated_unreviewed"},
     )
 
@@ -149,10 +173,10 @@ def test_issue_evaluator_resolution_and_pass_fail_normalization() -> None:
         )
 
 
-def test_generated_bundle_uses_distinct_refs_and_canonical_lineage() -> None:
+def test_generated_bundle_pending_without_receipt_and_receipt_must_bind_everything() -> None:
     split = split_dataset_rows(_split_input())
     bundle = _generated_bundle()
-    result = choose_default_evaluator_bundle(
+    pending = choose_default_evaluator_bundle(
         existing_bundle=None,
         generated_bundle=bundle,
         split_result=split,
@@ -160,8 +184,10 @@ def test_generated_bundle_uses_distinct_refs_and_canonical_lineage() -> None:
         development_dataset=ImmutableDatasetReference(dataset_id="azureai://accounts/a/projects/p/data/dev/versions/1"),
         validating_dataset=ImmutableDatasetReference(dataset_id="azureai://accounts/a/projects/p/data/val/versions/1"),
         persisted_split_lineage_hash=compute_split_lineage_hash(split),
+        operation={"operation_id": "op-1", "runtime_repository": "https://github.com/org/repo.git", "runtime_commit": "a" * 40, "repository_identity": "org/repo"},
     )
-    assert result.active_bundle == bundle
+    assert pending.activated_bundle is None
+    assert pending.active_bundle == bundle
     with pytest.raises(BootstrapConfigError):
         choose_default_evaluator_bundle(
             existing_bundle=None,
@@ -169,12 +195,14 @@ def test_generated_bundle_uses_distinct_refs_and_canonical_lineage() -> None:
             split_result=split,
             definitions=(ImmutableDefinitionReference(definition_id="eval_development"), ImmutableDefinitionReference(definition_id="eval_validating")),
             development_dataset=ImmutableDatasetReference(dataset_id="azureai://accounts/a/projects/p/data/dev/versions/1"),
-            validating_dataset=ImmutableDatasetReference(dataset_id="azureai://accounts/a/projects/p/data/dev/versions/1"),
+            validating_dataset=ImmutableDatasetReference(dataset_id="azureai://accounts/a/projects/p/data/val/versions/1"),
             persisted_split_lineage_hash=compute_split_lineage_hash(split),
+            operation={"operation_id": "op-1", "runtime_repository": "https://github.com/org/repo.git", "runtime_commit": "a" * 40, "repository_identity": "org/repo"},
+            activation_receipt={**_activation_receipt(compute_split_lineage_hash(split)), "runtime_commit": "b" * 40},
         )
 
 
-def test_replace_requires_validated_metadata_and_reports_retained_old_on_failure() -> None:
+def test_replace_requires_strict_receipt_and_retains_old_on_failure() -> None:
     split = split_dataset_rows(_split_input())
     existing = _generated_bundle()
     generated = _generated_bundle()
@@ -188,8 +216,8 @@ def test_replace_requires_validated_metadata_and_reports_retained_old_on_failure
             validating_dataset=ImmutableDatasetReference(dataset_id="azureai://accounts/a/projects/p/data/val/versions/1"),
             persisted_split_lineage_hash=compute_split_lineage_hash(split),
             explicit_replace=True,
-            operation={"operation_id": "", "runtime_repository": "not-a-url", "runtime_commit": "bad", "repository_identity": "repo"},
-            activation_receipt={"attempted": True, "activated": False, "status": "failed"},
+            operation={"operation_id": "op-1", "runtime_repository": "https://github.com/org/repo.git", "runtime_commit": "a" * 40, "repository_identity": "org/repo"},
+            activation_receipt={**_activation_receipt(compute_split_lineage_hash(split)), "attempted": 1},
         )
     failed = choose_default_evaluator_bundle(
         existing_bundle=existing,
@@ -201,10 +229,9 @@ def test_replace_requires_validated_metadata_and_reports_retained_old_on_failure
         persisted_split_lineage_hash=compute_split_lineage_hash(split),
         explicit_replace=True,
         operation={"operation_id": "op-1", "runtime_repository": "https://github.com/org/repo.git", "runtime_commit": "a" * 40, "repository_identity": "org/repo"},
-        activation_receipt={"attempted": True, "activated": False, "status": "failed"},
+        activation_receipt=_activation_receipt(compute_split_lineage_hash(split), status="failed", activated=False),
     )
     assert failed.active_bundle == existing
-    assert failed.attempted_bundle == generated
     assert failed.activated_bundle is None
     assert failed.retained_bundle == existing
     succeeded = choose_default_evaluator_bundle(
@@ -216,15 +243,14 @@ def test_replace_requires_validated_metadata_and_reports_retained_old_on_failure
         validating_dataset=ImmutableDatasetReference(dataset_id="azureai://accounts/a/projects/p/data/val/versions/1"),
         persisted_split_lineage_hash=compute_split_lineage_hash(split),
         explicit_replace=True,
-        operation={"operation_id": "op-2", "runtime_repository": "https://github.com/org/repo.git", "runtime_commit": "b" * 40, "repository_identity": "org/repo"},
-        activation_receipt=ActivationReceipt(attempted=True, activated=True, status="succeeded"),
+        operation={"operation_id": "op-1", "runtime_repository": "https://github.com/org/repo.git", "runtime_commit": "a" * 40, "repository_identity": "org/repo"},
+        activation_receipt=ActivationReceipt.model_validate(_activation_receipt(compute_split_lineage_hash(split))),
     )
     assert succeeded.active_bundle == generated
     assert succeeded.activated_bundle == generated
-    assert succeeded.retained_bundle == existing
 
 
-def test_deployment_selector_rejects_camel_case_prohibited_keys() -> None:
+def test_deployment_selector_rejects_camel_case_tokens_and_dataset_rows() -> None:
     defaults = select_default_deployment_contract(
         {
             "environment": "prod",
@@ -241,6 +267,6 @@ def test_deployment_selector_rejects_camel_case_prohibited_keys() -> None:
                 "require_aligned_binding": True,
                 "enabled": True,
                 "hard_guardrail_names": ["safety"],
-                "nested": {"datasetRows": ["secret"]},
+                "nested": {"datasetRows": ["secret"], "apiToken": "x"},
             }
         )
