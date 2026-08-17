@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import UTC, datetime
+import json
 
+import httpx
+import openai
 import pytest
 from azure.core.exceptions import HttpResponseError, ResourceNotFoundError, ServiceRequestError
 
@@ -16,6 +19,12 @@ from foundry_opt.bootstrap.providers.foundry import (
     FoundryRollbackError,
     FoundryUnsupportedCapabilityError,
 )
+
+
+def _not_found_error() -> openai.NotFoundError:
+    response = httpx.Response(404, request=httpx.Request('GET', 'https://example.test'))
+    return openai.NotFoundError('not found', response=response, body=None)
+
 
 
 class _Cred:
@@ -63,10 +72,13 @@ class _Poller:
 
 
 class _Jobs:
-    def __init__(self, create_results: list[object] | None = None, list_result: list[object] | None = None) -> None:
+    def __init__(self, create_results: list[object] | None = None, list_result: list[object] | None = None, *, versions: dict[tuple[str, str], object] | None = None, fail_delete_version: set[tuple[str, str]] | None = None) -> None:
         self.create_calls: list[tuple[object, str | None, str | None]] = []
         self.create_results = list(create_results or [])
         self.list_result = list_result or []
+        self.versions = versions or {}
+        self.delete_version_calls: list[tuple[str, str]] = []
+        self.fail_delete_version = fail_delete_version or set()
 
     def begin_create_generation_job(self, job: object, *, operation_id: str | None = None, continuation_token: str | None = None, **kwargs: object) -> object:
         del kwargs
@@ -84,11 +96,26 @@ class _Jobs:
         del name, kwargs
         return list(self.list_result)
 
+    def get_version(self, name: str, version: str, **kwargs: object) -> object:
+        del kwargs
+        if (name, version) not in self.versions:
+            raise ResourceNotFoundError(message='not found')
+        return self.versions[(name, version)]
+
+    def delete_version(self, name: str, version: str, **kwargs: object) -> None:
+        del kwargs
+        if (name, version) in self.fail_delete_version:
+            raise RuntimeError('delete_version failed')
+        self.delete_version_calls.append((name, version))
+        self.versions.pop((name, version), None)
+
 
 class _Agents:
-    def __init__(self, items: list[object], versions: list[object] | None = None) -> None:
+    def __init__(self, items: list[object], versions: list[object] | None = None, *, fail_delete_version: set[tuple[str, str]] | None = None) -> None:
         self.items = items
         self.versions = versions or []
+        self.delete_version_calls: list[tuple[str, str]] = []
+        self.fail_delete_version = fail_delete_version or set()
 
     def list(self, **kwargs: object) -> list[object]:
         del kwargs
@@ -97,6 +124,13 @@ class _Agents:
     def list_versions(self, agent_name: str, **kwargs: object) -> list[object]:
         del agent_name, kwargs
         return list(self.versions)
+
+    def delete_version(self, agent_name: str, agent_version: str, **kwargs: object) -> None:
+        del kwargs
+        if (agent_name, agent_version) in self.fail_delete_version:
+            raise RuntimeError('delete_version failed')
+        self.delete_version_calls.append((agent_name, agent_version))
+
 
 
 class _Datasets:
@@ -171,14 +205,94 @@ class _Beta:
             self.evaluators = evaluators
 
 
+class _EvalObject:
+    def __init__(self, eval_id: str, name: str) -> None:
+        self.id = eval_id
+        self.name = name
+
+
+class _RunObject:
+    def __init__(self, run_id: str) -> None:
+        self.id = run_id
+
+
+class _OpenAIRuns:
+    def __init__(self) -> None:
+        self.create_calls: list[tuple[str, Mapping[str, object]]] = []
+        self.delete_calls: list[tuple[str, str]] = []
+        self.items: set[str] = set()
+        self._next_id = 0
+        self.fail_create = False
+
+    def create(self, eval_id: str, *, data_source: Mapping[str, object], name: str | None = None) -> _RunObject:
+        del name
+        if self.fail_create:
+            raise RuntimeError('run submission failed')
+        self.create_calls.append((eval_id, data_source))
+        self._next_id += 1
+        run_id = f'run-{self._next_id}'
+        self.items.add(run_id)
+        return _RunObject(run_id)
+
+    def retrieve(self, run_id: str, *, eval_id: str) -> _RunObject:
+        del eval_id
+        if run_id not in self.items:
+            raise _not_found_error()
+        return _RunObject(run_id)
+
+    def delete(self, run_id: str, *, eval_id: str) -> None:
+        self.delete_calls.append((eval_id, run_id))
+        self.items.discard(run_id)
+
+
+class _OpenAIEvals:
+    def __init__(self, existing: list[_EvalObject] | None = None) -> None:
+        self.items: dict[str, _EvalObject] = {item.id: item for item in (existing or [])}
+        self.create_calls: list[Mapping[str, object]] = []
+        self.delete_calls: list[str] = []
+        self.runs = _OpenAIRuns()
+        self._next_id = 0
+        self.fail_create = False
+
+    def list(self) -> list[_EvalObject]:
+        return list(self.items.values())
+
+    def create(self, *, data_source_config: Mapping[str, object], testing_criteria: list[Mapping[str, object]], name: str) -> _EvalObject:
+        if self.fail_create:
+            raise RuntimeError('eval creation failed')
+        self.create_calls.append({'data_source_config': data_source_config, 'testing_criteria': testing_criteria, 'name': name})
+        self._next_id += 1
+        created = _EvalObject(f'eval_{self._next_id}', name)
+        self.items[created.id] = created
+        return created
+
+    def retrieve(self, eval_id: str) -> _EvalObject:
+        if eval_id not in self.items:
+            raise _not_found_error()
+        return self.items[eval_id]
+
+    def delete(self, eval_id: str) -> None:
+        self.delete_calls.append(eval_id)
+        self.items.pop(eval_id, None)
+
+
+class _OpenAIClient:
+    def __init__(self, evals: _OpenAIEvals | None = None) -> None:
+        self.evals = evals or _OpenAIEvals()
+
+
 class _Client:
-    def __init__(self, *, beta: object | None = None, agents: object | None = None, datasets: object | None = None, connections: object | None = None, deployments: object | None = None, project: object | None = None) -> None:
+    def __init__(self, *, beta: object | None = None, agents: object | None = None, datasets: object | None = None, connections: object | None = None, deployments: object | None = None, project: object | None = None, openai_client: _OpenAIClient | None = None) -> None:
         self.beta = beta
         self.agents = agents or _Agents([])
         self.datasets = datasets or _Datasets([])
         self.connections = connections or _Connections([])
         self.deployments = deployments or _Deployments([])
         self.project = project
+        self._openai_client = openai_client or _OpenAIClient()
+
+    def get_openai_client(self) -> _OpenAIClient:
+        return self._openai_client
 
 
 def _plan() -> BootstrapPlan:
@@ -426,3 +540,235 @@ def test_keyword_signatures_and_default_hash_normalization() -> None:
     one = adapter.create_dataset_generation_job({'sources': [{'type': 'agent', 'agent_name': 'a'}], 'options': {'type': 'simple_qna', 'max_samples': 30, 'model_options': {'model': 'gpt-4o'}}})
     two = adapter.create_dataset_generation_job({'name': 'foundry-opt-data-generation', 'scenario': 'evaluation', 'sources': [{'type': 'agent', 'agent_name': 'a'}], 'options': {'type': 'simple_qna', 'max_samples': 30, 'model_options': {'model': 'gpt-4o'}}})
     assert one.operation_id == two.operation_id
+
+
+# --- Evaluation onboarding (issue #10): evaluator / evaluation_definition / activation_run /
+# --- activation_cleanup action kinds, and the false-success regression fix. ---
+
+_CS_ID = 'azureai://built-in/evaluators/content_safety'
+
+
+def _activation_case(phase: str, evaluator_id: str, *, score: float = 1.0, normalization_kind: str = 'pass_fail', source_min: float | None = None, source_max: float | None = None, executable: bool = True) -> dict[str, object]:
+    return {'phase': phase, 'evaluator_id': evaluator_id, 'executable': executable, 'normalization_kind': normalization_kind, 'score': score, 'source_min': source_min, 'source_max': source_max}
+
+
+def _activation_guardrail(phase: str, evaluator_id: str, pass_rate: float = 1.0) -> dict[str, object]:
+    return {'phase': phase, 'evaluator_id': evaluator_id, 'pass_rate': pass_rate}
+
+
+def _default_activation_payload() -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    cases = [
+        _activation_case('development', _CS_ID, score=1.0),
+        _activation_case('development', 'quality-metric', score=0.8, normalization_kind='scalar', source_min=0.0, source_max=1.0),
+        _activation_case('validating', _CS_ID, score=1.0),
+        _activation_case('validating', 'quality-metric', score=0.8, normalization_kind='scalar', source_min=0.0, source_max=1.0),
+    ]
+    guardrails = [_activation_guardrail('development', _CS_ID, 1.0), _activation_guardrail('validating', _CS_ID, 1.0)]
+    return cases, guardrails
+
+
+def _activation_diagnostics(
+    *,
+    development_definition_name: str = 'dev-def',
+    validating_definition_name: str = 'val-def',
+    draft_agent_name: str = 'draft-agent',
+    draft_agent_version: str = '1',
+    model_deployment: str = 'gpt-4o',
+    bundle_objective_hash: str = 'b' * 64,
+    split_lineage_hash: str = 's' * 64,
+    cases: list[dict[str, object]] | None = None,
+    guardrails: list[dict[str, object]] | None = None,
+) -> tuple[str, ...]:
+    default_cases, default_guardrails = _default_activation_payload()
+    payload = {'cases': cases if cases is not None else default_cases, 'guardrails': guardrails if guardrails is not None else default_guardrails}
+    return (development_definition_name, validating_definition_name, draft_agent_name, draft_agent_version, model_deployment, bundle_objective_hash, split_lineage_hash, json.dumps(payload, sort_keys=True))
+
+
+def _definition_diagnostics(role: str, definition_name: str, *, dataset_name: str = 'dataset-a', dataset_version: str = '1', evaluator_name: str = 'content-safety', evaluator_version: str = '1', evaluator_kind: str = 'builtin', model_deployment: str = 'gpt-4o') -> tuple[str, ...]:
+    return (role, definition_name, dataset_name, dataset_version, evaluator_name, evaluator_version, evaluator_kind, model_deployment)
+
+
+def _evaluator_diagnostics(name: str, version: str, kind: str, provenance: str, job_id: str = '') -> tuple[str, ...]:
+    return (name, version, kind, provenance, job_id)
+
+
+def _cleanup_diagnostics(draft_agent_name: str, draft_agent_version: str) -> tuple[str, ...]:
+    return (draft_agent_name, draft_agent_version)
+
+
+def test_false_success_regression_unsupported_kind_rejected_before_mutation() -> None:
+    datasets = _Datasets([], gets={})
+    adapter = FoundryAdapter('https://account.services.ai.azure.com/api/projects/demo', _Cred(), client=_Client(beta=_Beta(datasets=_Jobs(create_results=[]), evaluators=_Jobs(create_results=[])), datasets=datasets))
+    plan = BootstrapPlan.create(
+        operation_id='u' * 64,
+        runtime_repository='https://github.com/example/runtime.git',
+        runtime_commit='a' * 40,
+        repository_identity='org/repo',
+        actions=(
+            BootstrapAction(action_id='dataset-a:1', phase='evaluations', stage='planned', kind='dataset', diagnostics=('dataset-a', '1', 'https://blob/data.jsonl', 'uri_file')),
+            BootstrapAction(action_id='mystery:1', phase='evaluations', stage='planned', kind='mystery_resource_kind', diagnostics=('a', 'b')),
+        ),
+    )
+    with pytest.raises(FoundryUnsupportedCapabilityError):
+        adapter.apply_resources(plan)
+    # No mutation of any kind occurred: an unsupported action must never yield a partial,
+    # success-shaped receipt.
+    assert datasets.create_calls == []
+
+
+def test_evaluator_builtin_reuse_and_custom_generated_lineage() -> None:
+    evaluators = _Jobs(
+        list_result=[_SdkValue({'name': 'content-safety', 'version': '1', 'id': 'azureai://built-in/evaluators/content_safety', 'evaluator_type': 'builtin'})],
+        versions={('quality-eval', '2'): _SdkValue({'name': 'quality-eval', 'version': '2', 'id': 'azureai://accounts/a/projects/p/evaluators/quality-eval/versions/2', 'evaluator_type': 'custom', 'generation_job_id': 'job-123'})},
+    )
+    adapter = FoundryAdapter('https://account.services.ai.azure.com/api/projects/demo', _Cred(), client=_Client(beta=_Beta(datasets=_Jobs(create_results=[]), evaluators=evaluators)))
+    reused = adapter.adopt_or_verify_evaluator(adapter._evaluator_request_from_action(BootstrapAction(action_id='e1', phase='evaluations', stage='planned', kind='evaluator', diagnostics=_evaluator_diagnostics('content-safety', '1', 'builtin', 'reused_existing'))))
+    assert reused['created'] is False
+    assert reused['adopted'] is True
+    assert reused['resource_id'] == 'azureai://built-in/evaluators/content_safety'
+    generated = adapter.adopt_or_verify_evaluator(adapter._evaluator_request_from_action(BootstrapAction(action_id='e2', phase='evaluations', stage='planned', kind='evaluator', diagnostics=_evaluator_diagnostics('quality-eval', '2', 'custom', 'auto_generated_unreviewed', 'job-123'))))
+    assert generated['created'] is True
+    assert generated['resource_id'] == 'azureai://accounts/a/projects/p/evaluators/quality-eval/versions/2'
+    with pytest.raises(FoundryPrerequisiteError):
+        adapter.adopt_or_verify_evaluator(adapter._evaluator_request_from_action(BootstrapAction(action_id='e3', phase='evaluations', stage='planned', kind='evaluator', diagnostics=_evaluator_diagnostics('quality-eval', '2', 'custom', 'auto_generated_unreviewed', 'job-999'))))
+
+
+def test_evaluator_generated_without_job_id_rejected() -> None:
+    adapter = FoundryAdapter('https://account.services.ai.azure.com/api/projects/demo', _Cred(), client=_Client(beta=_Beta(datasets=_Jobs(create_results=[]), evaluators=_Jobs(create_results=[]))))
+    action = BootstrapAction(action_id='evaluator-bad:1', phase='evaluations', stage='planned', kind='evaluator', diagnostics=_evaluator_diagnostics('quality-eval', '2', 'custom', 'auto_generated_unreviewed', ''))
+    with pytest.raises(FoundryPrerequisiteError):
+        adapter._evaluator_request_from_action(action)
+
+
+def test_evaluation_definition_create_and_adopt_by_name() -> None:
+    evals = _OpenAIEvals(existing=[_EvalObject('eval_existing', 'val-def')])
+    client = _Client(beta=_Beta(datasets=_Jobs(create_results=[]), evaluators=_Jobs(create_results=[])), openai_client=_OpenAIClient(evals=evals))
+    adapter = FoundryAdapter('https://account.services.ai.azure.com/api/projects/demo', _Cred(), client=client)
+    create_request = adapter._definition_request_from_action(BootstrapAction(action_id='d1', phase='evaluations', stage='planned', kind='evaluation_definition', diagnostics=_definition_diagnostics('development', 'dev-def')))
+    created = adapter.create_or_adopt_evaluation_definition(create_request)
+    assert created['created'] is True
+    assert evals.create_calls[0]['name'] == 'dev-def'
+    assert evals.create_calls[0]['testing_criteria'][0]['type'] == 'python'
+    adopt_request = adapter._definition_request_from_action(BootstrapAction(action_id='d2', phase='evaluations', stage='planned', kind='evaluation_definition', diagnostics=_definition_diagnostics('validating', 'val-def')))
+    adopted = adapter.create_or_adopt_evaluation_definition(adopt_request)
+    assert adopted == {'created': False, 'adopted': True, 'definition': {'id': 'eval_existing', 'name': 'val-def'}, 'resource_id': 'eval_existing'}
+
+
+def test_evaluation_definition_invalid_role_rejected() -> None:
+    adapter = FoundryAdapter('https://account.services.ai.azure.com/api/projects/demo', _Cred(), client=_Client(beta=_Beta(datasets=_Jobs(create_results=[]), evaluators=_Jobs(create_results=[]))))
+    action = BootstrapAction(action_id='definition-bad:1', phase='evaluations', stage='planned', kind='evaluation_definition', diagnostics=_definition_diagnostics('staging', 'dev-def'))
+    with pytest.raises(FoundryPrerequisiteError):
+        adapter._definition_request_from_action(action)
+
+
+def test_activation_run_missing_content_safety_phase_rejected() -> None:
+    adapter = FoundryAdapter('https://account.services.ai.azure.com/api/projects/demo', _Cred(), client=_Client(beta=_Beta(datasets=_Jobs(create_results=[]), evaluators=_Jobs(create_results=[]))))
+    cases = [
+        _activation_case('development', _CS_ID, score=1.0),
+        _activation_case('validating', 'quality-metric', score=0.8, normalization_kind='scalar', source_min=0.0, source_max=1.0),
+    ]
+    guardrails = [_activation_guardrail('development', _CS_ID, 1.0)]
+    action = BootstrapAction(action_id='activation-bad:1', phase='evaluations', stage='planned', kind='activation_run', diagnostics=_activation_diagnostics(cases=cases, guardrails=guardrails))
+    with pytest.raises(FoundryPrerequisiteError):
+        adapter._activation_request_from_action(action)
+
+
+def test_activation_cleanup_without_preceding_activation_run_rejected() -> None:
+    adapter = FoundryAdapter('https://account.services.ai.azure.com/api/projects/demo', _Cred(), client=_Client(beta=_Beta(datasets=_Jobs(create_results=[]), evaluators=_Jobs(create_results=[]))))
+    plan = BootstrapPlan.create(operation_id='k' * 64, runtime_repository='https://github.com/example/runtime.git', runtime_commit='a' * 40, repository_identity='org/repo', actions=(BootstrapAction(action_id='cleanup-only:1', phase='evaluations', stage='planned', kind='activation_cleanup', diagnostics=_cleanup_diagnostics('draft-agent', '1')),))
+    with pytest.raises(FoundryPrerequisiteError):
+        adapter.apply_resources(plan)
+
+
+def test_activation_content_safety_failure_gates_and_rolls_back_created_resources() -> None:
+    evaluators = _Jobs(versions={('quality-eval', '2'): _SdkValue({'name': 'quality-eval', 'version': '2', 'id': 'azureai://accounts/a/projects/p/evaluators/quality-eval/versions/2', 'evaluator_type': 'custom', 'generation_job_id': 'job-123'})})
+    evals = _OpenAIEvals()
+    client = _Client(beta=_Beta(datasets=_Jobs(create_results=[]), evaluators=evaluators), openai_client=_OpenAIClient(evals=evals))
+    adapter = FoundryAdapter('https://account.services.ai.azure.com/api/projects/demo', _Cred(), client=client)
+    failing_guardrails = [_activation_guardrail('development', _CS_ID, 0.9), _activation_guardrail('validating', _CS_ID, 1.0)]
+    actions = (
+        BootstrapAction(action_id='evaluator-quality:2', phase='evaluations', stage='planned', kind='evaluator', diagnostics=_evaluator_diagnostics('quality-eval', '2', 'custom', 'auto_generated_unreviewed', 'job-123')),
+        BootstrapAction(action_id='definition-dev:1', phase='evaluations', stage='planned', kind='evaluation_definition', diagnostics=_definition_diagnostics('development', 'dev-def', evaluator_name='quality-eval', evaluator_version='2', evaluator_kind='custom')),
+        BootstrapAction(action_id='definition-val:1', phase='evaluations', stage='planned', kind='evaluation_definition', diagnostics=_definition_diagnostics('validating', 'val-def', evaluator_name='quality-eval', evaluator_version='2', evaluator_kind='custom')),
+        BootstrapAction(action_id='activation-run:1', phase='evaluations', stage='planned', kind='activation_run', diagnostics=_activation_diagnostics(guardrails=failing_guardrails)),
+    )
+    plan = BootstrapPlan.create(operation_id='q' * 64, runtime_repository='https://github.com/example/runtime.git', runtime_commit='a' * 40, repository_identity='org/repo', actions=actions)
+    with pytest.raises(FoundryPrerequisiteError):
+        adapter.apply_resources(plan)
+    # Both phase runs were durably submitted as a real, structural-only audit record before the
+    # local gate rejected the bundle...
+    assert len(evals.runs.create_calls) == 2
+    # ...but the evaluator and both evaluation definitions created earlier in this same apply
+    # call were rolled back (created-only rollback; nothing pre-existing is ever touched).
+    assert evaluators.delete_version_calls == [('quality-eval', '2')]
+    assert len(evals.delete_calls) == 2
+    assert evals.items == {}
+
+
+def test_activation_headroom_failure_gates_and_rolls_back_created_resources() -> None:
+    saturated_cases = [
+        _activation_case('development', _CS_ID, score=1.0),
+        _activation_case('development', 'quality-metric', score=1.0, normalization_kind='scalar', source_min=0.0, source_max=1.0),
+        _activation_case('validating', _CS_ID, score=1.0),
+        _activation_case('validating', 'quality-metric', score=1.0, normalization_kind='scalar', source_min=0.0, source_max=1.0),
+    ]
+    evaluators = _Jobs(versions={('quality-eval', '2'): _SdkValue({'name': 'quality-eval', 'version': '2', 'id': 'azureai://accounts/a/projects/p/evaluators/quality-eval/versions/2', 'evaluator_type': 'custom', 'generation_job_id': 'job-123'})})
+    evals = _OpenAIEvals()
+    client = _Client(beta=_Beta(datasets=_Jobs(create_results=[]), evaluators=evaluators), openai_client=_OpenAIClient(evals=evals))
+    adapter = FoundryAdapter('https://account.services.ai.azure.com/api/projects/demo', _Cred(), client=client)
+    actions = (
+        BootstrapAction(action_id='evaluator-quality:2', phase='evaluations', stage='planned', kind='evaluator', diagnostics=_evaluator_diagnostics('quality-eval', '2', 'custom', 'auto_generated_unreviewed', 'job-123')),
+        BootstrapAction(action_id='definition-dev:1', phase='evaluations', stage='planned', kind='evaluation_definition', diagnostics=_definition_diagnostics('development', 'dev-def', evaluator_name='quality-eval', evaluator_version='2', evaluator_kind='custom')),
+        BootstrapAction(action_id='definition-val:1', phase='evaluations', stage='planned', kind='evaluation_definition', diagnostics=_definition_diagnostics('validating', 'val-def', evaluator_name='quality-eval', evaluator_version='2', evaluator_kind='custom')),
+        BootstrapAction(action_id='activation-run:1', phase='evaluations', stage='planned', kind='activation_run', diagnostics=_activation_diagnostics(cases=saturated_cases)),
+    )
+    plan = BootstrapPlan.create(operation_id='n' * 64, runtime_repository='https://github.com/example/runtime.git', runtime_commit='a' * 40, repository_identity='org/repo', actions=actions)
+    with pytest.raises(FoundryPrerequisiteError):
+        adapter.apply_resources(plan)
+    assert evaluators.delete_version_calls == [('quality-eval', '2')]
+    assert len(evals.delete_calls) == 2
+
+
+def test_full_evaluation_onboarding_lifecycle_apply_verify_rollback_restart() -> None:
+    datasets = _Datasets([], gets={('dataset-a', '1'): _SdkValue({'name': 'dataset-a', 'version': '1', 'id': 'azureai://accounts/a/projects/p/data/dataset-a/versions/1', 'type': 'uri_file', 'dataUri': 'https://blob/data.jsonl'})})
+    evaluators = _Jobs(
+        list_result=[_SdkValue({'name': 'content-safety', 'version': '1', 'id': 'azureai://built-in/evaluators/content_safety', 'evaluator_type': 'builtin'})],
+        versions={('quality-eval', '2'): _SdkValue({'name': 'quality-eval', 'version': '2', 'id': 'azureai://accounts/a/projects/p/evaluators/quality-eval/versions/2', 'evaluator_type': 'custom', 'generation_job_id': 'job-123'})},
+    )
+    agents = _Agents([])
+    evals = _OpenAIEvals()
+    client = _Client(beta=_Beta(datasets=_Jobs(create_results=[]), evaluators=evaluators), datasets=datasets, agents=agents, openai_client=_OpenAIClient(evals=evals))
+    adapter = FoundryAdapter('https://account.services.ai.azure.com/api/projects/demo', _Cred(), client=client)
+    actions = (
+        BootstrapAction(action_id='dataset-a:1', phase='evaluations', stage='planned', kind='dataset', diagnostics=('dataset-a', '1', 'https://blob/data.jsonl', 'uri_file')),
+        BootstrapAction(action_id='evaluator-cs:1', phase='evaluations', stage='planned', kind='evaluator', diagnostics=_evaluator_diagnostics('content-safety', '1', 'builtin', 'reused_existing')),
+        BootstrapAction(action_id='evaluator-quality:2', phase='evaluations', stage='planned', kind='evaluator', diagnostics=_evaluator_diagnostics('quality-eval', '2', 'custom', 'auto_generated_unreviewed', 'job-123')),
+        BootstrapAction(action_id='definition-dev:1', phase='evaluations', stage='planned', kind='evaluation_definition', diagnostics=_definition_diagnostics('development', 'dev-def', evaluator_name='quality-eval', evaluator_version='2', evaluator_kind='custom')),
+        BootstrapAction(action_id='definition-val:1', phase='evaluations', stage='planned', kind='evaluation_definition', diagnostics=_definition_diagnostics('validating', 'val-def', evaluator_name='quality-eval', evaluator_version='2', evaluator_kind='custom')),
+        BootstrapAction(action_id='activation-run:1', phase='evaluations', stage='planned', kind='activation_run', diagnostics=_activation_diagnostics()),
+        BootstrapAction(action_id='activation-cleanup:1', phase='evaluations', stage='planned', kind='activation_cleanup', diagnostics=_cleanup_diagnostics('draft-agent', '1')),
+    )
+    plan = BootstrapPlan.create(operation_id='l' * 64, runtime_repository='https://github.com/example/runtime.git', runtime_commit='a' * 40, repository_identity='org/repo', actions=actions)
+    receipt = adapter.apply_resources(plan)
+
+    assert set(receipt.adopted_actions) == {'dataset-a:1', 'evaluator-cs:1'}
+    assert set(receipt.created_actions) == {'evaluator-quality:2', 'definition-dev:1', 'definition-val:1', 'activation-run:1:development', 'activation-run:1:validating'}
+    assert receipt.changed_actions == ('activation-run:1', 'activation-cleanup:1')
+    assert len(evals.runs.create_calls) == 2
+    assert agents.delete_version_calls == [('draft-agent', '1')]
+
+    assert adapter.verify_resources(receipt) is True
+    state = adapter.export_provider_state(receipt)
+    restored = FoundryAdapter('https://account.services.ai.azure.com/api/projects/demo', _Cred(), client=client)
+    restored.restore_provider_state(state)
+    assert restored.verify_resources(receipt) is True
+
+    adapter.rollback_resources(receipt)
+    # Only resources *created* in this apply are removed: the custom evaluator, both new
+    # evaluation definitions, and the two activation-smoke audit runs.
+    assert evaluators.delete_version_calls == [('quality-eval', '2')]
+    assert len(evals.delete_calls) == 2
+    assert len(evals.runs.delete_calls) == 2
+    # Adopted/pre-existing assets are never deleted, regardless of rollback.
+    assert datasets.delete_calls == []
+    assert adapter.verify_rollback(receipt) is True

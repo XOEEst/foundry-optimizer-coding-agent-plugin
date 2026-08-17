@@ -87,6 +87,34 @@ def test_real_bearer_header_and_no_token_persistence() -> None:
     assert "secret-token" not in str(receipt)
 
 
+def test_planned_bindings_are_replayable_and_bind_role_approval() -> None:
+    provider = _provider(AzureTransportRecorder())
+    original = _plan(_uami(adopted=True), _role())
+
+    actions = tuple(provider.plan_bindings(original))
+    replay = _plan(*actions)
+
+    assert provider._planned_bindings(replay) == provider._planned_bindings(original)
+    role = next(action for action in actions if action.kind == "role-assignment")
+    tampered = role.model_copy(
+        update={
+            "diagnostics": tuple(
+                "approved_role_sha256=" + ("0" * 64)
+                if item.startswith("approved_role_sha256=")
+                else item
+                for item in role.diagnostics
+            )
+        }
+    )
+    with pytest.raises(
+        AzureProviderError,
+        match="drifted from planned approval fingerprint",
+    ):
+        provider._planned_bindings(
+            _plan(*(tampered if action is role else action for action in actions))
+        )
+
+
 def test_restore_reconciles_ambiguous_uami_before_verify_rollback() -> None:
     recorder = AzureTransportRecorder()
     provider = _provider(recorder)

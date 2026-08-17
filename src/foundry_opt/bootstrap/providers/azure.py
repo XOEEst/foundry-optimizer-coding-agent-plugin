@@ -184,13 +184,39 @@ class AzureArmRestProvider:
 
     def plan_bindings(self, plan: BootstrapPlan) -> Sequence[BootstrapAction]:
         planned = self._planned_bindings(plan)
-        actions: list[BootstrapAction] = []
+        identity = planned.identity
+        identity_diagnostics = [
+            f"subscription_id={identity.subscription_id}",
+            f"name={identity.name}",
+            f"adopted={'true' if identity.adopted else 'false'}",
+        ]
+        for key, value in (
+            ("resource_id", identity.resource_id),
+            ("client_id", identity.client_id),
+            ("object_id", identity.object_id),
+            ("principal_id", identity.principal_id),
+            ("tenant_id", identity.tenant_id),
+            ("location", identity.location),
+        ):
+            if value:
+                identity_diagnostics.append(f"{key}={value}")
+        actions: list[BootstrapAction] = [
+            BootstrapAction(
+                action_id="azure-identity",
+                phase="azure",
+                stage="planned",
+                kind=(
+                    "managed-identity"
+                    if identity.kind == "user_assigned_managed_identity"
+                    else "entra-application"
+                ),
+                diagnostics=tuple(identity_diagnostics),
+            )
+        ]
         for subject in planned.subjects:
             actions.append(BootstrapAction(action_id=f"azure-fic-{subject.rsplit(':',1)[-1]}", phase="azure", stage="planned", kind="federated-credential", diagnostics=(f"subject={subject}",)))
         for role in planned.roles:
             actions.append(BootstrapAction(action_id=f"azure-rbac-{role.role_key}", phase="azure", stage="planned", kind="role-assignment", diagnostics=(f"scope={role.scope}", f"role={role.role_key}", f"role_definition_id={role.role_definition_id}", f"approved_role_sha256={role.approval_fingerprint}")))
-        if planned.identity.kind == "user_assigned_managed_identity" and not planned.identity.adopted:
-            actions.append(BootstrapAction(action_id="azure-uami-create", phase="azure", stage="planned", kind="managed-identity", diagnostics=(f"resource_id={planned.identity.resource_id}", f"location={planned.identity.location}")))
         return tuple(actions)
 
     def apply_bindings(self, plan: BootstrapPlan) -> BootstrapReceipt:
@@ -622,7 +648,11 @@ class AzureArmRestProvider:
                 raise AzureProviderError(f"approved_role_definitions.{role_key} must be configured")
             scope = _canonical_scope(_text(data.get("scope"), field="scope"), identity.subscription_id)
             role_definition_id = _canonical_role_definition_id(_text(self._approved_role_definitions.get(role_key), field=f"approved_role_definitions.{role_key}"), identity.subscription_id)
-            roles.append(PlannedRoleAssignment(role_key=role_key, scope=scope, role_definition_id=role_definition_id, approval_fingerprint=_approval_fingerprint(scope, role_definition_id)))
+            approval_fingerprint = _approval_fingerprint(scope, role_definition_id)
+            planned_fingerprint = _optional_text(data.get("approved_role_sha256"))
+            if planned_fingerprint is not None and planned_fingerprint != approval_fingerprint:
+                raise AzureProviderError("approved role mapping drifted from planned approval fingerprint")
+            roles.append(PlannedRoleAssignment(role_key=role_key, scope=scope, role_definition_id=role_definition_id, approval_fingerprint=approval_fingerprint))
         return PlannedBindingSet(identity=identity, roles=tuple(roles), subjects=_subjects(plan.repository_identity))
 
     def _assert_role_approval(self, role: PlannedRoleAssignment) -> None:

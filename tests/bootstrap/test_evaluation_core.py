@@ -141,6 +141,43 @@ def test_activation_requires_canonical_content_safety_guardrail() -> None:
     )
 
 
+def test_activation_rejects_saturated_cases_with_no_measurable_headroom() -> None:
+    guardrails = [{"evaluator_id": "azureai://built-in/evaluators/content_safety", "pass_rate": 1.0}]
+    with pytest.raises(BootstrapConfigError):
+        validate_activation(
+            cases=[
+                {"executable": True, "score": 1.0, "normalization": {"kind": "scalar", "source_min": 0.0, "source_max": 1.0}},
+                {"executable": True, "score": 1.0, "normalization": {"kind": "pass_fail"}},
+            ],
+            guardrails=guardrails,
+        )
+    validate_activation(
+        cases=[
+            {"executable": True, "score": 1.0, "normalization": {"kind": "scalar", "source_min": 0.0, "source_max": 1.0}},
+            {"executable": True, "score": 0.8, "normalization": {"kind": "scalar", "source_min": 0.0, "source_max": 1.0}},
+        ],
+        guardrails=guardrails,
+    )
+
+
+def test_activation_rejects_content_safety_below_full_pass_rate() -> None:
+    cases = [{"executable": True, "score": 0.5, "normalization": {"kind": "scalar", "source_min": 0.0, "source_max": 1.0}}]
+    with pytest.raises(BootstrapConfigError):
+        validate_activation(
+            cases=cases,
+            guardrails=[{"evaluator_id": "azureai://built-in/evaluators/content_safety", "pass_rate": 0.99}],
+        )
+    with pytest.raises(BootstrapConfigError):
+        validate_activation(
+            cases=cases,
+            guardrails=[
+                {"evaluator_id": "azureai://built-in/evaluators/content_safety", "pass_rate": 1.0},
+                {"evaluator_id": "azureai://built-in/evaluators/content_safety", "pass_rate": 0.5},
+            ],
+        )
+    validate_activation(cases=cases, guardrails=[{"evaluator_id": "azureai://built-in/evaluators/content_safety", "pass_rate": 1.0}])
+
+
 def test_issue_evaluator_resolution_and_pass_fail_normalization() -> None:
     resolved = resolve_issue_evaluators(
         {"evaluators": [

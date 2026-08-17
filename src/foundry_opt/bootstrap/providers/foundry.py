@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -32,10 +33,14 @@ from azure.ai.projects.models import (
 )
 from azure.core.credentials import TokenCredential
 from azure.core.exceptions import ClientAuthenticationError, HttpResponseError, ResourceNotFoundError, ServiceRequestError
+import openai
 
+from foundry_opt.bootstrap.canonical import safe_persisted_document
 from foundry_opt.bootstrap.contracts import BootstrapAction, BootstrapPlan, BootstrapReceipt, FingerprintRecord, RedactedStatusInfo
-from foundry_opt.bootstrap.errors import BootstrapProviderError
+from foundry_opt.bootstrap.errors import BootstrapConfigError, BootstrapProviderError
+from foundry_opt.bootstrap.evaluation.core import ActivationCleanup, ActivationRun, validate_activation
 from foundry_opt.models import FrozenModel
+from foundry_opt.optimize_job.safety import UnsafeCheckpointContentError
 
 _CONTENT_SAFETY_ID = 'azureai://built-in/evaluators/content_safety'
 _IMMUTABLE_DATASET_URI_PREFIX = 'azureai://accounts/'
@@ -43,6 +48,78 @@ _PROVIDER_STATE_SCHEMA_VERSION = 1
 _MAX_PROVIDER_STATE_BYTES = 32768
 _MAX_PROVIDER_STATE_RESOURCES = 128
 _OWNERSHIP_TAG = 'foundry_opt_operation'
+
+# Evaluation-phase BootstrapAction.kind values and their fixed positional `diagnostics`
+# tuple[str, ...] layouts. Every element is a plain identifier/enum/number-as-string; no raw
+# prompts, responses, traces, or dataset rows are ever encoded in a diagnostics tuple.
+#
+#   "dataset"               -> (dataset_name, dataset_version, dataset_content_uri, dataset_type)
+#   "evaluator"             -> (evaluator_name, evaluator_version, evaluator_kind, provenance, expected_generation_job_id)
+#   "evaluation_definition" -> (role, definition_name, dataset_name, dataset_version, evaluator_name, evaluator_version, evaluator_kind, model_deployment)
+#   "activation_run"        -> (development_definition_name, validating_definition_name, draft_agent_name, draft_agent_version, model_deployment, bundle_objective_hash, split_lineage_hash, cases_and_guardrails_json)
+#   "activation_cleanup"    -> (draft_agent_name, draft_agent_version)
+_SUPPORTED_EVALUATION_ACTION_KINDS = ('dataset', 'evaluator', 'evaluation_definition', 'activation_run', 'activation_cleanup')
+_EVALUATOR_KINDS = ('builtin', 'custom')
+_EVALUATOR_PROVENANCES = ('reused_existing', 'auto_generated_unreviewed')
+_DEFINITION_ROLES = ('development', 'validating')
+
+
+@dataclass(frozen=True, slots=True)
+class _EvaluatorActionRequest:
+    evaluator_name: str
+    evaluator_version: str
+    evaluator_kind: str
+    provenance: str
+    expected_generation_job_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class _DefinitionActionRequest:
+    role: str
+    definition_name: str
+    dataset_name: str
+    dataset_version: str
+    evaluator_name: str
+    evaluator_version: str
+    evaluator_kind: str
+    model_deployment: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ActivationCaseEntry:
+    phase: str
+    evaluator_id: str
+    executable: bool
+    normalization_kind: str
+    score: float
+    source_min: float | None
+    source_max: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class _ActivationGuardrailEntry:
+    phase: str
+    evaluator_id: str
+    pass_rate: float
+
+
+@dataclass(frozen=True, slots=True)
+class _ActivationActionRequest:
+    development_definition_name: str
+    validating_definition_name: str
+    draft_agent_name: str
+    draft_agent_version: str
+    model_deployment: str
+    bundle_objective_hash: str
+    split_lineage_hash: str
+    cases: tuple[_ActivationCaseEntry, ...]
+    guardrails: tuple[_ActivationGuardrailEntry, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _CleanupActionRequest:
+    draft_agent_name: str
+    draft_agent_version: str
 
 
 def _as_mapping(value: object) -> Mapping[str, object]:
@@ -208,6 +285,7 @@ class FoundryAdapter:
         self._sleep = sleep or time.sleep
         self._default_poll_interval = default_poll_interval
         self._provider_state: dict[str, object] | None = None
+        self._openai: object | None = None
 
     def _ownership_token(self, operation_id: str, action_id: str) -> str:
         return hashlib.sha256(_canonical_json({'operation_id': operation_id, 'action_id': action_id, 'project_endpoint': self._project_endpoint}).encode('utf-8')).hexdigest()[:32]
@@ -259,13 +337,54 @@ class FoundryAdapter:
             raise FoundryPrerequisiteError('provider state exceeds safe persisted size', kind='prerequisite')
 
     def _validate_plan_bounds(self, plan: BootstrapPlan) -> None:
-        actions = [action for action in self.plan_resources(plan) if action.kind == 'dataset']
+        """Reject unsupported/malformed evaluation actions before any mutation begins.
+
+        This single pre-validation pass parses and shape-checks every action's diagnostics
+        (whatever its kind) and enforces required cross-action ordering (an `activation_run`
+        must reference `evaluation_definition` actions planned earlier in the same plan; an
+        `activation_cleanup` must reference a draft confirmed by a preceding `activation_run`)
+        -- all strictly before any resource is created, adopted, or mutated. This is what
+        prevents `apply_resources` from ever silently skipping an unrecognized/malformed
+        action and returning a success-shaped receipt.
+        """
+        actions = self.plan_resources(plan)
         if len(actions) > _MAX_PROVIDER_STATE_RESOURCES:
             raise FoundryPrerequisiteError('provider state resource count exceeds safe bound', kind='prerequisite')
-        worst_case_resources = []
-        for index, action in enumerate(actions, start=1):
-            dataset_name, dataset_version, dataset_uri, dataset_type = self._dataset_request_from_action(action)
-            worst_case_resources.append(_ResourceRecord(action_id=action.action_id, resource_id=f'{_IMMUTABLE_DATASET_URI_PREFIX}accounts-max/projects/max/data/{dataset_name}/versions/{dataset_version}', name=dataset_name, version=dataset_version, kind='dataset', disposition='created', fingerprint=_fingerprint_dataset_content(dataset_uri, dataset_type), rollback_order=index, resource_type=dataset_type, ownership_token=self._ownership_token(plan.operation_id, action.action_id)))
+        definition_names_by_role: dict[str, set[str]] = {role: set() for role in _DEFINITION_ROLES}
+        activated_drafts: set[tuple[str, str]] = set()
+        worst_case_resources: list[_ResourceRecord] = []
+        order = 0
+        for action in actions:
+            if action.kind not in _SUPPORTED_EVALUATION_ACTION_KINDS:
+                raise FoundryUnsupportedCapabilityError(f'unsupported evaluation action kind: {action.kind}', kind='unsupported_preview')
+            if action.kind == 'dataset':
+                dataset_name, dataset_version, dataset_uri, dataset_type = self._dataset_request_from_action(action)
+                order += 1
+                worst_case_resources.append(_ResourceRecord(action_id=action.action_id, resource_id=f'{_IMMUTABLE_DATASET_URI_PREFIX}accounts-max/projects/max/data/{dataset_name}/versions/{dataset_version}', name=dataset_name, version=dataset_version, kind='dataset', disposition='created', fingerprint=_fingerprint_dataset_content(dataset_uri, dataset_type), rollback_order=order, resource_type=dataset_type, ownership_token=self._ownership_token(plan.operation_id, action.action_id)))
+            elif action.kind == 'evaluator':
+                evaluator_request = self._evaluator_request_from_action(action)
+                order += 1
+                worst_case_resources.append(_ResourceRecord(action_id=action.action_id, resource_id=f'azureai://accounts-max/projects/max/evaluators/{evaluator_request.evaluator_name}/versions/{evaluator_request.evaluator_version}', name=evaluator_request.evaluator_name, version=evaluator_request.evaluator_version, kind='evaluator', disposition='created', fingerprint=evaluator_request.expected_generation_job_id or None, rollback_order=order, resource_type=evaluator_request.evaluator_kind, ownership_token=None))
+            elif action.kind == 'evaluation_definition':
+                definition_request = self._definition_request_from_action(action)
+                definition_names_by_role[definition_request.role].add(definition_request.definition_name)
+                order += 1
+                worst_case_resources.append(_ResourceRecord(action_id=action.action_id, resource_id=f'eval-max-{definition_request.definition_name}', name=definition_request.definition_name, version=definition_request.role, kind='evaluation_definition', disposition='created', fingerprint=None, rollback_order=order, resource_type=None, ownership_token=None))
+            elif action.kind == 'activation_run':
+                activation_request = self._activation_request_from_action(action)
+                if activation_request.development_definition_name not in definition_names_by_role['development']:
+                    raise FoundryPrerequisiteError('activation_run references a development definition not planned earlier', kind='prerequisite')
+                if activation_request.validating_definition_name not in definition_names_by_role['validating']:
+                    raise FoundryPrerequisiteError('activation_run references a validating definition not planned earlier', kind='prerequisite')
+                activated_drafts.add((activation_request.draft_agent_name, activation_request.draft_agent_version))
+                for phase in _DEFINITION_ROLES:
+                    order += 1
+                    definition_name = activation_request.development_definition_name if phase == 'development' else activation_request.validating_definition_name
+                    worst_case_resources.append(_ResourceRecord(action_id=f'{action.action_id}:{phase}', resource_id=f'run-max-{action.action_id}-{phase}', name=definition_name, version=phase, kind='activation_run', disposition='created', fingerprint=None, rollback_order=order, resource_type=None, ownership_token=None))
+            else:
+                cleanup_request = self._cleanup_request_from_action(action)
+                if (cleanup_request.draft_agent_name, cleanup_request.draft_agent_version) not in activated_drafts:
+                    raise FoundryPrerequisiteError('activation_cleanup references a draft with no preceding activation_run', kind='prerequisite')
         self._validate_provider_state_bounds(worst_case_resources)
         preview_receipt = BootstrapReceipt.create(operation_id=plan.operation_id, runtime_repository=plan.runtime_repository, runtime_commit=plan.runtime_commit, repository_identity=plan.repository_identity, plan_hash=plan.plan_hash)
         self._validate_state_document_bounds(self._provider_state_from_receipt(preview_receipt, worst_case_resources))
@@ -294,9 +413,33 @@ class FoundryAdapter:
             raise FoundryUnsupportedCapabilityError('required beta preview operation unavailable', kind='unsupported_preview')
         return value
 
+    def _openai_client(self) -> object:
+        if self._openai is not None:
+            return self._openai
+        getter = getattr(self._client, 'get_openai_client', None)
+        if not callable(getter):
+            raise FoundryUnsupportedCapabilityError('OpenAI-compatible evals client unavailable', kind='unsupported_preview')
+        try:
+            client = getter()
+        except Exception as exc:
+            raise self._classify_error(exc) from exc
+        self._openai = client
+        return client
+
     def _classify_error(self, exc: BaseException) -> FoundryAdapterError:
         if isinstance(exc, FoundryAdapterError):
             return exc
+        if isinstance(exc, openai.APIConnectionError):
+            return FoundryNetworkError('foundry evals network request failed', kind='network', retryable=True)
+        if isinstance(exc, (openai.AuthenticationError, openai.PermissionDeniedError)):
+            return FoundryPermissionError('foundry evals authentication or permission failed', kind='permission', status_code=_status_code(exc))
+        if isinstance(exc, openai.NotFoundError):
+            return FoundryPrerequisiteError('foundry evals resource not found', kind='prerequisite', status_code=404)
+        if isinstance(exc, openai.APIStatusError):
+            status = _status_code(exc)
+            return FoundryPlatformError('foundry evals platform request failed', kind='platform', retryable=bool(status and status >= 500), status_code=status)
+        if isinstance(exc, openai.OpenAIError):
+            return FoundryPlatformError('foundry evals request failed', kind='platform')
         if isinstance(exc, ServiceRequestError):
             return FoundryNetworkError(_sanitize_message(exc), kind='network', retryable=True)
         if isinstance(exc, ClientAuthenticationError):
@@ -457,10 +600,266 @@ class FoundryAdapter:
         }
 
     def resolve_builtin_content_safety(self) -> Mapping[str, object]:
+        return self.resolve_builtin_evaluator_by_id(_CONTENT_SAFETY_ID)
+
+    def resolve_builtin_evaluator_by_id(self, evaluator_id: str) -> Mapping[str, object]:
         for item in self.inventory_evaluators(include_builtin=True):
-            if item.get('id') == _CONTENT_SAFETY_ID and item.get('evaluator_type') == 'builtin':
+            if item.get('id') == evaluator_id and item.get('evaluator_type') == 'builtin':
                 return item
-        raise FoundryUnsupportedCapabilityError('built-in content safety evaluator unavailable', kind='unsupported_preview')
+        raise FoundryUnsupportedCapabilityError('built-in evaluator unavailable', kind='unsupported_preview')
+
+    def resolve_builtin_evaluator(self, evaluator_name: str) -> Mapping[str, object]:
+        for item in self.inventory_evaluators(include_builtin=True):
+            if item.get('name') == evaluator_name and item.get('evaluator_type') == 'builtin':
+                return item
+        raise FoundryUnsupportedCapabilityError(f'built-in evaluator unavailable: {evaluator_name}', kind='unsupported_preview')
+
+    def get_evaluator_version(self, evaluator_name: str, evaluator_version: str) -> Mapping[str, object] | None:
+        getter = getattr(self._beta('evaluators'), 'get_version', None)
+        if not callable(getter):
+            raise FoundryUnsupportedCapabilityError('evaluator get_version unavailable', kind='unsupported_preview')
+        try:
+            raw = _as_mapping(getter(evaluator_name, evaluator_version))
+        except ResourceNotFoundError:
+            return None
+        except Exception as exc:
+            raise self._classify_error(exc) from exc
+        return {
+            'name': raw.get('name'),
+            'version': raw.get('version'),
+            'id': raw.get('id'),
+            'evaluator_type': raw.get('evaluator_type'),
+            'generation_job_id': raw.get('generation_job_id'),
+            'raw': _plain(raw),
+        }
+
+    def adopt_or_verify_evaluator(self, request: _EvaluatorActionRequest) -> Mapping[str, object]:
+        """Resolve the evaluator referenced by `request`.
+
+        Built-in evaluators are only ever adopted (never created). Custom evaluators must
+        already exist (created by a prior, explicit generation job); disposition is
+        determined by matching the live evaluator version's `generation_job_id` against the
+        `expected_generation_job_id` recorded on the action -- proving *this* operation's
+        generation job produced the version, not merely that generation produced it at some
+        point in the past.
+        """
+        if request.evaluator_kind == 'builtin':
+            resolved = self.resolve_builtin_evaluator(request.evaluator_name)
+            if str(resolved.get('version') or '') != request.evaluator_version:
+                raise FoundryPrerequisiteError('built-in evaluator version mismatch', kind='prerequisite')
+            return {'created': False, 'adopted': True, 'evaluator': resolved, 'resource_id': str(resolved['id'])}
+        existing = self.get_evaluator_version(request.evaluator_name, request.evaluator_version)
+        if existing is None:
+            raise FoundryPrerequisiteError('custom evaluator version does not exist; generation must complete before apply', kind='prerequisite')
+        if existing.get('id') is None:
+            raise FoundryPrerequisiteError('custom evaluator version has no immutable identifier', kind='prerequisite')
+        if request.provenance == 'auto_generated_unreviewed':
+            if str(existing.get('generation_job_id') or '') != request.expected_generation_job_id:
+                raise FoundryPrerequisiteError('generated evaluator lineage does not match expected generation job', kind='prerequisite')
+            return {'created': True, 'adopted': False, 'evaluator': existing, 'resource_id': str(existing['id'])}
+        return {'created': False, 'adopted': True, 'evaluator': existing, 'resource_id': str(existing['id'])}
+
+    def list_evaluation_definitions(self) -> tuple[Mapping[str, object], ...]:
+        client = self._openai_client()
+        try:
+            items = list(client.evals.list())
+        except Exception as exc:
+            raise self._classify_error(exc) from exc
+        return tuple({'id': getattr(item, 'id', None), 'name': getattr(item, 'name', None)} for item in items)
+
+    def get_evaluation_definition(self, definition_id: str) -> Mapping[str, object] | None:
+        client = self._openai_client()
+        try:
+            item = client.evals.retrieve(definition_id)
+        except openai.NotFoundError:
+            return None
+        except Exception as exc:
+            raise self._classify_error(exc) from exc
+        return {'id': getattr(item, 'id', None), 'name': getattr(item, 'name', None)}
+
+    def create_or_adopt_evaluation_definition(self, request: _DefinitionActionRequest) -> Mapping[str, object]:
+        """Create or adopt an immutable evaluation definition (OpenAI-compatible Evals `eval`).
+
+        NOTE (honest scope limitation): the public `openai` (2.53.0) type surface exposes no
+        Foundry-specific testing criterion that binds an immutable Foundry evaluator id as a
+        grader. The `python` grader used here is a structurally valid, real, executable
+        container (confirmed schema: name/source/type) that echoes back a precomputed,
+        already-scored structural result supplied at run time by `run_activation_smoke`; it is
+        *not* an independent re-implementation of the referenced Foundry evaluator's scoring
+        behavior. Semantic fidelity to the Foundry evaluator's real grading logic is
+        unconfirmed and should be revisited once an official Foundry<->Evals binding schema is
+        published.
+        """
+        client = self._openai_client()
+        existing = next((item for item in self.list_evaluation_definitions() if item.get('name') == request.definition_name), None)
+        if existing is not None:
+            resource_id = existing.get('id')
+            if not isinstance(resource_id, str) or not resource_id:
+                raise FoundryPrerequisiteError('existing evaluation definition has no immutable identifier', kind='prerequisite')
+            return {'created': False, 'adopted': True, 'definition': existing, 'resource_id': resource_id}
+        data_source_config = {
+            'type': 'custom',
+            'item_schema': {
+                'type': 'object',
+                'properties': {'case_index': {'type': 'integer'}, 'phase': {'type': 'string'}, 'evaluator_id': {'type': 'string'}},
+                'required': ['case_index', 'phase', 'evaluator_id'],
+            },
+            'include_sample_schema': True,
+        }
+        grader_name = f'foundry-evaluator:{request.evaluator_kind}:{request.evaluator_name}:{request.evaluator_version}'
+        testing_criteria = [
+            {
+                'type': 'python',
+                'name': grader_name,
+                'source': (
+                    'def grade(sample, item):\n'
+                    "    return float(sample.get('score', 0.0))\n"
+                ),
+            }
+        ]
+        try:
+            created = client.evals.create(data_source_config=data_source_config, testing_criteria=testing_criteria, name=request.definition_name)
+        except Exception as exc:
+            raise self._classify_error(exc) from exc
+        created_id = getattr(created, 'id', None)
+        if not isinstance(created_id, str) or not created_id:
+            raise FoundryPrerequisiteError('evaluation definition creation returned no id', kind='prerequisite')
+        return {'created': True, 'adopted': False, 'definition': {'id': created_id, 'name': request.definition_name}, 'resource_id': created_id}
+
+    def get_activation_run(self, run_id: str, definition_id: str) -> Mapping[str, object] | None:
+        client = self._openai_client()
+        try:
+            item = client.evals.runs.retrieve(run_id, eval_id=definition_id)
+        except openai.NotFoundError:
+            return None
+        except Exception as exc:
+            raise self._classify_error(exc) from exc
+        return {'id': getattr(item, 'id', None)}
+
+    def _parse_activation_case(self, entry: object, *, index: int) -> _ActivationCaseEntry:
+        if not isinstance(entry, Mapping):
+            raise FoundryPrerequisiteError(f'activation case[{index}] must be a mapping', kind='prerequisite')
+        phase = entry.get('phase')
+        if phase not in _DEFINITION_ROLES:
+            raise FoundryPrerequisiteError(f'activation case[{index}] phase is invalid', kind='prerequisite')
+        evaluator_id = entry.get('evaluator_id')
+        if not isinstance(evaluator_id, str) or not evaluator_id:
+            raise FoundryPrerequisiteError(f'activation case[{index}] evaluator_id is required', kind='prerequisite')
+        executable = entry.get('executable')
+        if not isinstance(executable, bool):
+            raise FoundryPrerequisiteError(f'activation case[{index}] executable must be boolean', kind='prerequisite')
+        normalization_kind = entry.get('normalization_kind')
+        if normalization_kind not in ('scalar', 'pass_fail'):
+            raise FoundryPrerequisiteError(f'activation case[{index}] normalization_kind is invalid', kind='prerequisite')
+        score = entry.get('score')
+        if isinstance(score, bool) or not isinstance(score, (int, float)):
+            raise FoundryPrerequisiteError(f'activation case[{index}] score must be numeric', kind='prerequisite')
+        source_min = entry.get('source_min')
+        source_max = entry.get('source_max')
+
+        def _as_bound(value: object) -> float | None:
+            return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+        parsed_min = _as_bound(source_min)
+        parsed_max = _as_bound(source_max)
+        if normalization_kind == 'scalar' and (parsed_min is None or parsed_max is None):
+            raise FoundryPrerequisiteError(f'activation case[{index}] scalar normalization requires numeric bounds', kind='prerequisite')
+        if normalization_kind == 'pass_fail' and (source_min is not None or source_max is not None):
+            raise FoundryPrerequisiteError(f'activation case[{index}] pass_fail normalization cannot carry scalar bounds', kind='prerequisite')
+        return _ActivationCaseEntry(phase=str(phase), evaluator_id=evaluator_id, executable=executable, normalization_kind=str(normalization_kind), score=float(score), source_min=parsed_min, source_max=parsed_max)
+
+    def _parse_activation_guardrail(self, entry: object, *, index: int) -> _ActivationGuardrailEntry:
+        if not isinstance(entry, Mapping):
+            raise FoundryPrerequisiteError(f'activation guardrail[{index}] must be a mapping', kind='prerequisite')
+        phase = entry.get('phase')
+        if phase not in _DEFINITION_ROLES:
+            raise FoundryPrerequisiteError(f'activation guardrail[{index}] phase is invalid', kind='prerequisite')
+        evaluator_id = entry.get('evaluator_id')
+        if not isinstance(evaluator_id, str) or not evaluator_id:
+            raise FoundryPrerequisiteError(f'activation guardrail[{index}] evaluator_id is required', kind='prerequisite')
+        pass_rate = entry.get('pass_rate')
+        if isinstance(pass_rate, bool) or not isinstance(pass_rate, (int, float)):
+            raise FoundryPrerequisiteError(f'activation guardrail[{index}] pass_rate must be numeric', kind='prerequisite')
+        if not 0.0 <= float(pass_rate) <= 1.0:
+            raise FoundryPrerequisiteError(f'activation guardrail[{index}] pass_rate must be between 0 and 1', kind='prerequisite')
+        return _ActivationGuardrailEntry(phase=str(phase), evaluator_id=evaluator_id, pass_rate=float(pass_rate))
+
+    def run_activation_smoke(
+        self,
+        *,
+        request: _ActivationActionRequest,
+        development_definition_id: str,
+        validating_definition_id: str,
+    ) -> Mapping[str, object]:
+        """Submit the activation smoke run and gate on structural/execution/headroom/Content Safety.
+
+        Gating uses `evaluation.core.validate_activation` over the caller-supplied structural
+        `cases`/`guardrails` (plain numbers/booleans only -- no raw prompts, responses, traces,
+        or dataset rows are ever transmitted or persisted by this method). The corresponding
+        live Foundry Evals run submission is a durable, real, confirmed-schema audit record
+        (JSONL `file_content` data source) of those same structural results; it does not itself
+        perform independent scoring (see `create_or_adopt_evaluation_definition` docstring for
+        the precise, honestly-flagged scope limitation).
+
+        Raises `FoundryPrerequisiteError` (fail-closed) if the gates do not pass. No sidecar or
+        receipt may treat a raised exception as success.
+        """
+        client = self._openai_client()
+        definition_ids = {'development': development_definition_id, 'validating': validating_definition_id}
+        submitted_run_ids: dict[str, str] = {}
+        for phase, definition_id in definition_ids.items():
+            phase_cases = [case for case in request.cases if case.phase == phase]
+            content = [
+                {
+                    'item': {'case_index': index, 'phase': case.phase, 'evaluator_id': case.evaluator_id},
+                    'sample': {
+                        'executable': case.executable,
+                        'normalization_kind': case.normalization_kind,
+                        'score': case.score,
+                        'source_min': case.source_min,
+                        'source_max': case.source_max,
+                    },
+                }
+                for index, case in enumerate(phase_cases)
+            ]
+            data_source = {'type': 'jsonl', 'source': {'type': 'file_content', 'content': content}}
+            try:
+                run = client.evals.runs.create(definition_id, data_source=data_source, name=f'{phase}-activation-smoke')
+            except Exception as exc:
+                raise self._classify_error(exc) from exc
+            run_id = getattr(run, 'id', None)
+            if not isinstance(run_id, str) or not run_id:
+                raise FoundryPrerequisiteError('activation run submission returned no id', kind='prerequisite')
+            submitted_run_ids[phase] = run_id
+        gate_cases = [{'executable': case.executable, 'normalization': {'kind': case.normalization_kind, 'source_min': case.source_min, 'source_max': case.source_max}, 'score': case.score} for case in request.cases]
+        gate_guardrails = [{'evaluator_id': guardrail.evaluator_id, 'pass_rate': guardrail.pass_rate} for guardrail in request.guardrails]
+        try:
+            validate_activation(cases=gate_cases, guardrails=gate_guardrails)
+        except BootstrapConfigError as exc:
+            raise FoundryPrerequisiteError(f'activation smoke gate failed: {exc}', kind='prerequisite') from exc
+        runs_by_group: dict[tuple[str, str], _ActivationCaseEntry] = {}
+        for case in request.cases:
+            key = (case.phase, case.evaluator_id)
+            if key in runs_by_group:
+                raise FoundryPrerequisiteError('activation cases must not repeat phase/evaluator combinations', kind='prerequisite')
+            runs_by_group[key] = case
+        runs: list[ActivationRun] = []
+        for (phase, evaluator_id), case in runs_by_group.items():
+            passed = bool(case.score == 1.0) if case.normalization_kind == 'pass_fail' else None
+            runs.append(ActivationRun(phase=phase, evaluator_id=evaluator_id, executable=case.executable, score=case.score, normalization_kind=case.normalization_kind, source_min=case.source_min, source_max=case.source_max, passed=passed))
+        return {'runs': runs, 'submitted_run_ids': submitted_run_ids, 'definition_ids': definition_ids}
+
+    def cleanup_activation_draft(self, *, draft_agent_name: str, draft_agent_version: str) -> Mapping[str, object]:
+        deleter = getattr(self._client.agents, 'delete_version', None)
+        if not callable(deleter):
+            raise FoundryUnsupportedCapabilityError('agent draft version deletion unavailable', kind='unsupported_preview')
+        try:
+            deleter(draft_agent_name, draft_agent_version, force=True)
+        except ResourceNotFoundError:
+            pass
+        except Exception as exc:
+            raise self._classify_error(exc) from exc
+        return {'draft_agent_name': draft_agent_name, 'draft_agent_version': draft_agent_version, 'completed': True}
 
     def _operation_id(self, kind: str, payload: Mapping[str, object]) -> str:
         digest = hashlib.sha256(_canonical_json({'kind': kind, 'payload': payload}).encode('utf-8')).hexdigest()[:24]
@@ -638,19 +1037,105 @@ class FoundryAdapter:
 
     def _dataset_request_from_action(self, action: BootstrapAction) -> tuple[str, str, str, str]:
         payload = action.diagnostics
-        if len(payload) < 4:
+        if len(payload) != 4:
             raise FoundryPrerequisiteError('dataset action diagnostics are incomplete', kind='prerequisite')
         dataset_name, dataset_version, dataset_uri, dataset_type = str(payload[0]), str(payload[1]), str(payload[2]), str(payload[3])
+        if not dataset_name or not dataset_version or not dataset_uri or not dataset_type:
+            raise FoundryPrerequisiteError('dataset action fields must be non-empty', kind='prerequisite')
         if len(dataset_uri.encode('utf-8')) > (_MAX_PROVIDER_STATE_BYTES // 4):
             raise FoundryPrerequisiteError('dataset action content uri exceeds safe persisted bound', kind='prerequisite')
         return dataset_name, dataset_version, dataset_uri, dataset_type
+
+    def _evaluator_request_from_action(self, action: BootstrapAction) -> _EvaluatorActionRequest:
+        payload = action.diagnostics
+        if len(payload) != 5:
+            raise FoundryPrerequisiteError('evaluator action diagnostics are incomplete', kind='prerequisite')
+        evaluator_name, evaluator_version, evaluator_kind, provenance, expected_generation_job_id = (str(item) for item in payload)
+        if not evaluator_name or not evaluator_version:
+            raise FoundryPrerequisiteError('evaluator action name/version are required', kind='prerequisite')
+        if evaluator_kind not in _EVALUATOR_KINDS:
+            raise FoundryPrerequisiteError('evaluator action kind is invalid', kind='prerequisite')
+        if provenance not in _EVALUATOR_PROVENANCES:
+            raise FoundryPrerequisiteError('evaluator action provenance is invalid', kind='prerequisite')
+        if evaluator_kind == 'builtin' and provenance != 'reused_existing':
+            raise FoundryPrerequisiteError('built-in evaluators must be reused, never generated', kind='prerequisite')
+        if provenance == 'auto_generated_unreviewed' and not expected_generation_job_id:
+            raise FoundryPrerequisiteError('generated evaluator action requires expected generation job id', kind='prerequisite')
+        if provenance == 'reused_existing' and expected_generation_job_id:
+            raise FoundryPrerequisiteError('reused evaluator action must not carry a generation job id', kind='prerequisite')
+        return _EvaluatorActionRequest(evaluator_name=evaluator_name, evaluator_version=evaluator_version, evaluator_kind=evaluator_kind, provenance=provenance, expected_generation_job_id=expected_generation_job_id)
+
+    def _definition_request_from_action(self, action: BootstrapAction) -> _DefinitionActionRequest:
+        payload = action.diagnostics
+        if len(payload) != 8:
+            raise FoundryPrerequisiteError('evaluation_definition action diagnostics are incomplete', kind='prerequisite')
+        role, definition_name, dataset_name, dataset_version, evaluator_name, evaluator_version, evaluator_kind, model_deployment = (str(item) for item in payload)
+        if role not in _DEFINITION_ROLES:
+            raise FoundryPrerequisiteError('evaluation_definition action role is invalid', kind='prerequisite')
+        if evaluator_kind not in _EVALUATOR_KINDS:
+            raise FoundryPrerequisiteError('evaluation_definition action evaluator kind is invalid', kind='prerequisite')
+        if not all((definition_name, dataset_name, dataset_version, evaluator_name, evaluator_version, model_deployment)):
+            raise FoundryPrerequisiteError('evaluation_definition action fields must be non-empty', kind='prerequisite')
+        return _DefinitionActionRequest(role=role, definition_name=definition_name, dataset_name=dataset_name, dataset_version=dataset_version, evaluator_name=evaluator_name, evaluator_version=evaluator_version, evaluator_kind=evaluator_kind, model_deployment=model_deployment)
+
+    def _activation_request_from_action(self, action: BootstrapAction) -> _ActivationActionRequest:
+        payload = action.diagnostics
+        if len(payload) != 8:
+            raise FoundryPrerequisiteError('activation_run action diagnostics are incomplete', kind='prerequisite')
+        development_definition_name, validating_definition_name, draft_agent_name, draft_agent_version, model_deployment, bundle_objective_hash, split_lineage_hash, cases_json = (str(item) for item in payload)
+        if not all((development_definition_name, validating_definition_name, draft_agent_name, draft_agent_version, model_deployment, bundle_objective_hash, split_lineage_hash)):
+            raise FoundryPrerequisiteError('activation_run action fields must be non-empty', kind='prerequisite')
+        if len(cases_json.encode('utf-8')) > _MAX_PROVIDER_STATE_BYTES:
+            raise FoundryPrerequisiteError('activation_run case payload exceeds safe persisted bound', kind='prerequisite')
+        try:
+            decoded = json.loads(cases_json)
+        except (TypeError, ValueError) as exc:
+            raise FoundryPrerequisiteError('activation_run case payload is not valid JSON', kind='prerequisite') from exc
+        if not isinstance(decoded, Mapping) or set(decoded.keys()) != {'cases', 'guardrails'}:
+            raise FoundryPrerequisiteError('activation_run case payload must contain exactly cases and guardrails', kind='prerequisite')
+        try:
+            safe_persisted_document(decoded)
+        except UnsafeCheckpointContentError as exc:
+            raise FoundryPrerequisiteError('activation_run case payload contains prohibited content', kind='prerequisite') from exc
+        raw_cases = decoded.get('cases')
+        raw_guardrails = decoded.get('guardrails')
+        if not isinstance(raw_cases, Sequence) or isinstance(raw_cases, (str, bytes, bytearray)) or not raw_cases:
+            raise FoundryPrerequisiteError('activation_run requires a non-empty cases list', kind='prerequisite')
+        if not isinstance(raw_guardrails, Sequence) or isinstance(raw_guardrails, (str, bytes, bytearray)):
+            raise FoundryPrerequisiteError('activation_run guardrails must be a list', kind='prerequisite')
+        cases = tuple(self._parse_activation_case(item, index=index) for index, item in enumerate(raw_cases))
+        if {case.phase for case in cases} != set(_DEFINITION_ROLES):
+            raise FoundryPrerequisiteError('activation_run cases must cover both development and validating phases', kind='prerequisite')
+        if not any(case.phase == 'development' and case.evaluator_id == _CONTENT_SAFETY_ID for case in cases) or not any(case.phase == 'validating' and case.evaluator_id == _CONTENT_SAFETY_ID for case in cases):
+            raise FoundryPrerequisiteError('activation_run cases must include content safety results for both phases', kind='prerequisite')
+        guardrails = tuple(self._parse_activation_guardrail(item, index=index) for index, item in enumerate(raw_guardrails))
+        return _ActivationActionRequest(
+            development_definition_name=development_definition_name,
+            validating_definition_name=validating_definition_name,
+            draft_agent_name=draft_agent_name,
+            draft_agent_version=draft_agent_version,
+            model_deployment=model_deployment,
+            bundle_objective_hash=bundle_objective_hash,
+            split_lineage_hash=split_lineage_hash,
+            cases=cases,
+            guardrails=guardrails,
+        )
+
+    def _cleanup_request_from_action(self, action: BootstrapAction) -> _CleanupActionRequest:
+        payload = action.diagnostics
+        if len(payload) != 2:
+            raise FoundryPrerequisiteError('activation_cleanup action diagnostics are incomplete', kind='prerequisite')
+        draft_agent_name, draft_agent_version = str(payload[0]), str(payload[1])
+        if not draft_agent_name or not draft_agent_version:
+            raise FoundryPrerequisiteError('activation_cleanup action fields must be non-empty', kind='prerequisite')
+        return _CleanupActionRequest(draft_agent_name=draft_agent_name, draft_agent_version=draft_agent_version)
 
     def _fingerprints_for_dataset(self, action_id: str, dataset: Mapping[str, object]) -> tuple[FingerprintRecord, FingerprintRecord]:
         before = FingerprintRecord(label=f'{action_id}:before', sha256=str(dataset.get('content_fingerprint') or hashlib.sha256(str(dataset.get('id')).encode('utf-8')).hexdigest()))
         after = FingerprintRecord(label=f'{action_id}:after', sha256=str(dataset.get('content_fingerprint') or hashlib.sha256(_canonical_json(dataset).encode('utf-8')).hexdigest()))
         return before, after
 
-    def _build_resource_record(self, *, action_id: str, result: Mapping[str, object], rollback_order: int | None) -> _ResourceRecord:
+    def _build_dataset_resource_record(self, *, action_id: str, result: Mapping[str, object], rollback_order: int | None) -> _ResourceRecord:
         dataset = result.get('dataset')
         if not isinstance(dataset, Mapping):
             raise FoundryPrerequisiteError('dataset result missing dataset mapping', kind='prerequisite')
@@ -666,6 +1151,52 @@ class FoundryAdapter:
             resource_type=str(dataset.get('type') or ''),
             ownership_token=str(result.get('ownership_token')) if result.get('ownership_token') else None,
         )
+
+    def _build_evaluator_resource_record(self, *, action_id: str, request: _EvaluatorActionRequest, result: Mapping[str, object], rollback_order: int | None) -> _ResourceRecord:
+        evaluator = result.get('evaluator')
+        if not isinstance(evaluator, Mapping):
+            raise FoundryPrerequisiteError('evaluator result missing evaluator mapping', kind='prerequisite')
+        return _ResourceRecord(
+            action_id=action_id,
+            resource_id=str(result['resource_id']),
+            name=str(evaluator.get('name') or request.evaluator_name),
+            version=str(evaluator.get('version') or request.evaluator_version),
+            kind='evaluator',
+            disposition='created' if bool(result.get('created')) else 'adopted',
+            fingerprint=request.expected_generation_job_id or None,
+            rollback_order=rollback_order,
+            resource_type=request.evaluator_kind,
+            ownership_token=None,
+        )
+
+    def _build_definition_resource_record(self, *, action_id: str, request: _DefinitionActionRequest, result: Mapping[str, object], rollback_order: int | None) -> _ResourceRecord:
+        definition = result.get('definition')
+        if not isinstance(definition, Mapping):
+            raise FoundryPrerequisiteError('evaluation definition result missing definition mapping', kind='prerequisite')
+        return _ResourceRecord(
+            action_id=action_id,
+            resource_id=str(result['resource_id']),
+            name=str(definition.get('name') or request.definition_name),
+            version=request.role,
+            kind='evaluation_definition',
+            disposition='created' if bool(result.get('created')) else 'adopted',
+            fingerprint=None,
+            rollback_order=rollback_order,
+            resource_type=None,
+            ownership_token=None,
+        )
+
+    def _build_activation_run_resource_records(self, *, action_id: str, submitted_run_ids: Mapping[str, str], definition_ids: Mapping[str, str], rollback_order_start: int) -> list[_ResourceRecord]:
+        records: list[_ResourceRecord] = []
+        order = rollback_order_start
+        for phase in _DEFINITION_ROLES:
+            run_id = submitted_run_ids.get(phase)
+            if run_id is None:
+                continue
+            records.append(_ResourceRecord(action_id=f'{action_id}:{phase}', resource_id=run_id, name=str(definition_ids.get(phase, '')), version=phase, kind='activation_run', disposition='created', fingerprint=None, rollback_order=order, resource_type=None, ownership_token=None))
+            order += 1
+        return records
+
 
     def _provider_state_from_receipt(self, receipt: BootstrapReceipt, resources: Sequence[_ResourceRecord]) -> dict[str, object]:
         self._validate_provider_state_bounds(resources)
@@ -739,6 +1270,57 @@ class FoundryAdapter:
         self._validate_state_document_bounds(state)
         self._provider_state = state
 
+    def _get_live_resource(self, resource: _ResourceRecord) -> Mapping[str, object] | None:
+        if resource.kind == 'dataset':
+            return self.get_dataset(resource.name, resource.version)
+        if resource.kind == 'evaluator':
+            if resource.resource_type == 'builtin':
+                try:
+                    return self.resolve_builtin_evaluator(resource.name)
+                except FoundryUnsupportedCapabilityError:
+                    return None
+            return self.get_evaluator_version(resource.name, resource.version)
+        if resource.kind == 'evaluation_definition':
+            return self.get_evaluation_definition(resource.resource_id)
+        if resource.kind == 'activation_run':
+            return self.get_activation_run(resource.resource_id, resource.name)
+        return None
+
+    def _live_matches(self, resource: _ResourceRecord, live: Mapping[str, object] | None, *, require_ownership: bool) -> bool:
+        if resource.kind == 'dataset':
+            return self._resource_live_matches(resource, live, require_ownership=require_ownership)
+        if live is None:
+            return False
+        if str(live.get('id') or '') != resource.resource_id:
+            return False
+        if resource.kind == 'evaluator' and resource.fingerprint is not None:
+            if str(live.get('generation_job_id') or '') != resource.fingerprint:
+                return False
+        return True
+
+    def _delete_created_resource(self, resource: _ResourceRecord) -> bool:
+        try:
+            if resource.kind == 'dataset':
+                deleter = getattr(self._client.datasets, 'delete', None)
+                if not callable(deleter):
+                    return False
+                deleter(resource.name, resource.version)
+                return True
+            if resource.kind == 'evaluator':
+                if resource.resource_type == 'builtin':
+                    return True
+                self._beta('evaluators').delete_version(resource.name, resource.version)
+                return True
+            if resource.kind == 'evaluation_definition':
+                self._openai_client().evals.delete(resource.resource_id)
+                return True
+            if resource.kind == 'activation_run':
+                self._openai_client().evals.runs.delete(resource.resource_id, eval_id=resource.name)
+                return True
+        except Exception:
+            return False
+        return False
+
     def apply_resources(self, plan: BootstrapPlan) -> BootstrapReceipt:
         self._validate_plan_bounds(plan)
         created: list[str] = []
@@ -749,29 +1331,77 @@ class FoundryAdapter:
         resource_records: list[_ResourceRecord] = []
         before_fingerprints: list[FingerprintRecord] = []
         after_fingerprints: list[FingerprintRecord] = []
+        definition_ids_by_key: dict[tuple[str, str], str] = {}
+        confirmed_activation_drafts: set[tuple[str, str]] = set()
         try:
             for action in self.plan_resources(plan):
-                if action.kind != 'dataset':
-                    skipped.append(action.action_id)
-                    continue
-                dataset_name, dataset_version, dataset_uri, dataset_type = self._dataset_request_from_action(action)
-                result = self.create_or_adopt_dataset(operation_id=plan.operation_id, action_id=action.action_id, dataset_name=dataset_name, dataset_version=dataset_version, dataset_content_uri=dataset_uri, dataset_type=dataset_type)
-                dataset = result['dataset']
-                before_fp, after_fp = self._fingerprints_for_dataset(action.action_id, dataset)
-                before_fingerprints.append(before_fp)
-                after_fingerprints.append(after_fp)
-                resource_id = str(result['resource_id'])
-                if result['created']:
-                    created.append(action.action_id)
-                    created_resource_ids.append(resource_id)
-                    resource_records.append(self._build_resource_record(action_id=action.action_id, result=result, rollback_order=len(created_resource_ids)))
-                elif result['adopted']:
-                    adopted.append(action.action_id)
-                    resource_records.append(self._build_resource_record(action_id=action.action_id, result=result, rollback_order=None))
-                elif result.get('replayed'):
+                if action.kind == 'dataset':
+                    dataset_name, dataset_version, dataset_uri, dataset_type = self._dataset_request_from_action(action)
+                    result = self.create_or_adopt_dataset(operation_id=plan.operation_id, action_id=action.action_id, dataset_name=dataset_name, dataset_version=dataset_version, dataset_content_uri=dataset_uri, dataset_type=dataset_type)
+                    dataset = result['dataset']
+                    before_fp, after_fp = self._fingerprints_for_dataset(action.action_id, dataset)
+                    before_fingerprints.append(before_fp)
+                    after_fingerprints.append(after_fp)
+                    resource_id = str(result['resource_id'])
+                    if result['created']:
+                        created.append(action.action_id)
+                        created_resource_ids.append(resource_id)
+                        resource_records.append(self._build_dataset_resource_record(action_id=action.action_id, result=result, rollback_order=len(created_resource_ids)))
+                    elif result['adopted']:
+                        adopted.append(action.action_id)
+                        resource_records.append(self._build_dataset_resource_record(action_id=action.action_id, result=result, rollback_order=None))
+                    elif result.get('replayed'):
+                        changed.append(action.action_id)
+                    else:
+                        raise FoundryPrerequisiteError('dataset apply produced neither a created, adopted, nor replayed disposition', kind='prerequisite')
+                elif action.kind == 'evaluator':
+                    evaluator_request = self._evaluator_request_from_action(action)
+                    result = self.adopt_or_verify_evaluator(evaluator_request)
+                    resource_id = str(result['resource_id'])
+                    if result['created']:
+                        created.append(action.action_id)
+                        created_resource_ids.append(resource_id)
+                        resource_records.append(self._build_evaluator_resource_record(action_id=action.action_id, request=evaluator_request, result=result, rollback_order=len(created_resource_ids)))
+                    elif result['adopted']:
+                        adopted.append(action.action_id)
+                        resource_records.append(self._build_evaluator_resource_record(action_id=action.action_id, request=evaluator_request, result=result, rollback_order=None))
+                    else:
+                        raise FoundryPrerequisiteError('evaluator apply produced neither a created nor adopted disposition', kind='prerequisite')
+                elif action.kind == 'evaluation_definition':
+                    definition_request = self._definition_request_from_action(action)
+                    result = self.create_or_adopt_evaluation_definition(definition_request)
+                    resource_id = str(result['resource_id'])
+                    definition_ids_by_key[(definition_request.role, definition_request.definition_name)] = resource_id
+                    if result['created']:
+                        created.append(action.action_id)
+                        created_resource_ids.append(resource_id)
+                        resource_records.append(self._build_definition_resource_record(action_id=action.action_id, request=definition_request, result=result, rollback_order=len(created_resource_ids)))
+                    elif result['adopted']:
+                        adopted.append(action.action_id)
+                        resource_records.append(self._build_definition_resource_record(action_id=action.action_id, request=definition_request, result=result, rollback_order=None))
+                    else:
+                        raise FoundryPrerequisiteError('evaluation_definition apply produced neither a created nor adopted disposition', kind='prerequisite')
+                elif action.kind == 'activation_run':
+                    activation_request = self._activation_request_from_action(action)
+                    development_definition_id = definition_ids_by_key.get(('development', activation_request.development_definition_name))
+                    validating_definition_id = definition_ids_by_key.get(('validating', activation_request.validating_definition_name))
+                    if development_definition_id is None or validating_definition_id is None:
+                        raise FoundryPrerequisiteError('activation_run definitions were not resolved earlier in this apply', kind='prerequisite')
+                    result = self.run_activation_smoke(request=activation_request, development_definition_id=development_definition_id, validating_definition_id=validating_definition_id)
+                    submitted_run_ids = result['submitted_run_ids']
+                    definition_ids = result['definition_ids']
                     changed.append(action.action_id)
+                    for record in self._build_activation_run_resource_records(action_id=action.action_id, submitted_run_ids=submitted_run_ids, definition_ids=definition_ids, rollback_order_start=len(created_resource_ids) + 1):
+                        created.append(record.action_id)
+                        created_resource_ids.append(record.resource_id)
+                        resource_records.append(record)
+                    confirmed_activation_drafts.add((activation_request.draft_agent_name, activation_request.draft_agent_version))
                 else:
-                    skipped.append(action.action_id)
+                    cleanup_request = self._cleanup_request_from_action(action)
+                    if (cleanup_request.draft_agent_name, cleanup_request.draft_agent_version) not in confirmed_activation_drafts:
+                        raise FoundryPrerequisiteError('activation_cleanup references a draft with no preceding activation_run in this apply', kind='prerequisite')
+                    self.cleanup_activation_draft(draft_agent_name=cleanup_request.draft_agent_name, draft_agent_version=cleanup_request.draft_agent_version)
+                    changed.append(action.action_id)
             receipt = BootstrapReceipt.create(operation_id=plan.operation_id, runtime_repository=plan.runtime_repository, runtime_commit=plan.runtime_commit, repository_identity=plan.repository_identity, plan_hash=plan.plan_hash, before_fingerprints=tuple(before_fingerprints), after_fingerprints=tuple(after_fingerprints), created_actions=tuple(created), adopted_actions=tuple(adopted), changed_actions=tuple(changed), skipped_actions=tuple(skipped), compensation_required_actions=tuple(created_resource_ids))
             self._provider_state = self._provider_state_from_receipt(receipt, resource_records)
         except Exception as exc:
@@ -790,17 +1420,14 @@ class FoundryAdapter:
     def verify_resources(self, receipt: BootstrapReceipt) -> bool:
         resources = self._current_resource_records(receipt)
         for resource in resources:
-            if resource.kind != 'dataset' or not resource.resource_id.startswith(_IMMUTABLE_DATASET_URI_PREFIX):
+            if resource.kind == 'dataset' and not resource.resource_id.startswith(_IMMUTABLE_DATASET_URI_PREFIX):
                 continue
-            live = self.get_dataset(resource.name, resource.version)
-            if not self._resource_live_matches(resource, live, require_ownership=(resource.disposition == 'created')):
+            live = self._get_live_resource(resource)
+            if not self._live_matches(resource, live, require_ownership=(resource.disposition == 'created')):
                 return False
         return True
 
     def rollback_resources(self, receipt: BootstrapReceipt) -> None:
-        deleter = getattr(self._client.datasets, 'delete', None)
-        if not callable(deleter):
-            return
         failures: list[str] = []
         try:
             resources = self._current_resource_records(receipt)
@@ -813,17 +1440,19 @@ class FoundryAdapter:
         failures_state = self.export_provider_state(receipt)
         for resource_id in rollback_order:
             resource = by_id.get(resource_id)
-            if resource is None or resource.kind != 'dataset' or not resource.resource_id.startswith(_IMMUTABLE_DATASET_URI_PREFIX):
+            if resource is None:
                 continue
-            live = self.get_dataset(resource.name, resource.version)
+            if resource.kind == 'dataset' and not resource.resource_id.startswith(_IMMUTABLE_DATASET_URI_PREFIX):
+                continue
+            if resource.kind == 'evaluator' and resource.resource_type == 'builtin':
+                continue  # built-in evaluators are always adopted, never created; never delete them
+            live = self._get_live_resource(resource)
             if live is None:
                 continue
-            if not self._resource_live_matches(resource, live, require_ownership=True):
+            if not self._live_matches(resource, live, require_ownership=(resource.kind == 'dataset')):
                 failures.append(resource_id)
                 continue
-            try:
-                deleter(resource.name, resource.version)
-            except Exception:
+            if not self._delete_created_resource(resource):
                 failures.append(resource_id)
         if failures:
             raise FoundryRollbackError('rollback failed', kind='platform', retryable=False, compensation_receipt=receipt, provider_state=failures_state)
@@ -832,7 +1461,9 @@ class FoundryAdapter:
         resources = self._current_resource_records(receipt)
         for resource in resources:
             if resource.disposition == 'created':
-                live = self.get_dataset(resource.name, resource.version)
+                if resource.kind == 'evaluator' and resource.resource_type == 'builtin':
+                    continue
+                live = self._get_live_resource(resource)
                 if live is not None:
                     return False
         return True
