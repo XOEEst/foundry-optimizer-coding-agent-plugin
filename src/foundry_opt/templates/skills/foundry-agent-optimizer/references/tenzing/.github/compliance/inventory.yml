@@ -1,0 +1,5 @@
+inventory:
+- source: DirectOwners
+  items:
+  - id: saketsathe@microsoft.com
+  isProduction: false

@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 600" width="1200" height="600" role="img" aria-label="Tenzing: a climber planting a flag on a mountain summit at dusk, with the tagline Every summit needs a Tenzing.">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#091a33"/>
+      <stop offset="45%" stop-color="#16375f"/>
+      <stop offset="78%" stop-color="#c96f4c"/>
+      <stop offset="100%" stop-color="#f6b26b"/>
+    </linearGradient>
+    <radialGradient id="sun" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#fff3dd"/>
+      <stop offset="55%" stop-color="#ffd79b"/>
+      <stop offset="100%" stop-color="#ffb86b" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="ridge3" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#3a5f8a"/>
+      <stop offset="100%" stop-color="#24405f"/>
+    </linearGradient>
+    <linearGradient id="ridge2" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#2b4a70"/>
+      <stop offset="100%" stop-color="#1a3150"/>
+    </linearGradient>
+    <linearGradient id="ridge1" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#4d79ac"/>
+      <stop offset="100%" stop-color="#22364f"/>
+    </linearGradient>
+    <linearGradient id="snow" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#cfe0f0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- sky -->
+  <rect x="0" y="0" width="1200" height="600" fill="url(#sky)"/>
+
+  <!-- stars -->
+  <g fill="#ffffff">
+    <circle cx="120" cy="70" r="1.8" opacity="0.9"/>
+    <circle cx="240" cy="120" r="1.2" opacity="0.7"/>
+    <circle cx="360" cy="60" r="1.6" opacity="0.85"/>
+    <circle cx="520" cy="100" r="1.1" opacity="0.6"/>
+    <circle cx="700" cy="70" r="1.5" opacity="0.8"/>
+    <circle cx="900" cy="110" r="1.2" opacity="0.7"/>
+    <circle cx="1040" cy="64" r="1.7" opacity="0.9"/>
+    <circle cx="1130" cy="150" r="1.1" opacity="0.6"/>
+  </g>
+
+  <!-- sun -->
+  <circle cx="905" cy="360" r="150" fill="url(#sun)"/>
+  <circle cx="905" cy="360" r="46" fill="#fff1d6"/>
+
+  <!-- mountain range -->
+  <polygon points="0,600 150,430 320,600" fill="url(#ridge3)" opacity="0.85"/>
+  <polygon points="820,600 980,440 1200,600" fill="url(#ridge3)" opacity="0.85"/>
+  <polygon points="120,600 340,470 560,600" fill="url(#ridge2)" opacity="0.9"/>
+  <polygon points="640,600 860,455 1090,600" fill="url(#ridge2)" opacity="0.9"/>
+
+  <!-- main summit -->
+  <polygon points="330,600 600,335 900,600" fill="url(#ridge1)"/>
+  <!-- snow cap -->
+  <polygon points="600,335 540,413 572,403 600,440 632,398 662,418" fill="url(#snow)"/>
+  <!-- ridge shadow -->
+  <polygon points="600,335 600,600 900,600" fill="#000000" opacity="0.14"/>
+
+  <!-- climber planting flag on the summit -->
+  <g transform="translate(585,317)">
+    <rect x="30" y="-50" width="3.5" height="58" fill="#0a1a30"/>
+    <path d="M33.5,-50 L72,-40 L33.5,-29 Z" fill="#e2453b"/>
+    <circle cx="10" cy="-28" r="6.5" fill="#0a1a30"/>
+    <rect x="4" y="-22" width="12" height="19" rx="5" fill="#0a1a30"/>
+    <path d="M15,-18 L31,-38" stroke="#0a1a30" stroke-width="4" stroke-linecap="round"/>
+    <path d="M6,-16 L-6,-5" stroke="#0a1a30" stroke-width="4" stroke-linecap="round"/>
+    <path d="M8,-3 L2,13" stroke="#0a1a30" stroke-width="4.5" stroke-linecap="round"/>
+    <path d="M13,-3 L20,13" stroke="#0a1a30" stroke-width="4.5" stroke-linecap="round"/>
+  </g>
+
+  <!-- wordmark + tagline -->
+  <g font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif">
+    <text x="600" y="180" text-anchor="middle" font-size="112" font-weight="800" fill="#ffffff" letter-spacing="4">tenzing</text>
+    <line x1="470" y1="212" x2="730" y2="212" stroke="#f6b26b" stroke-width="2.5" opacity="0.9"/>
+    <text x="600" y="250" text-anchor="middle" font-size="27" font-weight="400" fill="#ffe6c9" letter-spacing="3" font-style="italic">Every summit needs a Tenzing.</text>
+  </g>
+</svg>
