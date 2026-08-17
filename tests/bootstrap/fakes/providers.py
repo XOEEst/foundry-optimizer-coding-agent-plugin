@@ -34,3 +34,9 @@ class FakeGitHubApply:
 class FakeEvaluationOnboarding:
     def resolve_objective(self, request: Sequence[Mapping[str, object]]) -> ResolvedWeightedObjective:
         return ResolvedWeightedObjective.model_validate(request[0]['resolved'])
+
+    def verify_objective(self, objective: ResolvedWeightedObjective) -> bool:
+        return bool(objective.evaluators)
+
+    def rollback_objective(self, objective: ResolvedWeightedObjective) -> None:
+        return None
