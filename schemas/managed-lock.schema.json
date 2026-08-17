@@ -1,0 +1,254 @@
+{
+  "$defs": {
+    "ActivationOutcomeRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "outcome": {
+          "enum": [
+            "succeeded",
+            "failed",
+            "compensation_required",
+            "unknown"
+          ],
+          "title": "Outcome",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "title": "ActivationOutcomeRecord",
+      "type": "object"
+    },
+    "CloudResourceLedgerEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "action_id": {
+          "title": "Action Id",
+          "type": "string"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "ownership": {
+          "enum": [
+            "created",
+            "adopted"
+          ],
+          "title": "Ownership",
+          "type": "string"
+        },
+        "provider": {
+          "title": "Provider",
+          "type": "string"
+        },
+        "resource_id": {
+          "title": "Resource Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "provider",
+        "kind",
+        "resource_id",
+        "ownership",
+        "action_id"
+      ],
+      "title": "CloudResourceLedgerEntry",
+      "type": "object"
+    },
+    "GitHubEnvironmentLedgerEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "environment": {
+          "title": "Environment",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "variable_names": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Variable Names",
+          "type": "array"
+        }
+      },
+      "required": [
+        "environment",
+        "variable_names"
+      ],
+      "title": "GitHubEnvironmentLedgerEntry",
+      "type": "object"
+    },
+    "ManagedFileEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "applied_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Applied Sha256",
+          "type": "string"
+        },
+        "owner_scope": {
+          "enum": [
+            "repository",
+            "agent",
+            "shared-runtime"
+          ],
+          "title": "Owner Scope",
+          "type": "string"
+        },
+        "ownership_mode": {
+          "enum": [
+            "owned",
+            "shared-template",
+            "adopted"
+          ],
+          "title": "Ownership Mode",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "semantic_patch_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Semantic Patch Id"
+        },
+        "template_base_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Template Base Sha256",
+          "type": "string"
+        },
+        "template_id": {
+          "title": "Template Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "ownership_mode",
+        "owner_scope",
+        "template_id",
+        "template_base_sha256",
+        "applied_sha256"
+      ],
+      "title": "ManagedFileEntry",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "channel": {
+      "title": "Channel",
+      "type": "string"
+    },
+    "cloud_resources": {
+      "items": {
+        "$ref": "#/$defs/CloudResourceLedgerEntry"
+      },
+      "title": "Cloud Resources",
+      "type": "array"
+    },
+    "engine": {
+      "title": "Engine",
+      "type": "string"
+    },
+    "github_environments": {
+      "items": {
+        "$ref": "#/$defs/GitHubEnvironmentLedgerEntry"
+      },
+      "title": "Github Environments",
+      "type": "array"
+    },
+    "last_activation": {
+      "$ref": "#/$defs/ActivationOutcomeRecord"
+    },
+    "managed_files": {
+      "items": {
+        "$ref": "#/$defs/ManagedFileEntry"
+      },
+      "title": "Managed Files",
+      "type": "array"
+    },
+    "runtime_commit": {
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+      "title": "Runtime Commit",
+      "type": "string"
+    },
+    "runtime_repository": {
+      "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\\.git)?$",
+      "title": "Runtime Repository",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "sidecar_paths": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Sidecar Paths",
+      "type": "array"
+    }
+  },
+  "required": [
+    "engine",
+    "runtime_repository",
+    "channel",
+    "runtime_commit",
+    "managed_files",
+    "github_environments",
+    "cloud_resources",
+    "sidecar_paths",
+    "last_activation"
+  ],
+  "title": "BootstrapLock",
+  "type": "object"
+}

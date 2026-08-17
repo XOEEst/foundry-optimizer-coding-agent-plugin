@@ -1,0 +1,191 @@
+{
+  "$defs": {
+    "DistributionSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "channel": {
+          "title": "Channel",
+          "type": "string"
+        },
+        "pin": {
+          "anyOf": [
+            {
+              "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pin"
+        },
+        "repository": {
+          "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\\.git)?$",
+          "title": "Repository",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "repository",
+        "channel"
+      ],
+      "title": "DistributionSettings",
+      "type": "object"
+    },
+    "ExplicitAgentEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "agent_id": {
+          "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$",
+          "title": "Agent Id",
+          "type": "string"
+        },
+        "config_path": {
+          "title": "Config Path",
+          "type": "string"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "root": {
+          "title": "Root",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "agent_id",
+        "root",
+        "config_path"
+      ],
+      "title": "ExplicitAgentEntry",
+      "type": "object"
+    },
+    "GitHubSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "client_id_variable": {
+          "title": "Client Id Variable",
+          "type": "string"
+        },
+        "deployment_environment": {
+          "title": "Deployment Environment",
+          "type": "string"
+        },
+        "optimizer_environment": {
+          "title": "Optimizer Environment",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "optimizer_environment",
+        "deployment_environment",
+        "client_id_variable"
+      ],
+      "title": "GitHubSettings",
+      "type": "object"
+    },
+    "IdentitySettings": {
+      "additionalProperties": false,
+      "properties": {
+        "client_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Client Id"
+        },
+        "kind": {
+          "enum": [
+            "user_assigned_managed_identity",
+            "entra_application",
+            "unresolved_migration"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "resource_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resource Id"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "IdentitySettings",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "agents": {
+      "items": {
+        "$ref": "#/$defs/ExplicitAgentEntry"
+      },
+      "title": "Agents",
+      "type": "array"
+    },
+    "distribution": {
+      "$ref": "#/$defs/DistributionSettings"
+    },
+    "github": {
+      "$ref": "#/$defs/GitHubSettings"
+    },
+    "identity": {
+      "$ref": "#/$defs/IdentitySettings"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "distribution",
+    "github",
+    "identity",
+    "agents"
+  ],
+  "title": "RootRegistry",
+  "type": "object"
+}
