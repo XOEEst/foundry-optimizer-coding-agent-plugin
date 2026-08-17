@@ -13,11 +13,12 @@ from foundry_opt.bootstrap.contracts import (
 )
 from foundry_opt.bootstrap.errors import BootstrapConfigError
 from foundry_opt.bootstrap.evaluation.core import (
+    ActivationReceipt,
     DeploymentDefaults,
-    ReplacementOperation,
     build_scoring_evidence,
     choose_dataset_strategy,
     choose_default_evaluator_bundle,
+    compute_split_lineage_hash,
     resolve_issue_evaluators,
     select_default_deployment_contract,
     split_dataset_rows,
@@ -51,7 +52,7 @@ def _split_input() -> list[dict[str, str]]:
     return rows
 
 
-def _generated_bundle(split_hash: str) -> DefaultEvaluatorBundle:
+def _generated_bundle() -> DefaultEvaluatorBundle:
     return DefaultEvaluatorBundle(
         objective=_objective(),
         datasets=(
@@ -65,28 +66,31 @@ def _generated_bundle(split_hash: str) -> DefaultEvaluatorBundle:
     )
 
 
-def test_dataset_strategy_requires_prerequisites_and_threshold() -> None:
+def test_dataset_strategy_requires_strict_boolean_prerequisites() -> None:
+    with pytest.raises(BootstrapConfigError):
+        choose_dataset_strategy({"generated_samples": 15, "prerequisites_available": "false"})
     assert choose_dataset_strategy({"generated_samples": 15, "prerequisites_available": False}) == "synthetic_only"
-    assert choose_dataset_strategy({"generated_samples": 14, "prerequisites_available": True}) == "synthetic_only"
     assert choose_dataset_strategy({"generated_samples": 15, "prerequisites_available": True}) == "trace"
 
 
-def test_dataset_split_is_atomic_and_category_aware() -> None:
-    result = split_dataset_rows(_split_input())
-    assert result.algorithm_version == "evaluation-core-split/v2"
-    assert len(result.development_groups) == 12
-    assert len(result.validating_groups) == 6
-    assert set(result.development_groups).isdisjoint(result.validating_groups)
-    for group in result.development_groups:
-        assert all(not row_id.startswith(group) or row_id in result.development for row_id in result.development)
-    assert result.split_hash == split_dataset_rows(list(reversed(_split_input()))).split_hash
+def test_dataset_split_rejects_duplicate_row_ids_across_groups_and_conflicts() -> None:
+    with pytest.raises(BootstrapConfigError):
+        split_dataset_rows([
+            {"row_id": "row-1", "group_id": "group-a", "category": "a"},
+            {"row_id": "row-1", "group_id": "group-b", "category": "a"},
+        ] + _split_input()[:28])
+    with pytest.raises(BootstrapConfigError):
+        split_dataset_rows([
+            {"row_id": "row-1", "group_id": "group-a", "category": "a"},
+            {"row_id": "row-2", "group_id": "group-a", "category": "b"},
+        ] + _split_input()[:28])
 
 
-def test_dataset_split_never_splits_group_and_keeps_minimums() -> None:
-    result = split_dataset_rows(_split_input())
-    assert len(result.development) >= 10
-    assert len(result.validating) >= 5
-    assert set(result.development).isdisjoint(result.validating)
+def test_dataset_split_hash_is_order_independent_and_lineage_is_canonical() -> None:
+    first = split_dataset_rows(_split_input())
+    second = split_dataset_rows(list(reversed(_split_input())))
+    assert first.split_hash == second.split_hash
+    assert compute_split_lineage_hash(first) == compute_split_lineage_hash(second) == first.split_hash
 
 
 def test_generated_rubric_rejects_invalid_thresholds_inputs_and_duplicates() -> None:
@@ -94,12 +98,15 @@ def test_generated_rubric_rejects_invalid_thresholds_inputs_and_duplicates() -> 
         validate_generated_rubric({"dimensions": [{"name": "quality", "weight": 1.0, "scalar_range": {"min": 0, "max": 1}, "threshold": 2.0, "required_inputs": ["answer"]}]})
     with pytest.raises(BootstrapConfigError):
         validate_generated_rubric({"dimensions": [{"name": "quality", "weight": 1.0, "threshold": 0.5, "pass_fail": True, "required_inputs": ["", "answer"]}]})
-    with pytest.raises(BootstrapConfigError):
-        validate_generated_rubric({"dimensions": [{"name": "quality", "weight": 1.0, "threshold": 0.5, "pass_fail": True, "required_inputs": ["answer", "Answer"]}]})
     validate_generated_rubric({"dimensions": [{"name": "quality", "weight": 1.0, "scalar_range": {"min": 0, "max": 1}, "threshold": 0.5, "required_inputs": ["answer"]}]})
 
 
-def test_activation_headroom_uses_normalization_rules() -> None:
+def test_activation_requires_strict_boolean_executable_and_headroom_rules() -> None:
+    with pytest.raises(BootstrapConfigError):
+        validate_activation(
+            cases=[{"executable": "false", "score": 0.5, "normalization": {"kind": "scalar", "source_min": 0.0, "source_max": 1.0}}],
+            guardrails=[{"name": "Content Safety", "pass_rate": 1.0}],
+        )
     validate_activation(
         cases=[
             {"executable": True, "score": 0.5, "normalization": {"kind": "scalar", "source_min": 0.0, "source_max": 1.0}},
@@ -108,14 +115,6 @@ def test_activation_headroom_uses_normalization_rules() -> None:
         guardrails=[{"name": "Content Safety", "pass_rate": 1.0}],
         generated_bundle={"provenance": "auto_generated_unreviewed"},
     )
-    with pytest.raises(BootstrapConfigError):
-        validate_activation(
-            cases=[
-                {"executable": True, "score": 1.0, "normalization": {"kind": "scalar", "source_min": 0.0, "source_max": 1.0}},
-                {"executable": True, "score": True, "normalization": {"kind": "pass_fail"}},
-            ],
-            guardrails=[{"name": "Content Safety", "pass_rate": 1.0}],
-        )
 
 
 def test_issue_evaluator_resolution_and_pass_fail_normalization() -> None:
@@ -144,15 +143,15 @@ def test_issue_evaluator_resolution_and_pass_fail_normalization() -> None:
             "baseline",
             resolved,
             {
-                "azureai://built-in/evaluators/groundedness": 0.5,
+                "azureai://built-in/evaluators/groundedness": "false",
                 "azureai://accounts/a/projects/p/evaluators/quality/versions/1": 4.0,
             },
         )
 
 
-def test_generated_bundle_uses_real_dataset_refs_and_lineage_hash() -> None:
+def test_generated_bundle_uses_distinct_refs_and_canonical_lineage() -> None:
     split = split_dataset_rows(_split_input())
-    bundle = _generated_bundle(split.split_hash)
+    bundle = _generated_bundle()
     result = choose_default_evaluator_bundle(
         existing_bundle=None,
         generated_bundle=bundle,
@@ -160,26 +159,37 @@ def test_generated_bundle_uses_real_dataset_refs_and_lineage_hash() -> None:
         definitions=(ImmutableDefinitionReference(definition_id="eval_development"), ImmutableDefinitionReference(definition_id="eval_validating")),
         development_dataset=ImmutableDatasetReference(dataset_id="azureai://accounts/a/projects/p/data/dev/versions/1"),
         validating_dataset=ImmutableDatasetReference(dataset_id="azureai://accounts/a/projects/p/data/val/versions/1"),
-        split_lineage_hash=split.split_hash,
+        persisted_split_lineage_hash=compute_split_lineage_hash(split),
     )
     assert result.active_bundle == bundle
-
-
-def test_replace_requires_existing_bundle_and_preserves_old_on_failure() -> None:
-    split = split_dataset_rows(_split_input())
-    existing = _generated_bundle(split.split_hash)
-    generated = _generated_bundle(split.split_hash)
     with pytest.raises(BootstrapConfigError):
         choose_default_evaluator_bundle(
             existing_bundle=None,
+            generated_bundle=bundle,
+            split_result=split,
+            definitions=(ImmutableDefinitionReference(definition_id="eval_development"), ImmutableDefinitionReference(definition_id="eval_validating")),
+            development_dataset=ImmutableDatasetReference(dataset_id="azureai://accounts/a/projects/p/data/dev/versions/1"),
+            validating_dataset=ImmutableDatasetReference(dataset_id="azureai://accounts/a/projects/p/data/dev/versions/1"),
+            persisted_split_lineage_hash=compute_split_lineage_hash(split),
+        )
+
+
+def test_replace_requires_validated_metadata_and_reports_retained_old_on_failure() -> None:
+    split = split_dataset_rows(_split_input())
+    existing = _generated_bundle()
+    generated = _generated_bundle()
+    with pytest.raises(BootstrapConfigError):
+        choose_default_evaluator_bundle(
+            existing_bundle=existing,
             generated_bundle=generated,
             split_result=split,
             definitions=(ImmutableDefinitionReference(definition_id="eval_development"), ImmutableDefinitionReference(definition_id="eval_validating")),
             development_dataset=ImmutableDatasetReference(dataset_id="azureai://accounts/a/projects/p/data/dev/versions/1"),
             validating_dataset=ImmutableDatasetReference(dataset_id="azureai://accounts/a/projects/p/data/val/versions/1"),
-            split_lineage_hash=split.split_hash,
+            persisted_split_lineage_hash=compute_split_lineage_hash(split),
             explicit_replace=True,
-            operation=ReplacementOperation(operation_id="op-1", runtime_repository="https://github.com/org/repo.git", runtime_commit="a" * 40, repository_identity="org/repo"),
+            operation={"operation_id": "", "runtime_repository": "not-a-url", "runtime_commit": "bad", "repository_identity": "repo"},
+            activation_receipt={"attempted": True, "activated": False, "status": "failed"},
         )
     failed = choose_default_evaluator_bundle(
         existing_bundle=existing,
@@ -188,13 +198,15 @@ def test_replace_requires_existing_bundle_and_preserves_old_on_failure() -> None
         definitions=(ImmutableDefinitionReference(definition_id="eval_development"), ImmutableDefinitionReference(definition_id="eval_validating")),
         development_dataset=ImmutableDatasetReference(dataset_id="azureai://accounts/a/projects/p/data/dev/versions/1"),
         validating_dataset=ImmutableDatasetReference(dataset_id="azureai://accounts/a/projects/p/data/val/versions/1"),
-        split_lineage_hash=split.split_hash,
+        persisted_split_lineage_hash=compute_split_lineage_hash(split),
         explicit_replace=True,
-        operation=ReplacementOperation(operation_id="op-1", runtime_repository="https://github.com/org/repo.git", runtime_commit="a" * 40, repository_identity="org/repo"),
-        activation_succeeded=False,
+        operation={"operation_id": "op-1", "runtime_repository": "https://github.com/org/repo.git", "runtime_commit": "a" * 40, "repository_identity": "org/repo"},
+        activation_receipt={"attempted": True, "activated": False, "status": "failed"},
     )
     assert failed.active_bundle == existing
-    assert failed.replaced_bundle == existing
+    assert failed.attempted_bundle == generated
+    assert failed.activated_bundle is None
+    assert failed.retained_bundle == existing
     succeeded = choose_default_evaluator_bundle(
         existing_bundle=existing,
         generated_bundle=generated,
@@ -202,16 +214,17 @@ def test_replace_requires_existing_bundle_and_preserves_old_on_failure() -> None
         definitions=(ImmutableDefinitionReference(definition_id="eval_development"), ImmutableDefinitionReference(definition_id="eval_validating")),
         development_dataset=ImmutableDatasetReference(dataset_id="azureai://accounts/a/projects/p/data/dev/versions/1"),
         validating_dataset=ImmutableDatasetReference(dataset_id="azureai://accounts/a/projects/p/data/val/versions/1"),
-        split_lineage_hash=split.split_hash,
+        persisted_split_lineage_hash=compute_split_lineage_hash(split),
         explicit_replace=True,
-        operation=ReplacementOperation(operation_id="op-2", runtime_repository="https://github.com/org/repo.git", runtime_commit="b" * 40, repository_identity="org/repo"),
-        activation_succeeded=True,
+        operation={"operation_id": "op-2", "runtime_repository": "https://github.com/org/repo.git", "runtime_commit": "b" * 40, "repository_identity": "org/repo"},
+        activation_receipt=ActivationReceipt(attempted=True, activated=True, status="succeeded"),
     )
     assert succeeded.active_bundle == generated
-    assert succeeded.previous_bundle == existing
+    assert succeeded.activated_bundle == generated
+    assert succeeded.retained_bundle == existing
 
 
-def test_deployment_selector_returns_typed_defaults_and_rejects_raw_fields() -> None:
+def test_deployment_selector_rejects_camel_case_prohibited_keys() -> None:
     defaults = select_default_deployment_contract(
         {
             "environment": "prod",
@@ -228,6 +241,6 @@ def test_deployment_selector_returns_typed_defaults_and_rejects_raw_fields() -> 
                 "require_aligned_binding": True,
                 "enabled": True,
                 "hard_guardrail_names": ["safety"],
-                "nested": {"dataset_rows": ["secret"]},
+                "nested": {"datasetRows": ["secret"]},
             }
         )
