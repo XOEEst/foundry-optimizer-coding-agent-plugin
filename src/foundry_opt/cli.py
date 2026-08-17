@@ -23,7 +23,11 @@ from foundry_opt.poc.auth import (
     build_client_assertion_credential,
     detect_github_actions_oidc,
 )
-from foundry_opt.distribution import read_bootstrap_receipt
+from foundry_opt.distribution import (
+    load_shared_pin,
+    read_bootstrap_receipt,
+    verify_shared_checkout,
+)
 from foundry_opt.poc.candidate import CandidateError
 from foundry_opt.poc.config import (
     AgentMetadata,
