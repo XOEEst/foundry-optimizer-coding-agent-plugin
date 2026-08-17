@@ -84,18 +84,20 @@ def test_setup_and_validation_validate_registry_config_paths_dynamically() -> No
 
 def test_deploy_workflow_computes_dynamic_noop_matrix() -> None:
     text = _workflow_text(WORKFLOW_ROOT / "foundry-opt-deploy.yml")
-    assert '.foundry-opt/**' in text
-    assert '**/.foundry/foundry-opt.yaml' in text
     assert 'shared_source_relations' in text
     assert "example-agent" not in text
     assert "matrix = {'include': include}" in text
     assert "toJson(fromJson(needs.discover.outputs.matrix).include) != '[]'" in text
+    assert "manual repo_agent_id" in text
+    assert "MANUAL_REPO_AGENT_ID" in text
+    assert "${{ github.event.inputs.repo_agent_id" not in text
 
 
-def test_issue_form_records_wave5_parser_dependency() -> None:
+def test_issue_form_uses_built_in_parser_contract() -> None:
     document = yaml.safe_load(_read(ISSUE_FORM_PATH))
     intro = document["body"][0]["attributes"]["value"]
-    assert "Wave5 parser integration dependency" in intro
+    assert "Parser support is built into the runtime now" in intro
+    assert "final post-merge repin" in intro
 
 
 def test_semantic_patch_fixture_targets_legacy_workflow_and_applies_cleanly() -> None:

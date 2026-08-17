@@ -5,7 +5,11 @@ import pytest
 from foundry_opt.poc.issue import IssueDocumentError, parse_issue_body
 
 
-BODY = """### Optimization goal
+BODY = """### Repository agent ID or explicit Foundry target
+
+example-agent
+
+### Optimization goal
 
 Improve complete policy coverage.
 
@@ -33,12 +37,20 @@ agent/skills/**
 ```text
 gpt-5-mini
 ```
+
+### Optional exact evaluator IDs
+
+```text
+azureai://accounts/example/projects/example/evaluators/quality/versions/1
+azureai://built-in/evaluators/safety weight=2
+```
 """
 
 
 def test_parse_issue_body() -> None:
     parsed = parse_issue_body(BODY)
 
+    assert parsed.target == "example-agent"
     assert parsed.goal == "Improve complete policy coverage."
     assert parsed.candidate_budget == 2
     assert parsed.editable_scope == (
@@ -46,6 +58,10 @@ def test_parse_issue_body() -> None:
         "agent/skills/**",
     )
     assert parsed.candidate_models == ("gpt-5-mini",)
+    assert parsed.issue_evaluators == (
+        "azureai://accounts/example/projects/example/evaluators/quality/versions/1",
+        "azureai://built-in/evaluators/safety weight=2",
+    )
 
 
 def test_optional_no_response_is_empty() -> None:
@@ -58,6 +74,10 @@ def test_optional_no_response_is_empty() -> None:
 
     assert parsed.editable_scope == ()
     assert parsed.candidate_models == ()
+    assert parsed.issue_evaluators == (
+        "azureai://accounts/example/projects/example/evaluators/quality/versions/1",
+        "azureai://built-in/evaluators/safety weight=2",
+    )
 
 
 @pytest.mark.parametrize(

@@ -8,7 +8,7 @@ body:
         Assign the completed issue to Copilot to start the optimize job.
         Provide either a stable repoAgentId from `.foundry-opt/registry.yaml` or an
         explicit Foundry target when the repository has not applied the managed
-        contract yet. Wave5 parser integration dependency: template headings and IDs are fixed now; parser support lands later. Blank optional sections keep repository defaults; unclear
+        contract yet. Parser support is built into the runtime now, so these headings and IDs are part of the managed contract. Template pin remains on the pre-repin shared runtime until the final post-merge repin lands. Blank optional sections keep repository defaults; unclear
         targets or invalid evaluator weights fail preflight before any job starts.
 
   - type: input

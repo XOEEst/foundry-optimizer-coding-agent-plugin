@@ -9,12 +9,14 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 _HEADING = re.compile(r"^### (?P<label>[^\r\n]+)$")
 _EMPTY_RESPONSES = frozenset({"", "_No response_", "No response"})
 _FIELD_LABELS = {
+    "Repository agent ID or explicit Foundry target": "target",
     "Optimization goal": "goal",
     "Observed failures or evidence": "observed_failures",
     "Constraints and guardrails": "constraints",
     "Changed candidates": "candidate_budget",
     "Optional narrower editable scope": "editable_scope",
     "Optional narrower model set": "candidate_models",
+    "Optional exact evaluator IDs": "issue_evaluators",
 }
 
 
@@ -25,14 +27,16 @@ class IssueDocumentError(ValueError):
 class ParsedIssue(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    target: str = Field(min_length=1, max_length=4000)
     goal: str = Field(min_length=1, max_length=4000)
     observed_failures: str = Field(min_length=1, max_length=8000)
     constraints: str = Field(min_length=1, max_length=4000)
     candidate_budget: int = Field(ge=1, le=16)
     editable_scope: tuple[str, ...] = ()
     candidate_models: tuple[str, ...] = ()
+    issue_evaluators: tuple[str, ...] = ()
 
-    @field_validator("goal", "observed_failures", "constraints")
+    @field_validator("target", "goal", "observed_failures", "constraints")
     @classmethod
     def validate_text(cls, value: str) -> str:
         normalized = value.strip()
@@ -40,7 +44,7 @@ class ParsedIssue(BaseModel):
             raise ValueError("issue text contains control characters")
         return normalized
 
-    @field_validator("editable_scope", "candidate_models")
+    @field_validator("editable_scope", "candidate_models", "issue_evaluators")
     @classmethod
     def validate_unique_lines(cls, values: tuple[str, ...]) -> tuple[str, ...]:
         if len(values) != len(set(values)):
@@ -58,9 +62,20 @@ def parse_issue_body(body: str) -> ParsedIssue:
     unknown = sorted(set(sections) - set(_FIELD_LABELS))
     if unknown:
         raise IssueDocumentError(f"unknown issue section: {unknown[0]}")
-    missing = sorted(set(_FIELD_LABELS) - set(sections))
+    optional_labels = {
+        "Optional narrower editable scope",
+        "Optional narrower model set",
+        "Optional exact evaluator IDs",
+    }
+    required_labels = set(_FIELD_LABELS) - optional_labels - {
+        "Repository agent ID or explicit Foundry target"
+    }
+    missing = sorted(required_labels - set(sections))
     if missing:
         raise IssueDocumentError(f"missing issue section: {missing[0]}")
+    for label in optional_labels:
+        sections.setdefault(label, "")
+    sections.setdefault("Repository agent ID or explicit Foundry target", "")
 
     values = {
         field: _section_value(sections[label])
@@ -72,12 +87,14 @@ def parse_issue_body(body: str) -> ParsedIssue:
         raise IssueDocumentError("changed candidates must be an integer") from error
 
     return ParsedIssue(
+        target=values["target"].strip() or "default",
         goal=_required(values, "goal"),
         observed_failures=_required(values, "observed_failures"),
         constraints=_required(values, "constraints"),
         candidate_budget=candidate_budget,
         editable_scope=_lines(values["editable_scope"]),
         candidate_models=_lines(values["candidate_models"]),
+        issue_evaluators=_lines(values["issue_evaluators"]),
     )
 
 

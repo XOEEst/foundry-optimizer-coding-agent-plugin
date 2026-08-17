@@ -62,6 +62,7 @@ from foundry_opt.poc.state import (
     StateNotFoundError,
 )
 from foundry_opt.poc.source import SourcePackagingError, package_git_source
+from foundry_opt.bootstrap.workflow_integration import protected_editable_patterns_for_repository
 
 
 DEFAULT_POLICY_PATH = Path(".github/foundry-optimizer.yaml")
@@ -1740,7 +1741,10 @@ def build_runtime_controller(
         runtime_paths.workspace_root,
         runtime_settings.base_commit,
         editable_patterns=runtime_settings.policy.editable_paths,
-        protected_patterns=_protected_patterns(runtime_settings.policy),
+        protected_patterns=_runtime_protected_patterns(
+            runtime_paths.repository_root,
+            runtime_settings.policy,
+        ),
         source_root=runtime_settings.policy.source_root,
     )
     state_store = state_store_factory(runtime_paths.job_state_path)
@@ -1941,11 +1945,41 @@ def _metric_by_name(evidence: EvaluationEvidence, name: str) -> object:
 def _protected_patterns(policy: RepositoryPolicy) -> tuple[str, ...]:
     protected = {
         ".git/**",
+        ".foundry-opt/**",
+        ".foundry-opt/registry.yaml",
         str(DEFAULT_POLICY_PATH).replace("\\", "/"),
         policy.metadata_path,
         str(DEFAULT_PIN_PATH).replace("\\", "/"),
         "uv.lock",
     }
+    return tuple(sorted(protected))
+
+
+def _runtime_protected_patterns(
+    repository_root: Path,
+    policy: RepositoryPolicy,
+) -> tuple[str, ...]:
+    protected = set(_protected_patterns(policy))
+    registry_path = repository_root / ".foundry-opt" / "registry.yaml"
+    if registry_path.is_file():
+        protected.update(protected_editable_patterns_for_repository(repository_root))
+    overlaps = [
+        editable
+        for editable in policy.editable_paths
+        if any(
+            editable == protected_path.removesuffix("/**")
+            or editable.startswith(protected_path.removesuffix("/**"))
+            or (
+                editable.endswith("/**")
+                and protected_path.startswith(editable.removesuffix("/**"))
+            )
+            for protected_path in protected
+        )
+    ]
+    if overlaps:
+        raise RuntimeIntegrationError(
+            f"editable path overlaps protected workflow/config scope: {overlaps[0]}"
+        )
     return tuple(sorted(protected))
 
 
