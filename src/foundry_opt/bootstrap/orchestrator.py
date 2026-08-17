@@ -52,13 +52,34 @@ class BootstrapOrchestrator:
         write_operation_state(envelope, state_root=self._state_root)
         return envelope
 
-    def build_plan(self, *, repository_id: str, operation_id: str, runtime_repository: str, runtime_commit: str, selection_plan: SelectionPlan, evaluation_requests: Sequence[Mapping[str, object]] = (), evaluator_replacement: EvaluationReplacementRecord | None = None) -> OperationStateEnvelope:
+    def build_plan(
+        self,
+        *,
+        repository_id: str,
+        operation_id: str,
+        runtime_repository: str,
+        runtime_commit: str,
+        selection_plan: SelectionPlan,
+        evaluation_requests: Sequence[Mapping[str, object]] = (),
+        evaluator_replacement: EvaluationReplacementRecord | None = None,
+        phases: Sequence[ApplyPhaseName] = _PHASES,
+    ) -> OperationStateEnvelope:
         if not selection_plan.selected_agent_ids:
             raise BootstrapApplyError("planning requires explicit selected agents")
+        requested_phases = tuple(phases)
+        if not requested_phases:
+            raise BootstrapApplyError("planning requires at least one phase")
+        if len(set(requested_phases)) != len(requested_phases):
+            raise BootstrapApplyError("planning phases must be unique")
+        if any(phase not in _PHASES for phase in requested_phases):
+            raise BootstrapApplyError("planning contains an unsupported phase")
+        requested_phases = tuple(
+            phase for phase in _PHASES if phase in requested_phases
+        )
         context = self._build_context(repository_id, operation_id, runtime_repository, runtime_commit, selection_plan, evaluation_requests, evaluator_replacement)
         per_phase_fingerprints: list[FingerprintRecord] = []
         actions: list[BootstrapAction] = []
-        for phase in _PHASES:
+        for phase in requested_phases:
             phase_context = {**context, "phase": phase}
             phase_live = tuple(self._drivers[phase].live_fingerprints(phase_context))
             per_phase_fingerprints.extend(sorted(phase_live, key=lambda item: (item.label, item.sha256)))
@@ -67,7 +88,7 @@ class BootstrapOrchestrator:
             actions.extend(planned_actions)
         ordered = tuple(sorted(actions, key=lambda action: (_PHASES.index(action.phase), action.target_agent_id or "", action.action_id, action.kind)))
         plan = BootstrapPlan.create(operation_id=operation_id, runtime_repository=runtime_repository, runtime_commit=runtime_commit, repository_identity=repository_id, actions=ordered)
-        envelope = OperationStateEnvelope.create(generation=1, repository_id=repository_id, operation_id=operation_id, runtime_repository=runtime_repository, runtime_commit=runtime_commit, selection_plan=selection_plan, bootstrap_plan=plan, discovery_fingerprints=selection_plan.discovery_fingerprints, resource_fingerprints=tuple(per_phase_fingerprints), evaluator_replacement=evaluator_replacement)
+        envelope = OperationStateEnvelope.create(generation=1, repository_id=repository_id, operation_id=operation_id, runtime_repository=runtime_repository, runtime_commit=runtime_commit, selection_plan=selection_plan, bootstrap_plan=plan, discovery_fingerprints=selection_plan.discovery_fingerprints, resource_fingerprints=tuple(per_phase_fingerprints), required_phases=requested_phases, evaluator_replacement=evaluator_replacement)
         write_operation_state(envelope, expected_generation=0, state_root=self._state_root)
         return envelope
 
@@ -79,6 +100,8 @@ class BootstrapOrchestrator:
 
     def apply_phase(self, *, repository_id: str, operation_id: str, phase: ApplyPhaseName, approval: ApprovalRecord, runtime_commit: str) -> PhaseReceipt:
         envelope = self.resume(repository_id=repository_id, operation_id=operation_id, runtime_commit=runtime_commit)
+        if phase not in envelope.required_phases:
+            raise BootstrapApplyError("phase is not present in the approved plan")
         phase_plan = self._phase_plan(envelope, phase)
         if approval.parent_plan_hash != envelope.bootstrap_plan.plan_hash or approval.phase != phase:
             raise BootstrapApplyError("approval does not match parent plan hash and phase")
