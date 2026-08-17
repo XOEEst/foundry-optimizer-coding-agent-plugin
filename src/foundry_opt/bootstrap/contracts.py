@@ -20,7 +20,7 @@ AgentId = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9](?:[A-Za-z0-9._
 DatasetUri = Annotated[str, StringConstraints(pattern=r"^azureai://accounts/[^/]+/projects/[^/]+/data/[^/]+/versions/[^/]+$")]
 VersionedEvaluatorUri = Annotated[str, StringConstraints(pattern=r"^azureai://accounts/[^/]+/projects/[^/]+/evaluators/[^/]+/versions/[^/]+$")]
 BuiltInEvaluatorId = Annotated[str, StringConstraints(pattern=r"^azureai://built-in/evaluators/[^/]+$")]
-EvaluationDefinitionId = Annotated[str, StringConstraints(pattern=r"^(?:eval_[A-Za-z0-9_.-]+|azureai://accounts/[^/]+/projects/[^/]+/evaluationDefinitions/[^/]+/versions/[^/]+)$")]
+EvaluationDefinitionId = Annotated[str, StringConstraints(pattern=r"^(?:[A-Za-z0-9][A-Za-z0-9._-]*|azureai://accounts/[^/]+/projects/[^/]+/evaluationDefinitions/[^/]+/versions/[^/]+)$")]
 ApplyPhase = Literal["repository", "github", "azure", "evaluations"]
 OperationStage = Literal["planned", "applying", "verifying", "completed", "failed", "compensation_required"]
 BindingClassification = Literal["bound-aligned", "bound-diverged", "bound-unknown", "ready-unbound", "not-ready"]
@@ -116,6 +116,21 @@ class GitHubSettings(BootstrapDocument):
 class IdentitySettings(BootstrapDocument):
     kind: IdentityKind
     resource_id: str | None = None
+    client_id: str | None = None
+
+    @model_validator(mode='after')
+    def validate_identity(self) -> Self:
+        if self.kind == 'user_assigned_managed_identity':
+            if self.resource_id is None:
+                raise BootstrapConfigError('user_assigned_managed_identity requires resource_id')
+            _validate_resource_id(self.resource_id, 'resource_id')
+        elif self.kind == 'entra_application':
+            if not self.client_id:
+                raise BootstrapConfigError('entra_application requires client_id')
+        elif self.kind == 'unresolved_migration':
+            if self.resource_id is not None or self.client_id is not None:
+                raise BootstrapConfigError('unresolved_migration cannot set resource_id or client_id')
+        return self
 
 
 class ExplicitAgentEntry(BootstrapDocument):
@@ -331,6 +346,24 @@ class BootstrapSidecar(BootstrapDocument):
     @classmethod
     def validate_editable_paths(cls, value: Sequence[str]) -> tuple[str, ...]:
         return validate_repository_relative_paths(value, field='editable_paths', allow_glob=True)
+
+    @model_validator(mode='after')
+    def validate_sidecar(self) -> Self:
+        if self.min_candidates <= 0 or self.max_candidates <= 0 or self.min_candidates > self.max_candidates:
+            raise BootstrapConfigError('candidate bounds must be positive and ordered')
+        if not 1 <= self.max_issue_evaluators <= MAX_ISSUE_EVALUATORS:
+            raise BootstrapConfigError('max_issue_evaluators must be between 1 and 8')
+        bundle_dataset_ids = {item.dataset_id for item in self.default_evaluator_bundle.datasets}
+        explicit_dataset_ids = {self.development_dataset.dataset_id, self.validating_dataset.dataset_id}
+        if bundle_dataset_ids != explicit_dataset_ids:
+            raise BootstrapConfigError('default bundle datasets must match explicit development/validating datasets')
+        bundle_definition_ids = {item.definition_id for item in self.default_evaluator_bundle.definitions}
+        explicit_definition_ids = {self.development_definition.definition_id, self.validating_definition.definition_id}
+        if bundle_definition_ids != explicit_definition_ids:
+            raise BootstrapConfigError('default bundle definitions must match explicit development/validating definitions')
+        if not self.hard_guardrails:
+            raise BootstrapConfigError('hard_guardrails must not be empty')
+        return self
 
 
 class CloudResourceLedgerEntry(BootstrapDocument):

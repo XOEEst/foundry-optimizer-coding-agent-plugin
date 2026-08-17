@@ -287,7 +287,7 @@
       "additionalProperties": false,
       "properties": {
         "definition_id": {
-          "pattern": "^(?:eval_[A-Za-z0-9_.-]+|azureai://accounts/[^/]+/projects/[^/]+/evaluationDefinitions/[^/]+/versions/[^/]+)$",
+          "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9._-]*|azureai://accounts/[^/]+/projects/[^/]+/evaluationDefinitions/[^/]+/versions/[^/]+)$",
           "title": "Definition Id",
           "type": "string"
         },

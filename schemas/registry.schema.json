@@ -108,6 +108,18 @@
     "IdentitySettings": {
       "additionalProperties": false,
       "properties": {
+        "client_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Client Id"
+        },
         "kind": {
           "enum": [
             "user_assigned_managed_identity",

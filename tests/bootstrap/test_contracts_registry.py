@@ -41,7 +41,7 @@ def _sidecar() -> BootstrapSidecar:
         'validating_dataset': {'dataset_id': 'azureai://accounts/a/projects/p/data/val/versions/1'},
         'development_definition': {'definition_id': 'eval_development'},
         'validating_definition': {'definition_id': 'eval_validating'},
-        'default_evaluator_bundle': {'objective': objective, 'datasets': [{'dataset_id': 'azureai://accounts/a/projects/p/data/dev/versions/1'}], 'definitions': [{'definition_id': 'eval_development'}]},
+        'default_evaluator_bundle': {'objective': objective, 'datasets': [{'dataset_id': 'azureai://accounts/a/projects/p/data/dev/versions/1'}, {'dataset_id': 'azureai://accounts/a/projects/p/data/val/versions/1'}], 'definitions': [{'definition_id': 'eval_development'}, {'definition_id': 'eval_validating'}]},
         'hard_guardrails': [{'evaluator_name': 'safety', 'required_pass_rate': 1.0, 'required': True}],
         'deployment': {'environment': 'foundry-production', 'enabled': True, 'require_aligned_binding': True},
     })
