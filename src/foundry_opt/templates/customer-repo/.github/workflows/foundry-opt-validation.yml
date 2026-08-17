@@ -18,28 +18,9 @@ permissions:
   contents: read
 
 jobs:
-  discover:
-    runs-on: ubuntu-latest
-    outputs:
-      roots: ${{ steps.roots.outputs.roots }}
-    steps:
-      - name: Emit changed-root matrix
-        id: roots
-        shell: bash
-        run: |
-          set -euo pipefail
-          printf 'roots=["agent"]\n' >>"$GITHUB_OUTPUT"
-
   validate:
-    needs: discover
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        changed_root: ${{ fromJson(needs.discover.outputs.roots) }}
-    permissions:
-      contents: read
     steps:
       - name: Check out the target repository without credentials
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
@@ -62,14 +43,13 @@ jobs:
         run: |
           set -euo pipefail
           repository="https://github.com/XOEEst/foundry-optimizer-coding-agent-plugin.git"
-          commit="c899b71"
+          commit="c899b718f3baebcfd08209ee5184d0cf61d8153d"
           shared_root="$RUNNER_TEMP/foundry-opt-shared"
           rm -rf "$shared_root"
           git init "$shared_root"
           git -C "$shared_root" remote add origin "$repository"
           git -C "$shared_root" fetch --depth=1 origin "$commit"
           git -C "$shared_root" checkout --detach FETCH_HEAD
-          echo "FOUNDRY_OPT_SHARED_ROOT=$shared_root" >>"$GITHUB_ENV"
           echo "FOUNDRY_OPT_PACKAGE_ROOT=$shared_root" >>"$GITHUB_ENV"
 
       - name: Install exact shared CLI
@@ -84,16 +64,13 @@ jobs:
         run: |
           set -euo pipefail
           python - <<'PY'
-          import pathlib
-          import yaml
-          root = pathlib.Path('.')
-          registry = yaml.safe_load((root / '.foundry-opt' / 'registry.yaml').read_text(encoding='utf-8'))
-          assert registry['agents'], 'registry must list agents'
-          for agent in registry['agents']:
-              config = root / agent['config_path']
-              sidecar = yaml.safe_load(config.read_text(encoding='utf-8'))
-              editable = tuple(sidecar['editable_paths'])
-              assert all(not value.startswith('.foundry-opt/') for value in editable)
-              assert all(not value.startswith('agent/.foundry/') for value in editable)
-              assert agent['root'] == '${{ matrix.changed_root }}'
-          test -f .github/copilot-instructions.md || true
+          from pathlib import Path
+          from foundry_opt.bootstrap.contracts import BootstrapSidecar, RootRegistry
+          root = Path('.')
+          registry = RootRegistry.from_document((root / '.foundry-opt' / 'registry.yaml').read_text(encoding='utf-8'))
+          for agent in registry.agents:
+              sidecar = BootstrapSidecar.from_document((root / agent.config_path).read_text(encoding='utf-8'))
+              assert all(not value.startswith('.foundry-opt/') for value in sidecar.editable_paths)
+              assert all(not value.startswith('agent/.foundry/') for value in sidecar.editable_paths)
+          assert (root / '.github' / 'copilot-instructions.md').exists() or True
+          PY

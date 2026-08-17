@@ -9,6 +9,9 @@ on:
       - .foundry-opt/registry.yaml
       - agent/.foundry/foundry-opt.yaml
 
+permissions:
+  contents: read
+
 jobs:
   copilot-setup-steps:
     runs-on: ubuntu-latest
@@ -43,30 +46,12 @@ jobs:
           version: "0.11.6"
           enable-cache: true
 
-      - name: Record trusted state paths
-        shell: bash
-        run: |
-          set -euo pipefail
-          trusted_root="$RUNNER_TEMP/foundry-opt-trusted"
-          rm -rf "$trusted_root"
-          mkdir -p "$trusted_root/bootstrap" "$trusted_root/broker" "$trusted_root/jobs"
-          chmod 700 "$trusted_root" "$trusted_root/bootstrap" "$trusted_root/broker" "$trusted_root/jobs"
-          echo "FOUNDRY_OPT_TRUSTED_ROOT=$trusted_root" >>"$GITHUB_ENV"
-          echo "FOUNDRY_OPT_BOOTSTRAP_RECEIPT=$trusted_root/bootstrap/receipt.json" >>"$GITHUB_ENV"
-          echo "FOUNDRY_OPT_GITHUB_BINDING=$trusted_root/broker/binding.json" >>"$GITHUB_ENV"
-          echo "FOUNDRY_OPT_BROKER_SOCKET=$trusted_root/broker/github.sock" >>"$GITHUB_ENV"
-          echo "FOUNDRY_OPT_BROKER_READY=$trusted_root/broker/ready.json" >>"$GITHUB_ENV"
-          echo "FOUNDRY_OPT_BROKER_LIFETIME=$trusted_root/broker/lifetime.txt" >>"$GITHUB_ENV"
-          echo "FOUNDRY_OPT_STATE_ROOT=$trusted_root/jobs" >>"$GITHUB_ENV"
-          echo "FOUNDRY_OPT_RUNTIME_SHA=$trusted_root/runtime-sha.txt" >>"$GITHUB_ENV"
-          echo "FOUNDRY_OPT_RESUME_RECORD=$trusted_root/resume.json" >>"$GITHUB_ENV"
-
       - name: Fetch exact v1-capable shared revision
         shell: bash
         run: |
           set -euo pipefail
           repository="https://github.com/XOEEst/foundry-optimizer-coding-agent-plugin.git"
-          commit="c899b71"
+          commit="c899b718f3baebcfd08209ee5184d0cf61d8153d"
           shared_root="$RUNNER_TEMP/foundry-opt-shared"
           rm -rf "$shared_root"
           git init "$shared_root"
@@ -74,9 +59,7 @@ jobs:
           git -C "$shared_root" fetch --depth=1 origin "$commit"
           git -C "$shared_root" checkout --detach FETCH_HEAD
           resolved_commit="$(git -C "$shared_root" rev-parse HEAD)"
-          printf '%s' "$resolved_commit" >"$FOUNDRY_OPT_RUNTIME_SHA"
-          test -f "$shared_root/pyproject.toml"
-          test -d "$shared_root/src/foundry_opt/templates/skills/foundry-agent-optimizer"
+          test "$resolved_commit" = "$commit"
           echo "FOUNDRY_OPT_SHARED_ROOT=$shared_root" >>"$GITHUB_ENV"
           echo "FOUNDRY_OPT_PACKAGE_ROOT=$shared_root" >>"$GITHUB_ENV"
           echo "FOUNDRY_OPT_SKILL_SOURCE=$shared_root/src/foundry_opt/templates/skills/foundry-agent-optimizer" >>"$GITHUB_ENV"
@@ -98,44 +81,80 @@ jobs:
           mkdir -p "$(dirname "$skill_root")"
           cp -a "$FOUNDRY_OPT_SKILL_SOURCE" "$skill_root"
 
-      - name: Verify bootstrap, registry, and sidecar payloads
+      - name: Record trusted state paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          trusted_root="$RUNNER_TEMP/foundry-opt-trusted"
+          rm -rf "$trusted_root"
+          mkdir -p "$trusted_root/bootstrap" "$trusted_root/broker" "$trusted_root/jobs"
+          chmod 700 "$trusted_root" "$trusted_root/bootstrap" "$trusted_root/broker" "$trusted_root/jobs"
+          echo "FOUNDRY_OPT_TRUSTED_ROOT=$trusted_root" >>"$GITHUB_ENV"
+          echo "FOUNDRY_OPT_BOOTSTRAP_RECEIPT=$trusted_root/bootstrap/receipt.json" >>"$GITHUB_ENV"
+          echo "FOUNDRY_OPT_GITHUB_BINDING=$trusted_root/broker/binding.json" >>"$GITHUB_ENV"
+          echo "FOUNDRY_OPT_BROKER_SOCKET=$trusted_root/broker/github.sock" >>"$GITHUB_ENV"
+          echo "FOUNDRY_OPT_STATE_ROOT=$trusted_root/jobs" >>"$GITHUB_ENV"
+          echo "FOUNDRY_OPT_RUNTIME_SHA=c899b718f3baebcfd08209ee5184d0cf61d8153d" >>"$GITHUB_ENV"
+          echo "FOUNDRY_OPT_RESUME_RECORD=$trusted_root/resume.json" >>"$GITHUB_ENV"
+
+      - name: Validate bootstrap contracts and selected registry entry
         shell: bash
         run: |
           set -euo pipefail
           foundry-opt bootstrap verify --pin .github/foundry-opt.lock.yml --checkout "$FOUNDRY_OPT_SHARED_ROOT" --receipt "$FOUNDRY_OPT_BOOTSTRAP_RECEIPT"
           python - <<'PY'
-          import pathlib
-          import yaml
-          root = pathlib.Path('.')
-          registry = yaml.safe_load((root / '.foundry-opt' / 'registry.yaml').read_text(encoding='utf-8'))
-          assert registry['agents'], 'registry must list agents'
-          for agent in registry['agents']:
-              config = root / agent['config_path']
-              sidecar = yaml.safe_load(config.read_text(encoding='utf-8'))
-              assert sidecar['repo_agent_id'] == agent['agent_id']
-              assert '.foundry-opt/' not in '\n'.join(sidecar['editable_paths'])
-              assert 'agent/.foundry/' not in '\n'.join(sidecar['editable_paths'])
+          from pathlib import Path
+          from foundry_opt.bootstrap.contracts import BootstrapSidecar, RootRegistry
+          root = Path('.')
+          registry = RootRegistry.from_document((root / '.foundry-opt' / 'registry.yaml').read_text(encoding='utf-8'))
+          assert registry.agents, 'registry must contain at least one enabled agent'
+          selected = next(agent for agent in registry.agents if agent.enabled)
+          assert selected.config_path == 'agent/.foundry/foundry-opt.yaml'
+          for agent in registry.agents:
+              sidecar = BootstrapSidecar.from_document((root / agent.config_path).read_text(encoding='utf-8'))
+              assert sidecar.repo_agent_id == agent.agent_id
+              assert all(not value.startswith('.foundry-opt/') for value in sidecar.editable_paths)
+              assert all(not value.startswith('agent/.foundry/') for value in sidecar.editable_paths)
           PY
 
+      - name: Detect trusted issue context
+        id: job-context
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" || "$GITHUB_EVENT_NAME" == "pull_request_target" ]]; then
+            echo 'trusted=true' >>"$GITHUB_OUTPUT"
+          elif [[ "$GITHUB_EVENT_NAME" == "issues" || "$GITHUB_EVENT_NAME" == "issue_comment" ]]; then
+            echo 'trusted=true' >>"$GITHUB_OUTPUT"
+          else
+            echo 'trusted=false' >>"$GITHUB_OUTPUT"
+          fi
+
       - name: Launch and verify broker lifecycle
+        if: ${{ steps.job-context.outputs.trusted == 'true' }}
         env:
           GITHUB_SETUP_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          printf '%s' "$GITHUB_SETUP_TOKEN" | foundry-opt broker launch --event "$GITHUB_EVENT_PATH" --binding "$FOUNDRY_OPT_GITHUB_BINDING" --socket "$FOUNDRY_OPT_BROKER_SOCKET" --token-stdin
+          printf '%s' "$GITHUB_SETUP_TOKEN" | foundry-opt broker launch --event "$GITHUB_EVENT_PATH" --binding "$FOUNDRY_OPT_GITHUB_BINDING" --socket "$FOUNDRY_OPT_BROKER_SOCKET" --head-ref "${GITHUB_HEAD_REF:-}" --ref-name "${GITHUB_REF_NAME:-}" --token-stdin
           python - <<'PY'
-          import json, os, socket, time
+          import os, time
           from pathlib import Path
-          sock = Path(os.environ['FOUNDRY_OPT_BROKER_SOCKET'])
+          socket_path = Path(os.environ['FOUNDRY_OPT_BROKER_SOCKET'])
           deadline = time.time() + 15
-          while time.time() < deadline and not sock.exists():
+          while time.time() < deadline and not socket_path.exists():
               time.sleep(0.2)
-          assert sock.exists(), 'broker socket not created'
-          Path(os.environ['FOUNDRY_OPT_BROKER_READY']).write_text(json.dumps({'socket': str(sock), 'ready': True}), encoding='utf-8')
-          Path(os.environ['FOUNDRY_OPT_BROKER_LIFETIME']).write_text('session', encoding='utf-8')
+          assert socket_path.exists(), 'broker socket not ready'
           PY
           unset GITHUB_SETUP_TOKEN
+
+      - name: Run offline preflight without broker
+        if: ${{ steps.job-context.outputs.trusted != 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          foundry-opt preflight --repository . --offline
 
       - name: Persist resume metadata
         shell: bash
@@ -144,5 +163,5 @@ jobs:
           python - <<'PY'
           import json, os
           from pathlib import Path
-          Path(os.environ['FOUNDRY_OPT_RESUME_RECORD']).write_text(json.dumps({'runtime_sha_path': os.environ['FOUNDRY_OPT_RUNTIME_SHA'], 'state_root': os.environ['FOUNDRY_OPT_STATE_ROOT'], 'broker_socket': os.environ['FOUNDRY_OPT_BROKER_SOCKET'], 'broker_ready': os.environ['FOUNDRY_OPT_BROKER_READY']}, indent=2), encoding='utf-8')
+          Path(os.environ['FOUNDRY_OPT_RESUME_RECORD']).write_text(json.dumps({'runtime_sha': os.environ['FOUNDRY_OPT_RUNTIME_SHA'], 'state_root': os.environ['FOUNDRY_OPT_STATE_ROOT'], 'broker_socket': os.environ.get('FOUNDRY_OPT_BROKER_SOCKET')}, indent=2), encoding='utf-8')
           PY
