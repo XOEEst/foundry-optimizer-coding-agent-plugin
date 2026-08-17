@@ -1,0 +1,26 @@
+schema_version: 1
+
+source_root: agent
+
+editable_paths:
+  - agent/**
+
+min_candidates: 2
+max_candidates: 2
+
+baseline_model: baseline-model
+allowed_models:
+  - baseline-model
+
+primary_metric: primary_metric
+
+decision_rules:
+  minimum_aggregate_delta: 0.01
+  focused_cases_required: true
+  max_regressions: 0
+
+hard_guardrails:
+  safety:
+    required_pass_rate: 1.0
+
+metadata_path: .foundry/agent-metadata.yaml

@@ -1,0 +1,251 @@
+name: Copilot Setup Steps
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/copilot-setup-steps.yml
+      - .github/foundry-opt.lock.yml
+      - .github/foundry-optimizer.yaml
+      - .foundry/agent-metadata.yaml
+
+jobs:
+  copilot-setup-steps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 59
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Check out the agent repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - name: Canonicalize the repository origin
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_origin="https://github.com/${GITHUB_REPOSITORY}.git"
+          git remote set-url origin "$expected_origin"
+          test "$(git remote get-url origin)" = "$expected_origin"
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78
+        with:
+          version: "0.11.6"
+          enable-cache: true
+
+      - name: Record trusted state paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          trusted_root="$RUNNER_TEMP/foundry-opt-trusted"
+          rm -rf "$trusted_root"
+          mkdir -p "$trusted_root/bootstrap" "$trusted_root/broker" "$trusted_root/jobs"
+          chmod 700 "$trusted_root" "$trusted_root/bootstrap" "$trusted_root/broker" "$trusted_root/jobs"
+          echo "FOUNDRY_OPT_TRUSTED_ROOT=$trusted_root" >>"$GITHUB_ENV"
+          echo "FOUNDRY_OPT_BOOTSTRAP_RECEIPT=$trusted_root/bootstrap/receipt.json" >>"$GITHUB_ENV"
+          echo "FOUNDRY_OPT_GITHUB_BINDING=$trusted_root/broker/binding.json" >>"$GITHUB_ENV"
+          echo "FOUNDRY_OPT_BROKER_SOCKET=$trusted_root/broker/github.sock" >>"$GITHUB_ENV"
+          echo "FOUNDRY_OPT_STATE_ROOT=$trusted_root/jobs" >>"$GITHUB_ENV"
+
+      - name: Detect trusted optimize job context
+        id: job-context
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - "$GITHUB_EVENT_PATH" <<'PY' >>"$GITHUB_OUTPUT"
+          import json
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          pattern = re.compile(
+              r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+"
+              r"(?:(?P<repo>[A-Za-z0-9._-]+/[A-Za-z0-9._-]+))?#(?P<number>[1-9][0-9]*)\b"
+          )
+
+          payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          repository = payload.get("repository")
+          repository_full_name = (
+              repository.get("full_name")
+              if isinstance(repository, dict)
+              else None
+          )
+          branch_candidates = []
+
+          def add_branch(value):
+              if not isinstance(value, str):
+                  return
+              normalized = value.strip()
+              if normalized.startswith("refs/heads/"):
+                  normalized = normalized.removeprefix("refs/heads/")
+              if not normalized or normalized in branch_candidates:
+                  return
+              branch_candidates.append(normalized)
+
+          add_branch(os.environ.get("GITHUB_HEAD_REF"))
+          add_branch(os.environ.get("GITHUB_REF_NAME"))
+          issue = payload.get("issue")
+          issue_number = None
+          has_direct_issue_context = (
+              isinstance(issue, dict)
+              and isinstance(issue.get("number"), int)
+              and issue["number"] > 0
+              and not isinstance(issue.get("pull_request"), dict)
+          )
+          if has_direct_issue_context:
+              issue_number = issue["number"]
+          else:
+              numbers = set()
+              bodies = []
+              if isinstance(issue, dict) and isinstance(issue.get("body"), str):
+                  bodies.append(issue["body"])
+              pull_request = payload.get("pull_request")
+              if isinstance(pull_request, dict) and isinstance(pull_request.get("body"), str):
+                  bodies.append(pull_request["body"])
+              for body in bodies:
+                  for match in pattern.finditer(body):
+                      repository_match = match.group("repo")
+                      if (
+                          repository_match is not None
+                          and repository_full_name is not None
+                          and repository_match != repository_full_name
+                      ):
+                          continue
+                      numbers.add(int(match.group("number")))
+              if len(numbers) == 1:
+                  issue_number = numbers.pop()
+          has_branch_context = (
+              os.environ.get("GITHUB_EVENT_NAME") == "dynamic"
+              and any(
+                  branch.startswith("copilot/")
+                  for branch in branch_candidates
+              )
+          )
+          print(
+              f"has_job_context={'true' if issue_number is not None or has_branch_context else 'false'}"
+          )
+          if issue_number is not None:
+              print(f"issue_number={issue_number}")
+          PY
+
+      - name: Fetch the exact shared revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          pin=".github/foundry-opt.lock.yml"
+          test -f "$pin"
+          value() {
+            local key="$1"
+            awk -F': ' -v key="$key" '$1 == key {print substr($0, length(key) + 3)}' "$pin"
+          }
+
+          repository="$(value repository_url)"
+          commit="$(value commit)"
+          package_path="$(value package_path)"
+          skill_path="$(value skill_path)"
+          lock_sha256="$(value uv_lock_sha256)"
+
+          [[ "$repository" =~ ^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\.git$ ]]
+          [[ "$commit" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
+          [[ "$lock_sha256" =~ ^[0-9a-f]{64}$ ]]
+
+          shared_root="$RUNNER_TEMP/foundry-opt-shared"
+          rm -rf "$shared_root"
+
+          git init "$shared_root"
+          git -C "$shared_root" remote add origin "$repository"
+          git -C "$shared_root" fetch --depth=1 origin "$commit"
+          git -C "$shared_root" checkout --detach FETCH_HEAD
+          test "$(git -C "$shared_root" rev-parse HEAD)" = "$commit"
+          test "$(sha256sum "$shared_root/uv.lock" | cut -d' ' -f1)" = "$lock_sha256"
+
+          package_root="$(cd "$shared_root/$package_path" && pwd -P)"
+          skill_root="$(cd "$shared_root/$skill_path" && pwd -P)"
+          case "$package_root" in "$shared_root"|"$shared_root"/*) ;; *) exit 2 ;; esac
+          case "$skill_root" in "$shared_root"/*) ;; *) exit 2 ;; esac
+          test -f "$package_root/pyproject.toml"
+          test -d "$skill_root"
+
+          echo "FOUNDRY_OPT_SHARED_ROOT=$shared_root" >>"$GITHUB_ENV"
+          echo "FOUNDRY_OPT_PACKAGE_ROOT=$package_root" >>"$GITHUB_ENV"
+          echo "FOUNDRY_OPT_SKILL_SOURCE=$skill_root" >>"$GITHUB_ENV"
+
+      - name: Install the frozen shared environment and skill
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv sync --frozen --project "$FOUNDRY_OPT_PACKAGE_ROOT"
+          launcher_root="$HOME/.local/bin"
+          mkdir -p "$launcher_root"
+          export FOUNDRY_OPT_EXECUTABLE="$launcher_root/foundry-opt"
+          ln -sf "$FOUNDRY_OPT_PACKAGE_ROOT/.venv/bin/foundry-opt" "$FOUNDRY_OPT_EXECUTABLE"
+          chmod 755 "$FOUNDRY_OPT_EXECUTABLE"
+          echo "FOUNDRY_OPT_EXECUTABLE=$FOUNDRY_OPT_EXECUTABLE" >>"$GITHUB_ENV"
+          echo "$launcher_root" >>"$GITHUB_PATH"
+          test -x "$FOUNDRY_OPT_EXECUTABLE"
+          "$FOUNDRY_OPT_EXECUTABLE" --help >/dev/null
+
+          skill_root="$HOME/.copilot/skills/foundry-agent-optimizer"
+          rm -rf "$skill_root"
+          mkdir -p "$(dirname "$skill_root")"
+          cp -a "$FOUNDRY_OPT_SKILL_SOURCE" "$skill_root"
+
+      - name: Verify bootstrap receipt and target configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          foundry-opt bootstrap verify \
+            --pin .github/foundry-opt.lock.yml \
+            --checkout "$FOUNDRY_OPT_SHARED_ROOT" \
+            --receipt "$FOUNDRY_OPT_BOOTSTRAP_RECEIPT"
+          foundry-opt validate-config \
+            --repository . \
+            --shared-checkout "$FOUNDRY_OPT_SHARED_ROOT"
+
+      - name: Launch the minimal GitHub issue broker
+        if: ${{ steps.job-context.outputs.has_job_context == 'true' }}
+        env:
+          GITHUB_SETUP_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "$GITHUB_SETUP_TOKEN" | \
+            foundry-opt broker launch \
+              --event "$GITHUB_EVENT_PATH" \
+              --binding "$FOUNDRY_OPT_GITHUB_BINDING" \
+              --socket "$FOUNDRY_OPT_BROKER_SOCKET" \
+              --head-ref "${GITHUB_HEAD_REF:-}" \
+              --ref-name "${GITHUB_REF_NAME:-}" \
+              --token-stdin
+          unset GITHUB_SETUP_TOKEN
+
+      - name: Validate the complete setup contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x "$FOUNDRY_OPT_EXECUTABLE"
+          test -d "$HOME/.copilot/skills/foundry-agent-optimizer"
+          test -f "$FOUNDRY_OPT_BOOTSTRAP_RECEIPT"
+          test -d "$FOUNDRY_OPT_STATE_ROOT"
+          test "$(command -v foundry-opt)" = "$FOUNDRY_OPT_EXECUTABLE"
+          if [[ "${{ steps.job-context.outputs.has_job_context }}" == "true" ]]; then
+            test -f "$FOUNDRY_OPT_GITHUB_BINDING"
+            test -S "$FOUNDRY_OPT_BROKER_SOCKET"
+            foundry-opt preflight --repository .
+          else
+            test ! -e "$FOUNDRY_OPT_BROKER_SOCKET"
+            unset FOUNDRY_OPT_GITHUB_BINDING
+            unset FOUNDRY_OPT_BROKER_SOCKET
+            foundry-opt preflight --repository . --offline
+          fi

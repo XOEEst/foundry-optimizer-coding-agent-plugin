@@ -1,0 +1,66 @@
+name: Optimize the Foundry agent
+description: Run one bounded, evidence-backed optimize job.
+title: "[Optimize job] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Assign the completed issue to Copilot to start the optimize job.
+        GitHub will create one early draft pull request. Only a verified winner
+        is applied to it; otherwise it is closed unchanged.
+
+        This form can only narrow `.github/foundry-optimizer.yaml`. The
+        optimize job uses OIDC-backed draft versions only, keeps redacted
+        evidence on this original issue, and reserves the validating dataset
+        for the provisional winner.
+
+  - type: textarea
+    id: optimization_goal
+    attributes:
+      label: Optimization goal
+      description: Describe the behavior or quality outcome that should improve.
+      placeholder: Improve complete and correct policy coverage for multi-rule requests.
+    validations:
+      required: true
+
+  - type: textarea
+    id: observed_failures
+    attributes:
+      label: Observed failures or evidence
+      description: Summarize failing cases, evaluation patterns, traces, or user feedback without sensitive data.
+      placeholder: Responses sometimes omit one applicable rule when several rules apply.
+    validations:
+      required: true
+
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints and guardrails
+      description: Add business constraints beyond the repository policy, or state that the repository defaults apply.
+      placeholder: Preserve advisory-only behavior and do not increase sensitive-data requests.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: candidate_budget
+    attributes:
+      label: Changed candidates
+      description: Select the number of changed candidates beyond the fresh baseline.
+      options:
+        - "2"
+    validations:
+      required: true
+
+  - type: textarea
+    id: editable_scope
+    attributes:
+      label: Optional narrower editable scope
+      description: One repository-relative policy-approved path pattern per line. Leave blank to use the policy default.
+      render: text
+
+  - type: textarea
+    id: candidate_models
+    attributes:
+      label: Optional narrower model set
+      description: One policy-approved deployment name per line. Leave blank to use the policy default.
+      render: text
