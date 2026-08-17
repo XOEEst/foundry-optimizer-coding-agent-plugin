@@ -1,4 +1,231 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "BootstrapAction": {
+      "additionalProperties": false,
+      "properties": {
+        "action_id": {
+          "title": "Action Id",
+          "type": "string"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "phase": {
+          "enum": [
+            "discovery",
+            "repository",
+            "providers",
+            "evaluation",
+            "apply",
+            "verify",
+            "rollback"
+          ],
+          "title": "Phase",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "template_payload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatePayloadSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "action_id",
+        "phase",
+        "kind"
+      ],
+      "title": "BootstrapAction",
+      "type": "object"
+    },
+    "ManagedFileLockEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "owner_agent_id": {
+          "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$",
+          "title": "Owner Agent Id",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "sha256",
+        "owner_agent_id"
+      ],
+      "title": "ManagedFileLockEntry",
+      "type": "object"
+    },
+    "SemanticPatchSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "match_text": {
+          "title": "Match Text",
+          "type": "string"
+        },
+        "operation": {
+          "enum": [
+            "replace",
+            "insert_before",
+            "insert_after",
+            "delete"
+          ],
+          "title": "Operation",
+          "type": "string"
+        },
+        "replacement_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Replacement Text"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "target_path": {
+          "title": "Target Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_path",
+        "operation",
+        "match_text"
+      ],
+      "title": "SemanticPatchSpec",
+      "type": "object"
+    },
+    "TemplatePayloadSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "destination_path": {
+          "title": "Destination Path",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": true,
+          "title": "Payload",
+          "type": "object"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "semantic_patches": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SemanticPatchSpec"
+          },
+          "title": "Semantic Patches",
+          "type": "array"
+        },
+        "template_id": {
+          "pattern": "^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?@[A-Za-z0-9._-]+$",
+          "title": "Template Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "template_id",
+        "destination_path",
+        "payload"
+      ],
+      "title": "TemplatePayloadSpec",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "actions": {
+      "items": {
+        "$ref": "#/$defs/BootstrapAction"
+      },
+      "title": "Actions",
+      "type": "array"
+    },
+    "managed_files": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ManagedFileLockEntry"
+      },
+      "title": "Managed Files",
+      "type": "array"
+    },
+    "phases": {
+      "items": {
+        "enum": [
+          "discovery",
+          "repository",
+          "providers",
+          "evaluation",
+          "apply",
+          "verify",
+          "rollback"
+        ],
+        "type": "string"
+      },
+      "title": "Phases",
+      "type": "array"
+    },
+    "plan_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Plan Hash",
+      "type": "string"
+    },
+    "plan_id": {
+      "title": "Plan Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "plan_id",
+    "phases",
+    "actions",
+    "plan_hash"
+  ],
+  "title": "BootstrapPlan",
   "type": "object"
 }

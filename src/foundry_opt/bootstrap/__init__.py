@@ -1,5 +1,3 @@
-from .canonical import canonical_json_bytes, canonical_sha256, redact_persisted_document, safe_persisted_document
-from .contracts import *
-from .errors import *
+"""Customer repository bootstrap contracts and orchestration."""
 
-__all__ = [name for name in globals() if not name.startswith("_")]
+from __future__ import annotations

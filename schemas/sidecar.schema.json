@@ -1,4 +1,176 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "BindingState": {
+      "additionalProperties": false,
+      "properties": {
+        "agent_id": {
+          "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$",
+          "title": "Agent Id",
+          "type": "string"
+        },
+        "resource_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Resource Ids",
+          "type": "array"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "state": {
+          "enum": [
+            "unbound",
+            "planned",
+            "applied",
+            "verified",
+            "failed",
+            "rolled_back"
+          ],
+          "title": "State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "agent_id",
+        "state"
+      ],
+      "title": "BindingState",
+      "type": "object"
+    },
+    "CloudResourceOwnership": {
+      "additionalProperties": false,
+      "properties": {
+        "binding_state": {
+          "enum": [
+            "unbound",
+            "planned",
+            "applied",
+            "verified",
+            "failed",
+            "rolled_back"
+          ],
+          "title": "Binding State",
+          "type": "string"
+        },
+        "owner_agent_id": {
+          "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$",
+          "title": "Owner Agent Id",
+          "type": "string"
+        },
+        "resource_id": {
+          "title": "Resource Id",
+          "type": "string"
+        },
+        "resource_kind": {
+          "title": "Resource Kind",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "resource_kind",
+        "resource_id",
+        "owner_agent_id",
+        "binding_state"
+      ],
+      "title": "CloudResourceOwnership",
+      "type": "object"
+    },
+    "ManagedFileLockEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "owner_agent_id": {
+          "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$",
+          "title": "Owner Agent Id",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "sha256",
+        "owner_agent_id"
+      ],
+      "title": "ManagedFileLockEntry",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "bindings": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/BindingState"
+      },
+      "title": "Bindings",
+      "type": "array"
+    },
+    "cloud_resources": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/CloudResourceOwnership"
+      },
+      "title": "Cloud Resources",
+      "type": "array"
+    },
+    "managed_files": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ManagedFileLockEntry"
+      },
+      "title": "Managed Files",
+      "type": "array"
+    },
+    "roots": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Roots",
+      "type": "array"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "shared_source_with": {
+      "default": [],
+      "items": {
+        "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$",
+        "type": "string"
+      },
+      "title": "Shared Source With",
+      "type": "array"
+    }
+  },
+  "required": [
+    "roots"
+  ],
+  "title": "AgentSidecarGroup",
   "type": "object"
 }

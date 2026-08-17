@@ -1,4 +1,35 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "applied_actions": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Applied Actions",
+      "type": "array"
+    },
+    "plan_hash": {
+      "default": "0000000000000000000000000000000000000000000000000000000000000000",
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Plan Hash",
+      "type": "string"
+    },
+    "receipt_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Receipt Hash",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "applied_actions",
+    "receipt_hash"
+  ],
+  "title": "BootstrapReceipt",
   "type": "object"
 }

@@ -85,6 +85,18 @@ def _reject_prohibited_mapping(value: Mapping[str, object], *, field: str) -> No
         raise BootstrapPlanError(f"{field} includes prohibited persisted content: {sorted(overlap)!r}")
 
 
+def _jsonable(value: object) -> object:
+    if isinstance(value, FrozenModel):
+        return value.model_dump(mode='json')
+    if isinstance(value, tuple):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, list):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, Mapping):
+        return {key: _jsonable(item) for key, item in value.items()}
+    return value
+
+
 class BootstrapDocument(FrozenModel):
     schema_version: Literal[1] = 1
 
@@ -323,30 +335,34 @@ class BootstrapPlan(BootstrapDocument):
     @model_validator(mode="after")
     def validate_hash(self) -> Self:
         payload = self._hash_payload()
-        if self.plan_hash != canonical_sha256(payload):
+        expected = canonical_sha256(payload)
+        if self.plan_hash != expected:
             raise BootstrapPlanError("plan_hash does not match canonical plan payload")
         return self
 
     def _hash_payload(self) -> dict[str, object]:
-        payload = self.model_dump(mode="json", exclude={"plan_hash"})
+        payload = _jsonable(self.model_dump(mode="json", exclude={"schema_version", "plan_hash"}))
         _reject_prohibited_mapping(payload, field="plan")
         return payload
 
     @classmethod
     def create(cls, **values: object) -> "BootstrapPlan":
-        payload = dict(values)
-        payload["plan_hash"] = canonical_sha256({k: v for k, v in payload.items() if k != "plan_hash"})
+        payload = _jsonable(dict(values))
+        _reject_prohibited_mapping(payload, field="plan")
+        materialized = cls.model_construct(schema_version=1, plan_hash="0" * 64, **payload)
+        hash_payload = materialized._hash_payload()
+        payload["plan_hash"] = canonical_sha256(hash_payload)
         return cls.model_validate(payload)
 
 
 class BootstrapReceipt(BootstrapDocument):
-    plan_hash: Sha256
+    plan_hash: Sha256 = '0' * 64
     applied_actions: tuple[str, ...]
     receipt_hash: Sha256
 
     @model_validator(mode="after")
     def validate_hash(self) -> Self:
-        payload = self.model_dump(mode="json", exclude={"receipt_hash"})
+        payload = _jsonable(self.model_dump(mode="json", exclude={"schema_version", "receipt_hash"}))
         _reject_prohibited_mapping(payload, field="receipt")
         if self.receipt_hash != canonical_sha256(payload):
             raise BootstrapPlanError("receipt_hash does not match canonical receipt payload")
@@ -354,7 +370,7 @@ class BootstrapReceipt(BootstrapDocument):
 
     @classmethod
     def create(cls, *, plan_hash: str, applied_actions: Sequence[str]) -> "BootstrapReceipt":
-        payload = {"plan_hash": plan_hash, "applied_actions": list(applied_actions)}
+        payload = _jsonable({"plan_hash": plan_hash, "applied_actions": list(applied_actions)})
         payload["receipt_hash"] = canonical_sha256(payload)
         return cls.model_validate(payload)
 
