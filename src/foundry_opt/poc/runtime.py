@@ -1941,6 +1941,8 @@ def _metric_by_name(evidence: EvaluationEvidence, name: str) -> object:
 def _protected_patterns(policy: RepositoryPolicy) -> tuple[str, ...]:
     protected = {
         ".git/**",
+        ".foundry-opt/**",
+        ".foundry-opt/registry.yaml",
         str(DEFAULT_POLICY_PATH).replace("\\", "/"),
         policy.metadata_path,
         str(DEFAULT_PIN_PATH).replace("\\", "/"),

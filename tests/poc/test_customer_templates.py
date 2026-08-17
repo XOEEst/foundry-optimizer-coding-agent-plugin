@@ -90,12 +90,14 @@ def test_deploy_workflow_computes_dynamic_noop_matrix() -> None:
     assert "example-agent" not in text
     assert "matrix = {'include': include}" in text
     assert "toJson(fromJson(needs.discover.outputs.matrix).include) != '[]'" in text
+    assert "manual repo_agent_id" in text
+    assert "MANUAL_REPO_AGENT_ID" in text
 
 
-def test_issue_form_records_wave5_parser_dependency() -> None:
+def test_issue_form_uses_built_in_parser_contract() -> None:
     document = yaml.safe_load(_read(ISSUE_FORM_PATH))
     intro = document["body"][0]["attributes"]["value"]
-    assert "Wave5 parser integration dependency" in intro
+    assert "Parser support is built into the runtime now" in intro
 
 
 def test_semantic_patch_fixture_targets_legacy_workflow_and_applies_cleanly() -> None:
