@@ -5,6 +5,7 @@ import unicodedata
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Annotated, Any, Final, Literal, Self, TypeVar
+import math
 from urllib.parse import urlsplit
 
 import yaml
@@ -51,6 +52,23 @@ class RepositoryPathError(POCConfigurationError):
 
 class IssueNarrowingError(POCConfigurationError):
     """An issue request widens repository policy."""
+
+
+class IssueEvaluatorSyntaxError(POCConfigurationError):
+    """An issue-supplied evaluator line is invalid."""
+
+
+_TARGET_CHARS: Final = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:/-"
+)
+_EVALUATOR_LINE = re.compile(
+    r"^(?P<evaluator_id>\S+?)(?:\s+weight=(?P<weight>[^\s]+))?$"
+)
+_REPO_AGENT_ID = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9])?$")
+_BUILTIN_EVALUATOR_PREFIX = "azureai://built-in/evaluators/"
+_VERSIONED_EVALUATOR = re.compile(
+    r"^azureai://accounts/[^/]+/projects/[^/]+/evaluators/[^/]+/versions/[^/]+$"
+)
 
 
 class _StrictYamlLoader(yaml.SafeLoader):
@@ -1226,17 +1244,40 @@ def _normalize_agent_metadata_payload(payload: Mapping[str, object]) -> dict[str
 
 
 class OptimizeIssueRequest(FrozenModel):
+    repo_agent_id: str | None = None
+    explicit_target: str | None = None
     goal: str
     observed_failures: tuple[str, ...]
     constraints: tuple[str, ...] = ()
     candidate_budget: int
     model_subset: tuple[str, ...] | None = None
     editable_scope_subset: tuple[str, ...] | None = None
+    issue_evaluators: tuple["IssueEvaluatorEntry", ...] | None = None
 
     @field_validator("goal")
     @classmethod
     def validate_goal(cls, value: str) -> str:
         return _free_text(value, "goal", limit=MAX_TEXT_LENGTH)
+
+    @field_validator("repo_agent_id")
+    @classmethod
+    def validate_repo_agent_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = _compact_text(value, "repo_agent_id", limit=128)
+        if _REPO_AGENT_ID.fullmatch(normalized) is None:
+            raise ValueError("repo_agent_id must be a stable repoAgentId token")
+        return normalized
+
+    @field_validator("explicit_target")
+    @classmethod
+    def validate_explicit_target(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = _free_text(value, "explicit_target", limit=512)
+        if any(character not in _TARGET_CHARS for character in normalized):
+            raise ValueError("explicit_target contains unsupported characters")
+        return normalized
 
     @field_validator("observed_failures", mode="before")
     @classmethod
@@ -1314,8 +1355,40 @@ class OptimizeIssueRequest(FrozenModel):
             allow_glob=True,
         )
 
+    @field_validator("issue_evaluators", mode="before")
+    @classmethod
+    def validate_issue_evaluators(
+        cls,
+        value: object,
+    ) -> tuple["IssueEvaluatorEntry", ...] | None:
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        items = _string_sequence(
+            value,
+            "issue_evaluators",
+            compact=False,
+            allow_empty=True,
+            limit=256,
+        )
+        if not items:
+            return None
+        parsed = tuple(IssueEvaluatorEntry.parse_line(item) for item in items)
+        seen: set[str] = set()
+        for entry in parsed:
+            key = entry.evaluator_id.casefold()
+            if key in seen:
+                raise ValueError("issue_evaluators must not contain duplicate evaluator IDs")
+            seen.add(key)
+        return parsed
+
     @model_validator(mode="after")
     def validate_safe_document(self) -> Self:
+        if self.repo_agent_id is None and self.explicit_target is None:
+            object.__setattr__(self, "repo_agent_id", "default")
+        if (self.repo_agent_id is None) == (self.explicit_target is None):
+            raise ValueError("exactly one of repo_agent_id or explicit_target is required")
         assert_safe_persisted_document(self.model_dump(mode="json"))
         return self
 
@@ -1331,11 +1404,58 @@ class OptimizeIssueRequest(FrozenModel):
             if "editable_scope_subset" not in normalized:
                 normalized["editable_scope_subset"] = normalized["editable_scope"]
             normalized.pop("editable_scope", None)
+        if "target" in normalized:
+            target = normalized.pop("target")
+            if isinstance(target, str):
+                stripped = target.strip()
+                if _REPO_AGENT_ID.fullmatch(stripped):
+                    normalized.setdefault("repo_agent_id", stripped)
+                else:
+                    normalized.setdefault("explicit_target", stripped)
         return _validate_model(
             cls,
             normalized,
             subject="optimize issue request",
         )
+
+
+class IssueEvaluatorEntry(FrozenModel):
+    evaluator_id: str
+    weight: float | None = None
+
+    @field_validator("evaluator_id")
+    @classmethod
+    def validate_evaluator_id(cls, value: str) -> str:
+        normalized = _compact_text(value, "evaluator_id", limit=256)
+        if not (
+            normalized.startswith(_BUILTIN_EVALUATOR_PREFIX)
+            or _VERSIONED_EVALUATOR.fullmatch(normalized)
+        ):
+            raise ValueError("evaluator_id must be an exact built-in or versioned evaluator ID")
+        return normalized
+
+    @field_validator("weight")
+    @classmethod
+    def validate_weight(cls, value: float | None) -> float | None:
+        if value is None:
+            return None
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError("weight must be a positive finite number")
+        return value
+
+    @classmethod
+    def parse_line(cls, value: str) -> "IssueEvaluatorEntry":
+        match = _EVALUATOR_LINE.fullmatch(value.strip())
+        if match is None:
+            raise IssueEvaluatorSyntaxError("issue evaluator entry must use exact-id [weight=<positive>]")
+        try:
+            weight = None if match.group("weight") is None else float(match.group("weight"))
+        except ValueError as exc:
+            raise IssueEvaluatorSyntaxError("issue evaluator entry weight must be numeric") from exc
+        try:
+            return cls(evaluator_id=match.group("evaluator_id"), weight=weight)
+        except Exception as exc:
+            raise IssueEvaluatorSyntaxError(str(exc)) from exc
 
 
 def apply_issue_request(

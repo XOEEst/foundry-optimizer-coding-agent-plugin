@@ -6,7 +6,9 @@ import pytest
 
 from foundry_opt.poc.config import (
     AgentMetadata,
+    IssueEvaluatorSyntaxError,
     IssueNarrowingError,
+    IssueEvaluatorEntry,
     OptimizeIssueRequest,
     POCConfigurationError,
     RepositoryPathError,
@@ -50,6 +52,7 @@ def _generic_repository_policy() -> dict[str, object]:
 
 def _generic_issue_request() -> dict[str, object]:
     return {
+        "repo_agent_id": "example-agent",
         "goal": "Raise policy coverage on missed travel-policy cases.",
         "observed_failures": [
             "Hotel reimbursement approvals ignore policy evidence.",
@@ -208,6 +211,75 @@ def test_issue_request_only_narrows_repository_policy() -> None:
         "agent/agent_config/baseline/instructions.md",
         "agent/skills/**",
     )
+
+
+def test_issue_request_accepts_repo_agent_and_weighted_evaluators() -> None:
+    issue = OptimizeIssueRequest.from_document(
+        {
+            **_generic_issue_request(),
+            "issue_evaluators": [
+                "azureai://accounts/a/projects/p/evaluators/quality/versions/1",
+                "azureai://built-in/evaluators/safety weight=2",
+            ],
+        }
+    )
+
+    assert issue.repo_agent_id == "example-agent"
+    assert issue.explicit_target is None
+    assert issue.issue_evaluators == (
+        IssueEvaluatorEntry(
+            evaluator_id="azureai://accounts/a/projects/p/evaluators/quality/versions/1",
+            weight=None,
+        ),
+        IssueEvaluatorEntry(
+            evaluator_id="azureai://built-in/evaluators/safety",
+            weight=2.0,
+        ),
+    )
+
+
+def test_issue_request_rejects_duplicate_evaluator_ids_even_with_different_weights() -> None:
+    with pytest.raises(POCConfigurationError, match="duplicate evaluator IDs"):
+        OptimizeIssueRequest.from_document(
+            {
+                **_generic_issue_request(),
+                "issue_evaluators": [
+                    "azureai://built-in/evaluators/safety",
+                    "azureai://built-in/evaluators/safety weight=2",
+                ],
+            }
+        )
+
+
+def test_issue_request_accepts_explicit_target_when_not_repo_agent_id() -> None:
+    issue = OptimizeIssueRequest.from_document(
+        {
+            **{k: v for k, v in _generic_issue_request().items() if k != "repo_agent_id"},
+            "target": "azureai://accounts/example/projects/example/agents/demo",
+        }
+    )
+
+    assert issue.repo_agent_id is None
+    assert issue.explicit_target == "azureai://accounts/example/projects/example/agents/demo"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "azureai://built-in/evaluators/safety weight=0",
+        "azureai://built-in/evaluators/safety weight=nan",
+        "azureai://built-in/evaluators/safety weight=nope",
+        "azureai://built-in/evaluators/safety extra=1",
+    ],
+)
+def test_issue_request_rejects_invalid_evaluator_lines(line: str) -> None:
+    with pytest.raises(POCConfigurationError, match="issue evaluator entry|weight must be a positive finite number"):
+        OptimizeIssueRequest.from_document(
+            {
+                **_generic_issue_request(),
+                "issue_evaluators": [line],
+            }
+        )
 
 
 def test_issue_request_rejects_model_widening() -> None:
