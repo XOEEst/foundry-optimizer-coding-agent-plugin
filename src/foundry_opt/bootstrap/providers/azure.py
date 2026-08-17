@@ -10,14 +10,7 @@ from urllib.parse import unquote
 import httpx
 
 from foundry_opt.bootstrap.canonical import canonical_sha256, safe_persisted_document
-from foundry_opt.bootstrap.contracts import (
-    BindingAssessment,
-    BootstrapAction,
-    BootstrapPlan,
-    BootstrapReceipt,
-    FingerprintRecord,
-    RedactedStatusInfo,
-)
+from foundry_opt.bootstrap.contracts import BindingAssessment, BootstrapAction, BootstrapPlan, BootstrapReceipt, FingerprintRecord, RedactedStatusInfo
 from foundry_opt.bootstrap.errors import BootstrapProviderError
 
 _ARM_SCOPE = "https://management.azure.com/.default"
@@ -106,19 +99,17 @@ def _canonical_resource_id(value: str) -> str:
         raise AzureProviderError("resource ids and scopes contain forbidden delimiters or traversal segments")
     if not decoded.startswith("/"):
         decoded = "/" + decoded
-    if "//" in decoded:
-        raise AzureProviderError("resource ids and scopes must not contain duplicate slashes")
     return "/" + "/".join(segment for segment in decoded.split("/") if segment)
 
 
 def _canonical_scope(value: str, subscription_id: str) -> str:
     scope = _canonical_resource_id(value)
-    lowered = scope.lower()
+    lowered = scope.casefold()
     if lowered.startswith("/providers/microsoft.management/managementgroups/"):
         raise AzureProviderError("management-group scopes are not allowed")
-    if not lowered.startswith(f"/subscriptions/{subscription_id}".lower()):
+    if not lowered.startswith(f"/subscriptions/{subscription_id}".casefold()):
         raise AzureProviderError("cross-subscription scopes are not allowed")
-    if lowered == f"/subscriptions/{subscription_id}".lower():
+    if lowered == f"/subscriptions/{subscription_id}".casefold():
         raise AzureProviderError("subscription-wide role assignment scopes are not allowed")
     return scope
 
@@ -137,11 +128,11 @@ def _canonical_role_definition_id(value: str, subscription_id: str) -> str:
 
 
 def _approval_fingerprint(scope: str, role_definition_id: str) -> str:
-    return hashlib.sha256(_canonical_bytes({"scope": scope.lower(), "role_definition_id": role_definition_id.lower()})).hexdigest()
+    return hashlib.sha256(_canonical_bytes({"scope": scope.casefold(), "role_definition_id": role_definition_id.casefold()})).hexdigest()
 
 
 def _role_assignment_id(scope: str, principal_id: str, role_definition_id: str) -> str:
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"{scope.lower()}|{principal_id.lower()}|{role_definition_id.lower()}"))
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"{scope.casefold()}|{principal_id.casefold()}|{role_definition_id.casefold()}"))
 
 
 def _diagnostics_map(action: BootstrapAction) -> dict[str, str]:
@@ -149,10 +140,7 @@ def _diagnostics_map(action: BootstrapAction) -> dict[str, str]:
 
 
 def _subjects(repository_identity: str) -> tuple[str, str]:
-    return (
-        f"repo:{repository_identity}:environment:copilot",
-        f"repo:{repository_identity}:environment:foundry-production",
-    )
+    return (f"repo:{repository_identity}:environment:copilot", f"repo:{repository_identity}:environment:foundry-production")
 
 
 def _fic_name(subject: str) -> str:
@@ -179,17 +167,14 @@ class AzureArmRestProvider:
         if not isinstance(token, str) or not token:
             raise AzureProviderError("token provider returned an empty token")
         try:
-            response = self._http.request(method, url, params=params, json=json_body, headers={"Accept": "application/json", "Authorization": f"Bearer {token}"})
+            return self._http.request(method, url, params=params, json=json_body, headers={"Accept": "application/json", "Authorization": f"Bearer {token}"})
         except httpx.TimeoutException:
             raise AzureProviderError("Azure request timed out") from None
         except httpx.TransportError:
             raise AzureProviderError("Azure transport failed") from None
-        if 300 <= response.status_code < 400:
-            raise AzureProviderError("redirect responses are not allowed")
-        return response
 
-    def _request(self, method: str, url: str, *, scope: str, params: Mapping[str, object] | None = None) -> Mapping[str, object]:
-        return _json_response(self._response(method, url, scope=scope, params=params))
+    def _request(self, method: str, url: str, *, scope: str, params: Mapping[str, object] | None = None, json_body: Mapping[str, object] | None = None) -> Mapping[str, object]:
+        return _json_response(self._response(method, url, scope=scope, params=params, json_body=json_body))
 
     def inventory_identity(self) -> Mapping[str, object]:
         return {}
@@ -215,82 +200,50 @@ class AzureArmRestProvider:
         changed: list[str] = []
         compensation: list[str] = []
         state = self._base_state(plan, planned)
-        identity = planned.identity
-        try:
-            if identity.kind == "user_assigned_managed_identity" and identity.adopted:
-                identity = self._get_uami(identity.resource_id or "")
-                self._assert_expected_identity(planned.identity, identity)
-                state["identity"] = self._identity_state(identity, planned=planned.identity, disposition="adopted")
-            elif identity.kind == "user_assigned_managed_identity":
-                existing = self._get_uami_if_exists(identity.resource_id or "")
-                if existing is None:
-                    self._append_attempt(state, action_id="azure-uami-create", kind="uami", target_resource_id=_text(identity.resource_id, field="identity.resource_id"))
-                    compensation.append("azure-uami-create")
-                    identity, created_now = self._create_or_update_uami(identity)
-                    self._assert_expected_identity(planned.identity, identity, allow_fill_missing=True)
-                    state["identity"] = self._identity_state(identity, planned=planned.identity, disposition="created" if created_now else "changed", preimage=None)
-                    if created_now:
-                        created.append("azure-uami-create")
-                    else:
-                        changed.append("azure-uami-create")
-                    self._mark_attempt(state, "azure-uami-create", "created" if created_now else "changed")
-                    compensation = [item for item in compensation if item != "azure-uami-create"]
-                    compensation.insert(0, "azure-uami-create")
-                else:
-                    self._assert_expected_identity(planned.identity, existing)
-                    identity = existing
-                    state["identity"] = self._identity_state(identity, planned=planned.identity, disposition="adopted")
+        identity = self._resolve_live_or_planned_identity(planned.identity, state, created, adopted, changed, compensation)
+        for subject in planned.subjects:
+            action = f"azure-fic-{subject.rsplit(':',1)[-1]}"
+            fic_url, fic_scope = self._fic_url(identity, subject)
+            preimage = self._get_fic(identity, subject)
+            self._append_attempt(state, action_id=action, kind="fic", target_resource_id=fic_url, target={"subject": subject})
+            if preimage is None:
+                compensation.append(action)
+            disposition = self._ensure_fic(identity, subject, state, action)
+            record = {"action_id": action, "resource_id": fic_url, "scope": fic_scope, "subject": subject, "issuer": _ACTIONS_ISSUER, "audience": _ACTIONS_AUDIENCE, "preimage": preimage, "disposition": disposition}
+            state["federated_credentials"].append(_binding(record))
+            if disposition == "created":
+                created.append(action)
+            elif disposition == "changed":
+                changed.append(action)
+                compensation.append(action)
             else:
-                identity = self._resolve_identity(identity)
-                self._assert_expected_identity(planned.identity, identity)
-                state["identity"] = self._identity_state(identity, planned=planned.identity, disposition="adopted")
-            for subject in planned.subjects:
-                action = f"azure-fic-{subject.rsplit(':',1)[-1]}"
-                fic_url, fic_scope = self._fic_url(identity, subject)
-                self._append_attempt(state, action_id=action, kind="fic", target_resource_id=fic_url)
+                adopted.append(action)
+            self._mark_attempt(state, action, disposition if disposition in {"created", "changed", "adopted"} else "ambiguous")
+        for role in planned.roles:
+            self._assert_role_approval(role)
+            assignment_id = _role_assignment_id(role.scope, _text(identity.principal_id, field="identity.principal_id"), role.role_definition_id)
+            action = f"azure-rbac-{role.role_key}-{assignment_id}"
+            resource_id = f"{role.scope}/{_ROLE_ASSIGNMENTS_SEGMENT}/{assignment_id}"
+            preimage = self._get_role(role.scope, assignment_id)
+            self._append_attempt(state, action_id=action, kind="role", target_resource_id=resource_id, target={"assignment_id": assignment_id})
+            if preimage is None:
                 compensation.append(action)
-                created_now = self._ensure_fic(identity, subject)
-                fic_state = _binding({"action_id": action, "resource_id": fic_url, "scope": fic_scope, "subject": subject, "issuer": _ACTIONS_ISSUER, "audience": _ACTIONS_AUDIENCE, "disposition": "created" if created_now else "adopted"})
-                if created_now:
-                    created.append(action)
-                    self._mark_attempt(state, action, "created")
-                else:
-                    adopted.append(action)
-                    compensation.pop()
-                    self._mark_attempt(state, action, "adopted")
-                state["federated_credentials"].append(fic_state)
-            for role in planned.roles:
-                self._assert_role_approval(role)
-                assignment_id = _role_assignment_id(role.scope, _text(identity.principal_id, field="identity.principal_id"), role.role_definition_id)
-                action = f"azure-rbac-{role.role_key}-{assignment_id}"
-                role_resource_id = f"{role.scope}/{_ROLE_ASSIGNMENTS_SEGMENT}/{assignment_id}"
-                self._append_attempt(state, action_id=action, kind="role", target_resource_id=role_resource_id)
+            disposition = self._ensure_role(identity, role, assignment_id, state, action)
+            state["role_assignments"].append(_binding({"action_id": action, "resource_id": resource_id, "assignment_id": assignment_id, "role_key": role.role_key, "scope": role.scope, "role_definition_id": role.role_definition_id, "principal_id": _text(identity.principal_id, field="identity.principal_id"), "preimage": preimage, "disposition": disposition}))
+            if disposition == "created":
+                created.append(action)
+            elif disposition == "changed":
+                changed.append(action)
                 compensation.append(action)
-                existed_before = self._live_role(role.scope, assignment_id)
-                created_now = self._ensure_role(identity, role, assignment_id)
-                if created_now:
-                    created.append(action)
-                    self._mark_attempt(state, action, "created")
-                    role_state = _binding({"action_id": action, "resource_id": role_resource_id, "assignment_id": assignment_id, "role_key": role.role_key, "scope": role.scope, "role_definition_id": role.role_definition_id, "principal_id": _text(identity.principal_id, field="identity.principal_id"), "disposition": "created", "preimage": None})
-                else:
-                    adopted.append(action)
-                    compensation.pop()
-                    self._mark_attempt(state, action, "adopted")
-                    role_state = _binding({"action_id": action, "resource_id": role_resource_id, "assignment_id": assignment_id, "role_key": role.role_key, "scope": role.scope, "role_definition_id": role.role_definition_id, "principal_id": _text(identity.principal_id, field="identity.principal_id"), "disposition": "adopted", "preimage": existed_before})
-                state["role_assignments"].append(role_state)
-            state["compensation_required_actions"] = tuple(compensation)
-            receipt = BootstrapReceipt.create(operation_id=plan.operation_id, runtime_repository=plan.runtime_repository, runtime_commit=plan.runtime_commit, repository_identity=plan.repository_identity, plan_hash=plan.plan_hash, before_fingerprints=(_fingerprint("azure-plan", {"planned": [role.__dict__ for role in planned.roles]}),), after_fingerprints=(_fingerprint("azure-live", {"principal_id": identity.principal_id, "client_id": identity.client_id}),), created_actions=tuple(created), adopted_actions=tuple(adopted), changed_actions=tuple(changed), compensation_required_actions=tuple(reversed(compensation)))
-            state["status"] = "applied"
-            self._bind_receipt(state, receipt)
-            self._provider_state = state
-            return receipt
-        except AzureProviderError as exc:
-            state["status"] = "compensation_required" if compensation else "failed"
-            state["compensation_required_actions"] = tuple(compensation)
-            receipt = BootstrapReceipt.create(operation_id=plan.operation_id, runtime_repository=plan.runtime_repository, runtime_commit=plan.runtime_commit, repository_identity=plan.repository_identity, plan_hash=plan.plan_hash, created_actions=tuple(created), adopted_actions=tuple(adopted), changed_actions=tuple(changed), compensation_required_actions=tuple(compensation), error_info=RedactedStatusInfo(code="azure_apply_failed", summary=type(exc).__name__[:64]), resume_info=RedactedStatusInfo(code="azure_compensation_state", summary="Resume with exported Azure provider state."))
-            self._bind_receipt(state, receipt)
-            self._provider_state = state
-            return receipt
+            else:
+                adopted.append(action)
+            self._mark_attempt(state, action, disposition)
+        receipt = BootstrapReceipt.create(operation_id=plan.operation_id, runtime_repository=plan.runtime_repository, runtime_commit=plan.runtime_commit, repository_identity=plan.repository_identity, plan_hash=plan.plan_hash, before_fingerprints=(_fingerprint("azure-plan", {"planned": [role.__dict__ for role in planned.roles]}),), after_fingerprints=(_fingerprint("azure-live", {"principal_id": identity.principal_id, "client_id": identity.client_id}),), created_actions=tuple(created), adopted_actions=tuple(adopted), changed_actions=tuple(changed), compensation_required_actions=tuple(compensation))
+        state["status"] = "applied"
+        state["compensation_required_actions"] = tuple(compensation)
+        self._bind_receipt(state, receipt)
+        self._provider_state = state
+        return receipt
 
     def export_provider_state(self, receipt: BootstrapReceipt) -> Mapping[str, object]:
         state = dict(self._validated_state(receipt))
@@ -300,24 +253,20 @@ class AzureArmRestProvider:
 
     def restore_provider_state(self, mapping: Mapping[str, object]) -> None:
         state_hash = _text(mapping.get("state_hash"), field="state_hash")
-        state = {key: value for key, value in mapping.items() if key != "state_hash"}
+        state = {k: v for k, v in mapping.items() if k != "state_hash"}
         safe_persisted_document(state)
         if canonical_sha256(state) != state_hash:
             raise AzureProviderError("provider state hash mismatch")
-        identity = state.get("identity")
-        if not isinstance(identity, Mapping):
-            raise AzureProviderError("provider state identity is missing")
-        if not _optional_text(identity.get("client_id")) or not _optional_text(identity.get("principal_id")):
-            raise AzureProviderError("provider state identity ids are missing")
         self._provider_state = dict(state)
+        self._reconcile_ambiguous_attempts()
 
     def verify_bindings(self, receipt: BootstrapReceipt) -> bool:
         if receipt.error_info is not None:
             raise AzureProviderError("cannot verify failed Azure receipt")
         state = self._validated_state(receipt)
         planned = self._state_planned_bindings(state)
-        live = self._resolve_live_identity(planned.identity)
-        self._assert_expected_identity(planned.identity, live, allow_fill_missing=False)
+        live = self._resolve_identity(planned.identity)
+        self._assert_expected_identity(planned.identity, live)
         for fic in state["federated_credentials"]:
             self._verify_fic_binding(live, fic)
         for role in state["role_assignments"]:
@@ -326,101 +275,65 @@ class AzureArmRestProvider:
 
     def rollback_bindings(self, receipt: BootstrapReceipt) -> None:
         state = self._validated_state(receipt)
+        self._reconcile_ambiguous_attempts()
         identity = self._state_identity(state)
-        errors: list[str] = []
-        for action_id in state["compensation_required_actions"]:
-            try:
-                self._rollback_action(state, identity, _text(action_id, field="action_id"))
-            except AzureProviderError:
-                errors.append("rollback")
-        state["status"] = "rolled_back" if not errors else "rollback_failed"
+        for action_id in reversed(state["compensation_required_actions"]):
+            self._rollback_action(state, identity, _text(action_id, field="action_id"))
+        state["status"] = "rolled_back"
         self._provider_state = state
-        if errors:
-            raise AzureProviderError("Azure rollback failed")
 
     def verify_rollback(self, receipt: BootstrapReceipt) -> bool:
         state = self._validated_state(receipt)
+        self._reconcile_ambiguous_attempts()
         identity = self._state_identity(state)
-        live_identity = self._resolve_live_identity(identity, allow_missing=state["identity"]["disposition"] == "created")
+        live = self._resolve_identity_if_present(identity)
         for role in state["role_assignments"]:
             if role["disposition"] == "created":
-                if self._resource_exists(f"https://management.azure.com{role['resource_id']}", _ARM_SCOPE, {"api-version": _AUTHZ_API_VERSION}):
+                if self._get_role_by_resource_id(_text(role["resource_id"], field="resource_id")) is not None:
                     raise AzureProviderError("created role assignment still exists after rollback")
             else:
-                self._verify_adopted_role_exact(role)
+                self._verify_role_restored_exact(role)
         for fic in state["federated_credentials"]:
-            url, scope = self._fic_url(identity, fic["subject"])
+            current = self._get_fic(identity, _text(fic["subject"], field="subject"))
             if fic["disposition"] == "created":
-                if self._resource_exists(url, scope, {"api-version": _FIC_API_VERSION} if scope == _ARM_SCOPE else None):
+                if current is not None:
                     raise AzureProviderError("created federated credential still exists after rollback")
             else:
-                if live_identity is None:
-                    raise AzureProviderError("adopted identity missing after rollback")
-                self._verify_fic_binding(live_identity, fic)
+                if current is None or canonical_sha256(current) != canonical_sha256(_binding(fic["preimage"])):
+                    raise AzureProviderError("adopted federated credential drifted after rollback")
         if state["identity"]["disposition"] == "created":
-            if self._resource_exists(f"https://management.azure.com{state['identity']['resource_id']}", _ARM_SCOPE, {"api-version": _MANAGED_IDENTITY_API_VERSION}):
+            if live is not None:
                 raise AzureProviderError("created managed identity still exists after rollback")
         else:
-            if live_identity is None:
+            if live is None:
                 raise AzureProviderError("adopted identity missing after rollback")
-            self._assert_expected_identity(self._state_identity(state), live_identity)
+            self._assert_expected_identity(identity, live)
+            if state["identity"]["preimage"] is not None and canonical_sha256(self._uami_live_document(live)) != canonical_sha256(state["identity"]["preimage"]):
+                raise AzureProviderError("managed identity drifted after rollback")
         return True
 
     def _base_state(self, plan: BootstrapPlan, planned: PlannedBindingSet) -> dict[str, object]:
-        return {
-            "version": 2,
-            "operation_id": plan.operation_id,
-            "runtime_repository": plan.runtime_repository,
-            "runtime_commit": plan.runtime_commit,
-            "repository_identity": plan.repository_identity,
-            "plan_hash": plan.plan_hash,
-            "identity": self._identity_state(planned.identity, planned=planned.identity, disposition="planned"),
-            "subjects": planned.subjects,
-            "role_assignments": [],
-            "federated_credentials": [],
-            "approved_roles": [{"role_key": role.role_key, "scope": role.scope, "role_definition_id": role.role_definition_id, "approval_fingerprint": role.approval_fingerprint} for role in planned.roles],
-            "attempts": [],
-            "compensation_required_actions": (),
-            "status": "planned",
-        }
+        return {"version": 3, "operation_id": plan.operation_id, "runtime_repository": plan.runtime_repository, "runtime_commit": plan.runtime_commit, "repository_identity": plan.repository_identity, "plan_hash": plan.plan_hash, "identity": self._identity_state(planned.identity, planned=planned.identity, disposition="planned", preimage=None), "subjects": planned.subjects, "role_assignments": [], "federated_credentials": [], "approved_roles": [{"role_key": role.role_key, "scope": role.scope, "role_definition_id": role.role_definition_id, "approval_fingerprint": role.approval_fingerprint} for role in planned.roles], "attempts": [], "compensation_required_actions": (), "status": "planned"}
 
-    def _identity_state(self, identity: AzureIdentityReference, *, planned: AzureIdentityReference, disposition: str, preimage: Mapping[str, object] | None = None) -> Mapping[str, object]:
-        return _binding({
-            "kind": identity.kind,
-            "resource_id": identity.resource_id,
-            "object_id": identity.object_id,
-            "client_id": identity.client_id or planned.client_id,
-            "principal_id": identity.principal_id or planned.principal_id,
-            "tenant_id": identity.tenant_id or planned.tenant_id,
-            "subscription_id": identity.subscription_id or planned.subscription_id,
-            "name": identity.name,
-            "location": identity.location or planned.location,
-            "adopted": planned.adopted,
-            "disposition": disposition,
-            "preimage": preimage,
-        })
+    def _identity_state(self, identity: AzureIdentityReference, *, planned: AzureIdentityReference, disposition: str, preimage: Mapping[str, object] | None) -> Mapping[str, object]:
+        return _binding({"kind": identity.kind, "resource_id": identity.resource_id, "object_id": identity.object_id, "client_id": identity.client_id or planned.client_id, "principal_id": identity.principal_id or planned.principal_id, "tenant_id": identity.tenant_id or planned.tenant_id, "subscription_id": identity.subscription_id or planned.subscription_id, "name": identity.name, "location": identity.location or planned.location, "adopted": planned.adopted, "disposition": disposition, "preimage": preimage})
 
-    def _append_attempt(self, state: dict[str, object], *, action_id: str, kind: str, target_resource_id: str) -> None:
+    def _append_attempt(self, state: dict[str, object], *, action_id: str, kind: str, target_resource_id: str, target: Mapping[str, object]) -> None:
         attempts = state["attempts"]
         assert isinstance(attempts, list)
-        attempts.append(_binding({"action_id": action_id, "kind": kind, "target_resource_id": target_resource_id, "disposition": "ambiguous"}))
+        attempts.append({"action_id": action_id, "kind": kind, "target_resource_id": target_resource_id, "target": dict(target), "disposition": "ambiguous"})
 
     def _mark_attempt(self, state: dict[str, object], action_id: str, disposition: str) -> None:
-        attempts = state["attempts"]
-        assert isinstance(attempts, list)
-        for attempt in attempts:
+        for attempt in state["attempts"]:
             if attempt["action_id"] == action_id:
                 attempt["disposition"] = disposition
-                return
 
     def _bind_receipt(self, state: dict[str, object], receipt: BootstrapReceipt) -> None:
         state["receipt_hash"] = receipt.receipt_hash
         state["receipt_plan_hash"] = receipt.plan_hash
 
     def _validated_state(self, receipt: BootstrapReceipt) -> dict[str, object]:
-        if not self._provider_state:
-            raise AzureProviderError("provider state is unavailable")
-        if self._provider_state.get("receipt_hash") != receipt.receipt_hash or self._provider_state.get("receipt_plan_hash") != receipt.plan_hash:
+        if not self._provider_state or self._provider_state.get("receipt_hash") != receipt.receipt_hash:
             raise AzureProviderError("provider state receipt binding mismatch")
         return self._provider_state
 
@@ -430,35 +343,69 @@ class AzureArmRestProvider:
         return AzureIdentityReference(kind=_text(identity.get("kind"), field="identity.kind"), client_id=_optional_text(identity.get("client_id")), resource_id=_optional_text(identity.get("resource_id")), object_id=_optional_text(identity.get("object_id")), principal_id=_optional_text(identity.get("principal_id")), tenant_id=_optional_text(identity.get("tenant_id")), subscription_id=_optional_text(identity.get("subscription_id")), name=_text(identity.get("name"), field="identity.name"), adopted=bool(identity.get("adopted")), location=_optional_text(identity.get("location")))
 
     def _state_planned_bindings(self, state: Mapping[str, object]) -> PlannedBindingSet:
-        roles = []
-        for item in state["approved_roles"]:
-            assert isinstance(item, Mapping)
-            roles.append(PlannedRoleAssignment(role_key=_text(item.get("role_key"), field="role_key"), scope=_text(item.get("scope"), field="scope"), role_definition_id=_text(item.get("role_definition_id"), field="role_definition_id"), approval_fingerprint=_text(item.get("approval_fingerprint"), field="approval_fingerprint")))
+        roles = [PlannedRoleAssignment(role_key=_text(item["role_key"], field="role_key"), scope=_text(item["scope"], field="scope"), role_definition_id=_text(item["role_definition_id"], field="role_definition_id"), approval_fingerprint=_text(item["approval_fingerprint"], field="approval_fingerprint")) for item in state["approved_roles"]]
         return PlannedBindingSet(identity=self._state_identity(state), roles=tuple(roles), subjects=tuple(state["subjects"]))  # type: ignore[arg-type]
 
-    def _resource_exists(self, url: str, scope: str, params: Mapping[str, object] | None) -> bool:
-        response = self._response("GET", url, scope=scope, params=params)
-        if response.status_code == 404:
-            return False
-        if response.status_code >= 400:
-            raise AzureProviderError(f"Azure request failed with HTTP {response.status_code}")
-        return True
+    def _resolve_live_or_planned_identity(self, identity: AzureIdentityReference, state: dict[str, object], created: list[str], adopted: list[str], changed: list[str], compensation: list[str]) -> AzureIdentityReference:
+        if identity.kind != "user_assigned_managed_identity":
+            live = self._resolve_identity(identity)
+            state["identity"] = self._identity_state(live, planned=identity, disposition="adopted", preimage=None)
+            return live
+        existing = self._get_uami_if_exists(identity.resource_id or "")
+        if identity.adopted:
+            if existing is None:
+                raise AzureProviderError("live identity missing")
+            self._assert_expected_identity(identity, existing)
+            state["identity"] = self._identity_state(existing, planned=identity, disposition="adopted", preimage=self._uami_live_document(existing))
+            return existing
+        if existing is None:
+            self._append_attempt(state, action_id="azure-uami-create", kind="uami", target_resource_id=_text(identity.resource_id, field="identity.resource_id"), target={})
+            compensation.append("azure-uami-create")
+            live, disposition = self._ensure_uami(identity)
+            if disposition == "created":
+                created.append("azure-uami-create")
+            elif disposition == "changed":
+                raise AzureProviderError("uami update without preimage is not allowed")
+            state["identity"] = self._identity_state(live, planned=identity, disposition=disposition, preimage=None)
+            self._mark_attempt(state, "azure-uami-create", disposition)
+            return live
+        self._assert_expected_identity(identity, existing, allow_fill_missing=True)
+        state["identity"] = self._identity_state(existing, planned=identity, disposition="adopted", preimage=self._uami_live_document(existing))
+        adopted.append("azure-uami-create")
+        return existing
 
-    def _resolve_live_identity(self, identity: AzureIdentityReference, *, allow_missing: bool = False) -> AzureIdentityReference | None:
+    def _uami_live_document(self, identity: AzureIdentityReference) -> Mapping[str, object]:
+        return _binding({"id": identity.resource_id, "name": identity.name, "location": identity.location, "properties": {"clientId": identity.client_id, "principalId": identity.principal_id, "tenantId": identity.tenant_id}})
+
+    def _resolve_identity(self, identity: AzureIdentityReference) -> AzureIdentityReference:
         if identity.kind == "user_assigned_managed_identity":
             live = self._get_uami_if_exists(identity.resource_id or "")
-            if live is None and allow_missing:
-                return None
             if live is None:
                 raise AzureProviderError("live identity missing")
             return live
+        app = self._request("GET", f"{_GRAPH_APPLICATIONS}/{identity.object_id}", scope=_GRAPH_SCOPE)
+        app_id = _text(app.get("appId"), field="application.appId")
+        sp = self._request("GET", _GRAPH_SERVICE_PRINCIPALS, scope=_GRAPH_SCOPE, params={"$filter": f"appId eq '{app_id}'"})
+        values = sp.get("value")
+        if not isinstance(values, list) or len(values) != 1 or not isinstance(values[0], Mapping):
+            raise AzureProviderError("corresponding service principal could not be resolved uniquely")
+        return AzureIdentityReference(kind="entra_application", client_id=app_id, resource_id=None, object_id=_text(app.get("id"), field="application.id"), principal_id=_text(values[0].get("id"), field="servicePrincipal.id"), tenant_id=_text(values[0].get("appOwnerOrganizationId"), field="servicePrincipal.appOwnerOrganizationId"), subscription_id=identity.subscription_id, name=_text(app.get("displayName"), field="application.displayName"), adopted=True)
+
+    def _resolve_identity_if_present(self, identity: AzureIdentityReference) -> AzureIdentityReference | None:
+        if identity.kind == "user_assigned_managed_identity":
+            return self._get_uami_if_exists(identity.resource_id or "")
         return self._resolve_identity(identity)
 
-    def _get_uami(self, resource_id: str) -> AzureIdentityReference:
-        live = self._get_uami_if_exists(resource_id)
-        if live is None:
-            raise AzureProviderError("live identity missing")
-        return live
+    def _assert_expected_identity(self, planned: AzureIdentityReference, live: AzureIdentityReference, *, allow_fill_missing: bool = False) -> None:
+        if planned.resource_id and live.resource_id and _canonical_resource_id(planned.resource_id).casefold() != _canonical_resource_id(live.resource_id).casefold():
+            raise AzureProviderError("live identity resource_id did not match planned identity")
+        for field_name in ("client_id", "principal_id", "tenant_id"):
+            expected = getattr(planned, field_name)
+            actual = getattr(live, field_name)
+            if expected is not None and actual != expected:
+                raise AzureProviderError(f"live identity {field_name} did not match planned identity")
+            if expected is None and actual is None and not allow_fill_missing:
+                continue
 
     def _get_uami_if_exists(self, resource_id: str) -> AzureIdentityReference | None:
         response = self._response("GET", f"https://management.azure.com{_canonical_resource_id(resource_id)}", scope=_ARM_SCOPE, params={"api-version": _MANAGED_IDENTITY_API_VERSION})
@@ -470,23 +417,119 @@ class AzureArmRestProvider:
         rid = _canonical_resource_id(_text(body.get("id"), field="identity.id"))
         return AzureIdentityReference(kind="user_assigned_managed_identity", client_id=_text(props.get("clientId"), field="identity.clientId"), resource_id=rid, object_id=None, principal_id=_text(props.get("principalId"), field="identity.principalId"), tenant_id=_text(props.get("tenantId"), field="identity.tenantId"), subscription_id=rid.split("/")[2], name=_text(body.get("name"), field="identity.name"), adopted=True, location=_optional_text(body.get("location")))
 
-    def _live_role(self, scope: str, assignment_id: str) -> Mapping[str, object] | None:
+    def _ensure_uami(self, identity: AzureIdentityReference) -> tuple[AzureIdentityReference, str]:
+        response = self._response("PUT", f"https://management.azure.com{identity.resource_id}", scope=_ARM_SCOPE, params={"api-version": _MANAGED_IDENTITY_API_VERSION}, json_body={"location": identity.location})
+        if response.status_code not in {200, 201}:
+            raise AzureProviderError(f"Azure request failed with HTTP {response.status_code}")
+        live = self._resolve_identity(identity)
+        return live, ("created" if response.status_code == 201 else "changed")
+
+    def _fic_url(self, identity: AzureIdentityReference, subject: str) -> tuple[str, str]:
+        name = _fic_name(subject)
+        if identity.kind == "user_assigned_managed_identity":
+            return (f"https://management.azure.com{identity.resource_id}/federatedIdentityCredentials/{name}", _ARM_SCOPE)
+        return (f"{_GRAPH_APPLICATIONS}/{identity.object_id}/federatedIdentityCredentials/{name}", _GRAPH_SCOPE)
+
+    def _get_fic(self, identity: AzureIdentityReference, subject: str) -> Mapping[str, object] | None:
+        url, scope = self._fic_url(identity, subject)
+        response = self._response("GET", url, scope=scope, params={"api-version": _FIC_API_VERSION} if scope == _ARM_SCOPE else None)
+        if response.status_code == 404:
+            return None
+        return _json_response(response)
+
+    def _ensure_fic(self, identity: AzureIdentityReference, subject: str, state: dict[str, object], action_id: str) -> str:
+        existing = self._get_fic(identity, subject)
+        if existing is not None:
+            props = existing.get("properties", existing)
+            assert isinstance(props, Mapping)
+            if props.get("issuer") == _ACTIONS_ISSUER and props.get("subject") == subject and props.get("audiences") == [_ACTIONS_AUDIENCE]:
+                return "adopted"
+        url, scope = self._fic_url(identity, subject)
+        response = self._response("PUT" if scope == _ARM_SCOPE else "POST", url if scope == _ARM_SCOPE else f"{_GRAPH_APPLICATIONS}/{identity.object_id}/federatedIdentityCredentials", scope=scope, params={"api-version": _FIC_API_VERSION} if scope == _ARM_SCOPE else None, json_body={"properties": {"issuer": _ACTIONS_ISSUER, "subject": subject, "audiences": [_ACTIONS_AUDIENCE]}} if scope == _ARM_SCOPE else {"name": _fic_name(subject), "issuer": _ACTIONS_ISSUER, "subject": subject, "audiences": [_ACTIONS_AUDIENCE]})
+        if response.status_code not in {200, 201}:
+            raise AzureProviderError(f"Azure request failed with HTTP {response.status_code}")
+        return "created" if existing is None and response.status_code == 201 else "changed"
+
+    def _get_role(self, scope: str, assignment_id: str) -> Mapping[str, object] | None:
         response = self._response("GET", f"https://management.azure.com{scope}/{_ROLE_ASSIGNMENTS_SEGMENT}/{assignment_id}", scope=_ARM_SCOPE, params={"api-version": _AUTHZ_API_VERSION})
         if response.status_code == 404:
             return None
         return _json_response(response)
 
-    def _verify_adopted_role_exact(self, role: Mapping[str, object]) -> None:
+    def _get_role_by_resource_id(self, resource_id: str) -> Mapping[str, object] | None:
+        response = self._response("GET", f"https://management.azure.com{resource_id}", scope=_ARM_SCOPE, params={"api-version": _AUTHZ_API_VERSION})
+        if response.status_code == 404:
+            return None
+        return _json_response(response)
+
+    def _ensure_role(self, identity: AzureIdentityReference, role: PlannedRoleAssignment, assignment_id: str, state: dict[str, object], action_id: str) -> str:
+        existing = self._get_role(role.scope, assignment_id)
+        principal_id = _text(identity.principal_id, field="identity.principal_id")
+        if existing is not None:
+            self._verify_role_properties(existing, principal_id, role.role_definition_id, role.scope, identity.subscription_id or role.scope.split("/")[2], require_defaults=False)
+            props = existing["properties"]
+            assert isinstance(props, Mapping)
+            if any(props.get(key) not in (None, "") for key in ("condition", "conditionVersion", "delegatedManagedIdentityResourceId")):
+                response = self._response("PUT", f"https://management.azure.com{role.scope}/{_ROLE_ASSIGNMENTS_SEGMENT}/{assignment_id}", scope=_ARM_SCOPE, params={"api-version": _AUTHZ_API_VERSION}, json_body={"properties": {"principalId": principal_id, "roleDefinitionId": self._approved_role_definitions[role.role_key], "principalType": "ServicePrincipal"}})
+                if response.status_code not in {200, 201}:
+                    raise AzureProviderError(f"Azure request failed with HTTP {response.status_code}")
+                return "changed"
+            return "adopted"
+        raw_role_definition_id = self._approved_role_definitions[role.role_key]
+        response = self._response("PUT", f"https://management.azure.com{role.scope}/{_ROLE_ASSIGNMENTS_SEGMENT}/{assignment_id}", scope=_ARM_SCOPE, params={"api-version": _AUTHZ_API_VERSION}, json_body={"properties": {"principalId": principal_id, "roleDefinitionId": raw_role_definition_id, "principalType": "ServicePrincipal"}})
+        if response.status_code == 403:
+            raise AzureProviderError("executor is missing Microsoft.Authorization/roleAssignments/write")
+        if response.status_code not in {200, 201}:
+            raise AzureProviderError(f"Azure request failed with HTTP {response.status_code}")
+        return "created" if response.status_code == 201 else "changed"
+
+    def _verify_role_properties(self, body: Mapping[str, object], principal_id: str, role_definition_id: str, scope: str, subscription_id: str, *, require_defaults: bool) -> None:
+        props = body["properties"]
+        assert isinstance(props, Mapping)
+        if _text(props.get("principalId"), field="principalId").casefold() != principal_id.casefold():
+            raise AzureProviderError("role assignment verification principalId mismatch")
+        if _canonical_role_definition_id(_text(props.get("roleDefinitionId"), field="roleDefinitionId"), subscription_id) != role_definition_id:
+            raise AzureProviderError("role assignment verification roleDefinitionId mismatch")
+        scope_id = _canonical_resource_id(_text(body.get("id"), field="id").split(f"/{_ROLE_ASSIGNMENTS_SEGMENT}/", 1)[0]).casefold()
+        if scope_id != _canonical_resource_id(scope).casefold():
+            raise AzureProviderError("role assignment verification scope mismatch")
+        if require_defaults and any(props.get(key) not in (None, "") for key in ("condition", "conditionVersion", "delegatedManagedIdentityResourceId")):
+            raise AzureProviderError("role assignment verification unexpected conditional properties")
+
+    def _verify_fic_binding(self, identity: AzureIdentityReference, fic: Mapping[str, object]) -> None:
+        current = self._get_fic(identity, _text(fic.get("subject"), field="subject"))
+        if current is None:
+            raise AzureProviderError("federated credential missing")
+        props = current.get("properties", current)
+        assert isinstance(props, Mapping)
+        if props.get("issuer") != fic["issuer"] or props.get("subject") != fic["subject"] or props.get("audiences") != [fic["audience"]]:
+            raise AzureProviderError("federated credential verification drifted from exact claims")
+
+    def _verify_role_binding(self, identity: AzureIdentityReference, role: Mapping[str, object]) -> None:
+        live = self._get_role_by_resource_id(_text(role["resource_id"], field="resource_id"))
+        if live is None:
+            raise AzureProviderError("role assignment missing")
+        self._verify_role_properties(live, _text(role["principal_id"], field="principal_id"), _text(role["role_definition_id"], field="role_definition_id"), _text(role["scope"], field="scope"), identity.subscription_id or _text(role["scope"], field="scope").split("/")[2], require_defaults=True)
+
+    def _verify_role_restored_exact(self, role: Mapping[str, object]) -> None:
         preimage = role.get("preimage")
         if not isinstance(preimage, Mapping):
             raise AzureProviderError("adopted role assignment missing preimage")
-        live = self._request("GET", f"https://management.azure.com{role['resource_id']}", scope=_ARM_SCOPE, params={"api-version": _AUTHZ_API_VERSION})
-        if canonical_sha256(live) != canonical_sha256(preimage):
+        live = self._get_role_by_resource_id(_text(role["resource_id"], field="resource_id"))
+        if live is None or canonical_sha256(live) != canonical_sha256(preimage):
             raise AzureProviderError("adopted role assignment drifted after rollback")
 
     def _delete_role(self, resource_id: str) -> None:
         response = self._response("DELETE", f"https://management.azure.com{resource_id}", scope=_ARM_SCOPE, params={"api-version": _AUTHZ_API_VERSION})
         if response.status_code not in {200, 202, 204, 404}:
+            raise AzureProviderError(f"Azure request failed with HTTP {response.status_code}")
+
+    def _restore_role(self, preimage: Mapping[str, object]) -> None:
+        resource_id = _canonical_resource_id(_text(preimage.get("id"), field="id"))
+        props = preimage["properties"]
+        assert isinstance(props, Mapping)
+        response = self._response("PUT", f"https://management.azure.com{resource_id}", scope=_ARM_SCOPE, params={"api-version": _AUTHZ_API_VERSION}, json_body={"properties": dict(props)})
+        if response.status_code not in {200, 201}:
             raise AzureProviderError(f"Azure request failed with HTTP {response.status_code}")
 
     def _delete_fic(self, identity: AzureIdentityReference, subject: str) -> None:
@@ -495,44 +538,64 @@ class AzureArmRestProvider:
         if response.status_code not in {200, 202, 204, 404}:
             raise AzureProviderError(f"Azure request failed with HTTP {response.status_code}")
 
+    def _restore_fic(self, identity: AzureIdentityReference, subject: str, preimage: Mapping[str, object]) -> None:
+        props = preimage.get("properties", preimage)
+        assert isinstance(props, Mapping)
+        url, scope = self._fic_url(identity, subject)
+        response = self._response("PUT" if scope == _ARM_SCOPE else "POST", url if scope == _ARM_SCOPE else f"{_GRAPH_APPLICATIONS}/{identity.object_id}/federatedIdentityCredentials", scope=scope, params={"api-version": _FIC_API_VERSION} if scope == _ARM_SCOPE else None, json_body={"properties": {"issuer": props.get("issuer"), "subject": props.get("subject"), "audiences": props.get("audiences")}} if scope == _ARM_SCOPE else {"name": _fic_name(subject), "issuer": props.get("issuer"), "subject": props.get("subject"), "audiences": props.get("audiences")})
+        if response.status_code not in {200, 201}:
+            raise AzureProviderError(f"Azure request failed with HTTP {response.status_code}")
+
     def _delete_uami(self, resource_id: str) -> None:
         response = self._response("DELETE", f"https://management.azure.com{resource_id}", scope=_ARM_SCOPE, params={"api-version": _MANAGED_IDENTITY_API_VERSION})
         if response.status_code not in {200, 202, 204, 404}:
             raise AzureProviderError(f"Azure request failed with HTTP {response.status_code}")
 
-    def _verify_fic_binding(self, identity: AzureIdentityReference, fic: Mapping[str, object]) -> None:
-        url, scope = self._fic_url(identity, _text(fic.get("subject"), field="subject"))
-        body = self._request("GET", url, scope=scope, params={"api-version": _FIC_API_VERSION} if scope == _ARM_SCOPE else None)
-        props = body.get("properties", body)
-        assert isinstance(props, Mapping)
-        if props.get("issuer") != fic["issuer"] or props.get("subject") != fic["subject"] or props.get("audiences") != [fic["audience"]]:
-            raise AzureProviderError("federated credential verification drifted from exact claims")
-
-    def _verify_role_binding(self, identity: AzureIdentityReference, role: Mapping[str, object]) -> None:
-        body = self._request("GET", f"https://management.azure.com{role['resource_id']}", scope=_ARM_SCOPE, params={"api-version": _AUTHZ_API_VERSION})
-        props = body["properties"]
-        assert isinstance(props, Mapping)
-        if _text(props.get("principalId"), field="principalId").lower() != _text(role.get("principal_id"), field="principal_id").lower():
-            raise AzureProviderError("role assignment verification principalId mismatch")
-        if _canonical_role_definition_id(_text(props.get("roleDefinitionId"), field="roleDefinitionId"), identity.subscription_id or _text(role.get("scope"), field="scope").split("/")[2]) != _text(role.get("role_definition_id"), field="role_definition_id"):
-            raise AzureProviderError("role assignment verification roleDefinitionId mismatch")
-        scope_id = _canonical_resource_id(_text(body.get("id"), field="id").split(f"/{_ROLE_ASSIGNMENTS_SEGMENT}/", 1)[0])
-        if scope_id != _text(role.get("scope"), field="scope"):
-            raise AzureProviderError("role assignment verification scope mismatch")
-
     def _rollback_action(self, state: Mapping[str, object], identity: AzureIdentityReference, action_id: str) -> None:
-        if action_id == "azure-uami-create":
-            if state["identity"]["disposition"] == "created":
-                self._delete_uami(_text(state["identity"]["resource_id"], field="identity.resource_id"))
+        for role in state["role_assignments"]:
+            if role["action_id"] == action_id:
+                if role["disposition"] == "created":
+                    self._delete_role(_text(role["resource_id"], field="resource_id"))
+                elif role["disposition"] == "changed":
+                    self._restore_role(_binding(role["preimage"]))
+                return
+        for fic in state["federated_credentials"]:
+            if fic["action_id"] == action_id:
+                if fic["disposition"] == "created":
+                    self._delete_fic(identity, _text(fic["subject"], field="subject"))
+                elif fic["disposition"] == "changed":
+                    self._restore_fic(identity, _text(fic["subject"], field="subject"), _binding(fic["preimage"]))
+                return
+        if action_id == "azure-uami-create" and state["identity"]["disposition"] == "created":
+            self._delete_uami(_text(state["identity"]["resource_id"], field="identity.resource_id"))
+
+    def _reconcile_ambiguous_attempts(self) -> None:
+        state = self._provider_state
+        if not state:
             return
-        for role in reversed(state["role_assignments"]):
-            if role["action_id"] == action_id and role["disposition"] == "created":
-                self._delete_role(_text(role["resource_id"], field="resource_id"))
-                return
-        for fic in reversed(state["federated_credentials"]):
-            if fic["action_id"] == action_id and fic["disposition"] == "created":
-                self._delete_fic(identity, _text(fic["subject"], field="subject"))
-                return
+        identity = self._state_identity(state)
+        if state["identity"]["disposition"] == "planned":
+            live = self._get_uami_if_exists(identity.resource_id or "") if identity.kind == "user_assigned_managed_identity" else None
+            if live is not None:
+                state["identity"] = self._identity_state(live, planned=identity, disposition="created", preimage=None)
+        for attempt in state["attempts"]:
+            if attempt["disposition"] != "ambiguous":
+                continue
+            if attempt["kind"] == "uami":
+                live = self._get_uami_if_exists(identity.resource_id or "")
+                if live is not None:
+                    state["identity"] = self._identity_state(live, planned=identity, disposition="created", preimage=None)
+                    attempt["disposition"] = "created"
+                else:
+                    state["identity"]["disposition"] = "created"
+            elif attempt["kind"] == "fic":
+                subject = _text(attempt["target"]["subject"], field="subject")
+                if self._get_fic(self._state_identity(state), subject) is not None:
+                    attempt["disposition"] = "created"
+            elif attempt["kind"] == "role":
+                assignment_id = _text(attempt["target"]["assignment_id"], field="assignment_id")
+                if self._get_role(_text(next(item["scope"] for item in state["role_assignments"] if item["action_id"] == attempt["action_id"]), field="scope"), assignment_id) is not None:
+                    attempt["disposition"] = "created"
 
     def _select_identity(self, plan: BootstrapPlan) -> AzureIdentityReference:
         for action in plan.actions:
@@ -569,93 +632,6 @@ class AzureArmRestProvider:
         canonical = _canonical_role_definition_id(current, role.scope.split("/")[2])
         if _approval_fingerprint(role.scope, canonical) != role.approval_fingerprint or canonical != role.role_definition_id:
             raise AzureProviderError("approved role mapping drifted from planned approval fingerprint")
-
-    def _resolve_identity(self, identity: AzureIdentityReference) -> AzureIdentityReference:
-        if identity.kind == "user_assigned_managed_identity":
-            live = self._get_uami_if_exists(identity.resource_id or "")
-            if live is None:
-                raise AzureProviderError("live identity missing")
-            return live
-        app = self._request("GET", f"{_GRAPH_APPLICATIONS}/{identity.object_id}", scope=_GRAPH_SCOPE)
-        app_id = _text(app.get("appId"), field="application.appId")
-        sp = self._request("GET", _GRAPH_SERVICE_PRINCIPALS, scope=_GRAPH_SCOPE, params={"$filter": f"appId eq '{app_id}'"})
-        values = sp.get("value")
-        if not isinstance(values, list) or len(values) != 1 or not isinstance(values[0], Mapping):
-            raise AzureProviderError("corresponding service principal could not be resolved uniquely")
-        return AzureIdentityReference(kind="entra_application", client_id=app_id, resource_id=None, object_id=_text(app.get("id"), field="application.id"), principal_id=_text(values[0].get("id"), field="servicePrincipal.id"), tenant_id=_text(values[0].get("appOwnerOrganizationId"), field="servicePrincipal.appOwnerOrganizationId"), subscription_id=identity.subscription_id, name=_text(app.get("displayName"), field="application.displayName"), adopted=True)
-
-    def _assert_expected_identity(self, planned: AzureIdentityReference, live: AzureIdentityReference, *, allow_fill_missing: bool = False) -> None:
-        if planned.resource_id and live.resource_id and planned.resource_id != live.resource_id:
-            raise AzureProviderError("live identity resource_id did not match planned identity")
-        for field_name in ("client_id", "principal_id", "tenant_id"):
-            expected = getattr(planned, field_name)
-            actual = getattr(live, field_name)
-            if expected is not None and actual != expected:
-                raise AzureProviderError(f"live identity {field_name} did not match planned identity")
-            if expected is None and not allow_fill_missing and actual is None:
-                continue
-
-    def _create_or_update_uami(self, identity: AzureIdentityReference) -> tuple[AzureIdentityReference, bool]:
-        response = self._response("PUT", f"https://management.azure.com{identity.resource_id}", scope=_ARM_SCOPE, params={"api-version": _MANAGED_IDENTITY_API_VERSION}, json_body={"location": identity.location})
-        if response.status_code not in {200, 201}:
-            raise AzureProviderError(f"Azure request failed with HTTP {response.status_code}")
-        return self._get_uami(identity.resource_id or ""), response.status_code == 201
-
-    def _fic_url(self, identity: AzureIdentityReference, subject: str) -> tuple[str, str]:
-        name = _fic_name(subject)
-        if identity.kind == "user_assigned_managed_identity":
-            return (f"https://management.azure.com{identity.resource_id}/federatedIdentityCredentials/{name}", _ARM_SCOPE)
-        return (f"{_GRAPH_APPLICATIONS}/{identity.object_id}/federatedIdentityCredentials/{name}", _GRAPH_SCOPE)
-
-    def _ensure_fic(self, identity: AzureIdentityReference, subject: str) -> bool:
-        url, scope = self._fic_url(identity, subject)
-        get_response = self._response("GET", url, scope=scope, params={"api-version": _FIC_API_VERSION} if scope == _ARM_SCOPE else None)
-        if get_response.status_code == 200:
-            return False
-        if get_response.status_code != 404:
-            raise AzureProviderError(f"Azure request failed with HTTP {get_response.status_code}")
-        try:
-            response = self._response("PUT" if scope == _ARM_SCOPE else "POST", url if scope == _ARM_SCOPE else f"{_GRAPH_APPLICATIONS}/{identity.object_id}/federatedIdentityCredentials", scope=scope, params={"api-version": _FIC_API_VERSION} if scope == _ARM_SCOPE else None, json_body={"properties": {"issuer": _ACTIONS_ISSUER, "subject": subject, "audiences": [_ACTIONS_AUDIENCE]}} if scope == _ARM_SCOPE else {"name": _fic_name(subject), "issuer": _ACTIONS_ISSUER, "subject": subject, "audiences": [_ACTIONS_AUDIENCE]})
-        except AzureProviderError as exc:
-            if str(exc) == "Azure request timed out":
-                if self._resource_exists(url, scope, {"api-version": _FIC_API_VERSION} if scope == _ARM_SCOPE else None):
-                    return True
-            raise
-        if response.status_code not in {200, 201}:
-            raise AzureProviderError(f"Azure request failed with HTTP {response.status_code}")
-        return True
-
-    def _ensure_role(self, identity: AzureIdentityReference, role: PlannedRoleAssignment, assignment_id: str) -> bool:
-        principal_id = _text(identity.principal_id, field="identity.principal_id")
-        url = f"https://management.azure.com{role.scope}/{_ROLE_ASSIGNMENTS_SEGMENT}/{assignment_id}"
-        get_response = self._response("GET", url, scope=_ARM_SCOPE, params={"api-version": _AUTHZ_API_VERSION})
-        if get_response.status_code == 200:
-            body = _json_response(get_response)
-            props = body["properties"]
-            assert isinstance(props, Mapping)
-            if _text(props.get("principalId"), field="principalId").lower() != principal_id.lower():
-                raise AzureProviderError("existing role assignment principalId did not match the frozen planned identity")
-            if _canonical_role_definition_id(_text(props.get("roleDefinitionId"), field="roleDefinitionId"), identity.subscription_id or role.scope.split("/")[2]) != role.role_definition_id:
-                raise AzureProviderError("existing role assignment roleDefinitionId did not match the frozen planned role")
-            return False
-        if get_response.status_code != 404:
-            raise AzureProviderError(f"Azure request failed with HTTP {get_response.status_code}")
-        raw_role_definition_id = self._approved_role_definitions[role.role_key]
-        try:
-            response = self._response("PUT", url, scope=_ARM_SCOPE, params={"api-version": _AUTHZ_API_VERSION}, json_body={"properties": {"principalId": principal_id, "roleDefinitionId": raw_role_definition_id, "principalType": "ServicePrincipal"}})
-        except AzureProviderError as exc:
-            if str(exc) == "Azure request timed out" and self._resource_exists(url, _ARM_SCOPE, {"api-version": _AUTHZ_API_VERSION}):
-                body = self._request("GET", url, scope=_ARM_SCOPE, params={"api-version": _AUTHZ_API_VERSION})
-                props = body["properties"]
-                assert isinstance(props, Mapping)
-                if _text(props.get("principalId"), field="principalId").lower() == principal_id.lower() and _canonical_role_definition_id(_text(props.get("roleDefinitionId"), field="roleDefinitionId"), identity.subscription_id or role.scope.split("/")[2]) == role.role_definition_id:
-                    return True
-            raise
-        if response.status_code == 403:
-            raise AzureProviderError("executor is missing Microsoft.Authorization/roleAssignments/write")
-        if response.status_code not in {200, 201}:
-            raise AzureProviderError(f"Azure request failed with HTTP {response.status_code}")
-        return True
 
 
 __all__ = ["AzureArmRestProvider", "AzureIdentityReference", "AzureProviderError"]

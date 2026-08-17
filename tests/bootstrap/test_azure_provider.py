@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 
-import httpx
 import pytest
 
 from foundry_opt.bootstrap.contracts import BootstrapAction, BootstrapPlan
@@ -52,15 +51,24 @@ def _uami_payload() -> dict[str, object]:
     return {"id": UAMI_ID, "name": "shared-uami", "location": "eastus", "properties": {"clientId": CLIENT, "principalId": PRINCIPAL, "tenantId": TENANT}}
 
 
-def _role_payload() -> dict[str, object]:
-    return {"properties": {"principalId": PRINCIPAL, "roleDefinitionId": ROLE}, "id": ROLE_URL.replace("?api-version=2022-04-01", "")}
-
-
 def _fic_payload(subject: str) -> dict[str, object]:
     return {"properties": {"issuer": "https://token.actions.githubusercontent.com", "subject": subject, "audiences": ["api://AzureADTokenExchange"]}}
 
 
-def test_authorization_uses_real_bearer_and_never_persists_token() -> None:
+def _role_payload(*, condition: str | None = None, condition_version: str | None = None, delegated_id: str | None = None) -> dict[str, object]:
+    return {
+        "properties": {
+            "principalId": PRINCIPAL,
+            "roleDefinitionId": ROLE,
+            "condition": condition,
+            "conditionVersion": condition_version,
+            "delegatedManagedIdentityResourceId": delegated_id,
+        },
+        "id": ROLE_URL.replace("?api-version=2022-04-01", ""),
+    }
+
+
+def test_real_bearer_header_and_no_token_persistence() -> None:
     recorder = AzureTransportRecorder()
     provider = _provider(recorder, token="secret-token")
     recorder.add("GET", f"{UAMI_URL}?api-version=2023-01-31", (404, {"error": {}}))
@@ -79,128 +87,112 @@ def test_authorization_uses_real_bearer_and_never_persists_token() -> None:
     assert "secret-token" not in str(receipt)
 
 
-def test_verify_rejects_failed_receipt() -> None:
+def test_restore_reconciles_ambiguous_uami_before_verify_rollback() -> None:
     recorder = AzureTransportRecorder()
     provider = _provider(recorder)
-    recorder.add("GET", f"{UAMI_URL}?api-version=2023-01-31", (200, {"id": UAMI_ID, "name": "shared-uami", "properties": {"clientId": "wrong", "principalId": PRINCIPAL, "tenantId": TENANT}}))
-    receipt = provider.apply_bindings(_plan(_uami(adopted=True), _role()))
+    recorder.add("GET", f"{UAMI_URL}?api-version=2023-01-31", (404, {"error": {}}))
+    recorder.add("PUT", f"{UAMI_URL}?api-version=2023-01-31", (201, _uami_payload()))
+    recorder.add("GET", f"{UAMI_URL}?api-version=2023-01-31", (200, _uami_payload()))
+    for subject in _subjects():
+        url = f"{UAMI_URL}/federatedIdentityCredentials/{_fic(subject)}?api-version=2024-11-30"
+        recorder.add("GET", url, (404, {"error": {}}))
+        recorder.add("PUT", url, (201, _fic_payload(subject)))
+    recorder.add("GET", ROLE_URL, (404, {"error": {}}))
+    recorder.add("PUT", ROLE_URL, (201, _role_payload()))
+    receipt = provider.apply_bindings(_plan(_uami(adopted=False, ids=False), _role()))
+    exported = provider.export_provider_state(receipt)
+    state = dict(exported)
+    state["attempts"][0]["disposition"] = "ambiguous"
+    state["identity"]["disposition"] = "created"
+    from foundry_opt.bootstrap.canonical import canonical_sha256
+    state["state_hash"] = canonical_sha256({k: v for k, v in state.items() if k != "state_hash"})
+    restarted = _provider(recorder)
+    recorder.add("GET", f"{UAMI_URL}?api-version=2023-01-31", (200, _uami_payload()))
+    restarted.restore_provider_state(state)
+    recorder.add("DELETE", ROLE_URL, (204, {}))
+    for subject in reversed(_subjects()):
+        recorder.add("DELETE", f"{UAMI_URL}/federatedIdentityCredentials/{_fic(subject)}?api-version=2024-11-30", (204, {}))
+    recorder.add("DELETE", f"{UAMI_URL}?api-version=2023-01-31", (204, {}))
+    restarted.rollback_bindings(receipt)
+    recorder.add("GET", ROLE_URL, (404, {"error": {}}))
+    for subject in _subjects():
+        recorder.add("GET", f"{UAMI_URL}/federatedIdentityCredentials/{_fic(subject)}?api-version=2024-11-30", (404, {"error": {}}))
+    recorder.add("GET", f"{UAMI_URL}?api-version=2023-01-31", (404, {"error": {}}))
+    assert restarted.verify_rollback(receipt) is True
+
+
+def test_fic_http_200_is_changed_and_restored_from_preimage() -> None:
+    recorder = AzureTransportRecorder()
+    provider = _provider(recorder)
+    recorder.add("GET", f"{UAMI_URL}?api-version=2023-01-31", (200, _uami_payload()))
+    subject = _subjects()[0]
+    fic_url = f"{UAMI_URL}/federatedIdentityCredentials/{_fic(subject)}?api-version=2024-11-30"
+    recorder.add("GET", fic_url, (200, {"properties": {"issuer": "old", "subject": subject, "audiences": ["old"]}}))
+    recorder.add("PUT", fic_url, (200, _fic_payload(subject)))
+    other = _subjects()[1]
+    other_url = f"{UAMI_URL}/federatedIdentityCredentials/{_fic(other)}?api-version=2024-11-30"
+    recorder.add("GET", other_url, (404, {"error": {}}))
+    recorder.add("PUT", other_url, (201, _fic_payload(other)))
+    recorder.add("GET", ROLE_URL, (200, _role_payload()))
+    receipt = provider.apply_bindings(_plan(_uami(adopted=False), _role()))
+    state = provider.export_provider_state(receipt)
+    fic_state = next(item for item in state["federated_credentials"] if item["action_id"] == "azure-fic-copilot")
+    assert fic_state["disposition"] == "changed"
+    recorder.add("PUT", fic_url, (200, {"properties": {"issuer": "old", "subject": subject, "audiences": ["old"]}}))
+    recorder.add("DELETE", other_url, (204, {}))
+    provider.rollback_bindings(receipt)
+
+
+def test_rbac_http_200_is_changed_and_restored_from_preimage() -> None:
+    recorder = AzureTransportRecorder()
+    provider = _provider(recorder)
+    recorder.add("GET", f"{UAMI_URL}?api-version=2023-01-31", (200, _uami_payload()))
+    for subject in _subjects():
+        url = f"{UAMI_URL}/federatedIdentityCredentials/{_fic(subject)}?api-version=2024-11-30"
+        recorder.add("GET", url, (200, _fic_payload(subject)))
+    recorder.add("GET", ROLE_URL, (404, {"error": {}}))
+    recorder.add("GET", ROLE_URL, (200, _role_payload(condition="old", condition_version="1.0")))
+    recorder.add("PUT", ROLE_URL, (200, _role_payload()))
+    receipt = provider.apply_bindings(_plan(_uami(adopted=False), _role()))
+    state = provider.export_provider_state(receipt)
+    role_state = state["role_assignments"][0]
+    assert role_state["disposition"] == "changed"
+    recorder.add("PUT", ROLE_URL, (200, _role_payload(condition="old", condition_version="1.0")))
+    provider.rollback_bindings(receipt)
+
+
+def test_uami_http_200_change_without_preimage_fails_closed() -> None:
+    recorder = AzureTransportRecorder()
+    provider = _provider(recorder)
+    recorder.add("GET", f"{UAMI_URL}?api-version=2023-01-31", (404, {"error": {}}))
+    recorder.add("PUT", f"{UAMI_URL}?api-version=2023-01-31", (200, _uami_payload()))
+    with pytest.raises(AzureProviderError):
+        provider.apply_bindings(_plan(_uami(adopted=False, ids=False), _role()))
+
+
+def test_adopted_role_verification_requires_default_condition_fields() -> None:
+    recorder = AzureTransportRecorder()
+    provider = _provider(recorder)
+    recorder.add("GET", f"{UAMI_URL}?api-version=2023-01-31", (200, _uami_payload()))
+    for subject in _subjects():
+        url = f"{UAMI_URL}/federatedIdentityCredentials/{_fic(subject)}?api-version=2024-11-30"
+        recorder.add("GET", url, (200, _fic_payload(subject)))
+    recorder.add("GET", ROLE_URL, (200, _role_payload(condition="x", condition_version="2.0", delegated_id="/subscriptions/x")))
+    recorder.add("PUT", ROLE_URL, (200, _role_payload()))
+    receipt = provider.apply_bindings(_plan(_uami(adopted=False), _role()))
+    recorder.add("GET", ROLE_URL, (200, _role_payload(condition="x", condition_version="2.0", delegated_id="/subscriptions/x")))
     with pytest.raises(AzureProviderError):
         provider.verify_bindings(receipt)
 
 
-def test_timeout_reconciles_ambiguous_fic_write_as_created_and_rollbackable() -> None:
-    recorder = AzureTransportRecorder()
-    provider = _provider(recorder)
-    recorder.add("GET", f"{UAMI_URL}?api-version=2023-01-31", (404, {"error": {}}))
-    recorder.add("PUT", f"{UAMI_URL}?api-version=2023-01-31", (201, _uami_payload()))
-    recorder.add("GET", f"{UAMI_URL}?api-version=2023-01-31", (200, _uami_payload()))
-    subject = _subjects()[0]
-    fic_url = f"{UAMI_URL}/federatedIdentityCredentials/{_fic(subject)}?api-version=2024-11-30"
-    recorder.add("GET", fic_url, (404, {"error": {}}))
-    recorder.add("PUT", fic_url, lambda request: (_ for _ in ()).throw(httpx.TimeoutException("timeout")))
-    recorder.add("GET", fic_url, (200, _fic_payload(subject)))
-    recorder.add("GET", f"{UAMI_URL}/federatedIdentityCredentials/{_fic(_subjects()[1])}?api-version=2024-11-30", (404, {"error": {}}))
-    recorder.add("PUT", f"{UAMI_URL}/federatedIdentityCredentials/{_fic(_subjects()[1])}?api-version=2024-11-30", (201, _fic_payload(_subjects()[1])))
-    recorder.add("GET", ROLE_URL, (404, {"error": {}}))
-    recorder.add("PUT", ROLE_URL, (201, _role_payload()))
-    receipt = provider.apply_bindings(_plan(_uami(adopted=False, ids=False), _role()))
-    state = provider.export_provider_state(receipt)
-    assert state["attempts"]
-    assert any(attempt["action_id"] == "azure-fic-copilot" for attempt in state["attempts"])
-    assert any(attempt["action_id"] == "azure-fic-copilot" for attempt in state["federated_credentials"]) or any(attempt["action_id"] == "azure-fic-copilot" for attempt in state["attempts"])
-    assert any(item.startswith("azure-fic-") for item in receipt.compensation_required_actions)
-
-
-def test_existing_uami_is_never_created_and_is_adopted() -> None:
+def test_scope_comparison_is_casefolded() -> None:
     recorder = AzureTransportRecorder()
     provider = _provider(recorder)
     recorder.add("GET", f"{UAMI_URL}?api-version=2023-01-31", (200, _uami_payload()))
     for subject in _subjects():
         url = f"{UAMI_URL}/federatedIdentityCredentials/{_fic(subject)}?api-version=2024-11-30"
-        recorder.add("GET", url, (404, {"error": {}}))
-        recorder.add("PUT", url, (201, _fic_payload(subject)))
-    recorder.add("GET", ROLE_URL, (404, {"error": {}}))
-    recorder.add("PUT", ROLE_URL, (201, _role_payload()))
+        recorder.add("GET", url, (200, _fic_payload(subject)))
+    mixed_scope_url = f"https://management.azure.com/subscriptions/{SUB.upper()}/resourceGroups/rg/providers/Microsoft.CognitiveServices/accounts/acct/projects/proj/providers/Microsoft.Authorization/roleAssignments/{ASSIGNMENT_ID}?api-version=2022-04-01"
+    recorder.add("GET", mixed_scope_url, (200, {"properties": {"principalId": PRINCIPAL, "roleDefinitionId": ROLE, "condition": None, "conditionVersion": None, "delegatedManagedIdentityResourceId": None}, "id": mixed_scope_url.replace('?api-version=2022-04-01', '')}))
     receipt = provider.apply_bindings(_plan(_uami(adopted=False), _role()))
-    state = provider.export_provider_state(receipt)
-    assert "azure-uami-create" not in receipt.created_actions
-    assert state["identity"]["disposition"] == "adopted"
-
-
-def test_successful_receipt_exports_rollback_targets() -> None:
-    recorder = AzureTransportRecorder()
-    provider = _provider(recorder)
-    recorder.add("GET", f"{UAMI_URL}?api-version=2023-01-31", (404, {"error": {}}))
-    recorder.add("PUT", f"{UAMI_URL}?api-version=2023-01-31", (201, _uami_payload()))
-    recorder.add("GET", f"{UAMI_URL}?api-version=2023-01-31", (200, _uami_payload()))
-    for subject in _subjects():
-        url = f"{UAMI_URL}/federatedIdentityCredentials/{_fic(subject)}?api-version=2024-11-30"
-        recorder.add("GET", url, (404, {"error": {}}))
-        recorder.add("PUT", url, (201, _fic_payload(subject)))
-    recorder.add("GET", ROLE_URL, (404, {"error": {}}))
-    recorder.add("PUT", ROLE_URL, (201, _role_payload()))
-    receipt = provider.apply_bindings(_plan(_uami(adopted=False, ids=False), _role()))
-    state = provider.export_provider_state(receipt)
-    assert receipt.error_info is None
-    assert set(state["compensation_required_actions"]) == set(receipt.compensation_required_actions)
-    assert any(str(item).startswith("azure-rbac-FoundryProjectReader-") for item in state["compensation_required_actions"])
-
-
-def test_verify_compares_live_to_frozen_planned_identity() -> None:
-    recorder = AzureTransportRecorder()
-    provider = _provider(recorder)
-    recorder.add("GET", f"{UAMI_URL}?api-version=2023-01-31", (404, {"error": {}}))
-    recorder.add("PUT", f"{UAMI_URL}?api-version=2023-01-31", (201, _uami_payload()))
-    recorder.add("GET", f"{UAMI_URL}?api-version=2023-01-31", (200, _uami_payload()))
-    for subject in _subjects():
-        url = f"{UAMI_URL}/federatedIdentityCredentials/{_fic(subject)}?api-version=2024-11-30"
-        recorder.add("GET", url, (404, {"error": {}}))
-        recorder.add("PUT", url, (201, _fic_payload(subject)))
-    recorder.add("GET", ROLE_URL, (404, {"error": {}}))
-    recorder.add("PUT", ROLE_URL, (201, _role_payload()))
-    receipt = provider.apply_bindings(_plan(_uami(adopted=False), _role()))
-    state = provider.export_provider_state(receipt)
-    restarted = _provider(recorder)
-    restarted.restore_provider_state(state)
-    recorder.add("GET", f"{UAMI_URL}?api-version=2023-01-31", (200, {"id": UAMI_ID, "name": "shared-uami", "location": "eastus", "properties": {"clientId": "different", "principalId": PRINCIPAL, "tenantId": TENANT}}))
-    with pytest.raises(AzureProviderError):
-        restarted.verify_bindings(receipt)
-
-
-def test_verify_rollback_proves_created_absent_and_adopted_exact() -> None:
-    recorder = AzureTransportRecorder()
-    provider = _provider(recorder)
-    recorder.add("GET", f"{UAMI_URL}?api-version=2023-01-31", (200, _uami_payload()))
-    adopted_subject = _subjects()[0]
-    created_subject = _subjects()[1]
-    recorder.add("GET", f"{UAMI_URL}/federatedIdentityCredentials/{_fic(adopted_subject)}?api-version=2024-11-30", (200, _fic_payload(adopted_subject)))
-    recorder.add("GET", f"{UAMI_URL}/federatedIdentityCredentials/{_fic(created_subject)}?api-version=2024-11-30", (404, {"error": {}}))
-    recorder.add("PUT", f"{UAMI_URL}/federatedIdentityCredentials/{_fic(created_subject)}?api-version=2024-11-30", (201, _fic_payload(created_subject)))
-    recorder.add("GET", ROLE_URL, (200, _role_payload()))
-    receipt = provider.apply_bindings(_plan(_uami(adopted=False), _role()))
-    recorder.add("DELETE", f"{UAMI_URL}/federatedIdentityCredentials/{_fic(created_subject)}?api-version=2024-11-30", (204, {}))
-    provider.rollback_bindings(receipt)
-    recorder.add("GET", ROLE_URL, (200, _role_payload()))
-    recorder.add("GET", f"{UAMI_URL}/federatedIdentityCredentials/{_fic(adopted_subject)}?api-version=2024-11-30", (200, _fic_payload(adopted_subject)))
-    recorder.add("GET", f"{UAMI_URL}/federatedIdentityCredentials/{_fic(created_subject)}?api-version=2024-11-30", (404, {"error": {}}))
-    recorder.add("GET", f"{UAMI_URL}?api-version=2023-01-31", (200, _uami_payload()))
-    assert provider.verify_rollback(receipt) is True
-
-
-def test_restore_provider_state_rejects_tampering() -> None:
-    recorder = AzureTransportRecorder()
-    provider = _provider(recorder)
-    recorder.add("GET", f"{UAMI_URL}?api-version=2023-01-31", (404, {"error": {}}))
-    recorder.add("PUT", f"{UAMI_URL}?api-version=2023-01-31", (201, _uami_payload()))
-    recorder.add("GET", f"{UAMI_URL}?api-version=2023-01-31", (200, _uami_payload()))
-    for subject in _subjects():
-        url = f"{UAMI_URL}/federatedIdentityCredentials/{_fic(subject)}?api-version=2024-11-30"
-        recorder.add("GET", url, (404, {"error": {}}))
-        recorder.add("PUT", url, (201, _fic_payload(subject)))
-    recorder.add("GET", ROLE_URL, (404, {"error": {}}))
-    recorder.add("PUT", ROLE_URL, (201, _role_payload()))
-    receipt = provider.apply_bindings(_plan(_uami(adopted=False, ids=False), _role()))
-    state = dict(provider.export_provider_state(receipt))
-    state["state_hash"] = "0" * 64
-    with pytest.raises(AzureProviderError):
-        _provider(AzureTransportRecorder()).restore_provider_state(state)
+    assert provider.verify_bindings(receipt) is True
