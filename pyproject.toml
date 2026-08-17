@@ -1,0 +1,32 @@
+[project]
+name = "foundry-opt"
+version = "0.2.0"
+description = "Issue-driven Microsoft Foundry agent optimization for GitHub Copilot cloud agent."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "azure-ai-projects>=2.4.0",
+    "azure-identity>=1.25",
+    "httpx>=0.28",
+    "pydantic>=2.12",
+    "pyyaml>=6.0",
+    "typer>=0.16",
+]
+
+[project.scripts]
+foundry-opt = "foundry_opt:main"
+
+[build-system]
+requires = ["uv_build>=0.11.6,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+pythonpath = ["."]
+
