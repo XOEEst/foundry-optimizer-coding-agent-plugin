@@ -128,6 +128,7 @@ class _Datasets:
     def delete(self, name: str, version: str, **kwargs: object) -> None:
         del kwargs
         self.delete_calls.append((name, version))
+        self.gets.pop((name, version), None)
 
 
 class _Connections:
@@ -259,9 +260,18 @@ def test_plan_apply_rollback_lifecycle_and_canonical_operation_ids() -> None:
     assert receipt.adopted_actions == ('dataset-a:1',)
     assert receipt.before_fingerprints and receipt.after_fingerprints
     assert receipt.changed_actions == ()
+    state = adapter.export_provider_state(receipt)
+    assert state['repository_identity'] == 'org/repo'
+    assert state['resources'][0]['disposition'] == 'adopted'
+    assert len(state['resources'][0]['fingerprint']) == 64
+    assert adapter.get_dataset('dataset-a', '1')['content_fingerprint'] == state['resources'][0]['fingerprint']
     assert adapter.verify_resources(receipt) is True
+    restored = FoundryAdapter('https://account.services.ai.azure.com/api/projects/demo', _Cred(), client=_Client(beta=_Beta(datasets=_Jobs(create_results=[]), evaluators=_Jobs(create_results=[])), datasets=datasets))
+    restored.restore_provider_state(state)
+    assert restored.verify_resources(receipt) is True
     adapter.rollback_resources(receipt)
     assert datasets.delete_calls == []
+    assert adapter.verify_rollback(receipt) is True
 
 
 def test_plan_apply_partial_failure_rolls_back_only_created_assets() -> None:
@@ -270,8 +280,38 @@ def test_plan_apply_partial_failure_rolls_back_only_created_assets() -> None:
     receipt = adapter.apply_resources(BootstrapPlan.create(operation_id='e'*64, runtime_repository='https://github.com/example/runtime.git', runtime_commit='a'*40, repository_identity='org/repo', actions=(BootstrapAction(action_id='dataset-new:1', phase='evaluations', stage='planned', kind='dataset', diagnostics=('dataset-new','1','https://blob/new.jsonl','uri_file')),)))
     assert receipt.created_actions == ('dataset-new:1',)
     assert receipt.changed_actions == ()
+    state = adapter.export_provider_state(receipt)
+    restored = FoundryAdapter('https://account.services.ai.azure.com/api/projects/demo', _Cred(), client=_Client(beta=_Beta(datasets=_Jobs(create_results=[]), evaluators=_Jobs(create_results=[])), datasets=datasets))
+    restored.restore_provider_state(state)
     adapter.rollback_resources(receipt)
     assert datasets.delete_calls == [('dataset-new', '1')]
+    assert restored.verify_rollback(receipt) is True
+
+
+def test_restore_provider_state_rejects_tamper_and_repository_mismatch() -> None:
+    datasets = _Datasets([], gets={('dataset-a', '1'): _SdkValue({'name': 'dataset-a', 'version': '1', 'id': 'azureai://accounts/a/projects/p/data/dataset-a/versions/1', 'type': 'uri_file', 'dataUri': 'https://blob/data.jsonl'})})
+    adapter = FoundryAdapter('https://account.services.ai.azure.com/api/projects/demo', _Cred(), client=_Client(beta=_Beta(datasets=_Jobs(create_results=[]), evaluators=_Jobs(create_results=[])), datasets=datasets))
+    receipt = adapter.apply_resources(_plan())
+    state = dict(adapter.export_provider_state(receipt))
+    tampered = dict(state)
+    tampered['binding_hash'] = '0' * 64
+    restored = FoundryAdapter('https://account.services.ai.azure.com/api/projects/demo', _Cred(), client=_Client(beta=_Beta(datasets=_Jobs(create_results=[]), evaluators=_Jobs(create_results=[])), datasets=datasets))
+    with pytest.raises(FoundryPrerequisiteError):
+        restored.restore_provider_state(tampered)
+    mismatch_receipt = receipt.model_copy(update={'repository_identity': 'other/repo'})
+    adapter.restore_provider_state(state)
+    with pytest.raises(FoundryPrerequisiteError):
+        adapter.export_provider_state(mismatch_receipt)
+
+
+def test_verify_resources_detects_immutable_drift_and_state_excludes_sdk_types() -> None:
+    datasets = _Datasets([], gets={('dataset-a', '1'): _SdkValue({'name': 'dataset-a', 'version': '1', 'id': 'azureai://accounts/a/projects/p/data/dataset-a/versions/1', 'type': 'uri_file', 'dataUri': 'https://blob/data.jsonl'})})
+    adapter = FoundryAdapter('https://account.services.ai.azure.com/api/projects/demo', _Cred(), client=_Client(beta=_Beta(datasets=_Jobs(create_results=[]), evaluators=_Jobs(create_results=[])), datasets=datasets))
+    receipt = adapter.apply_resources(_plan())
+    state = adapter.export_provider_state(receipt)
+    assert '"_SdkValue"' not in str(state)
+    datasets.gets[('dataset-a', '1')] = _SdkValue({'name': 'dataset-a', 'version': '1', 'id': 'azureai://accounts/a/projects/p/data/dataset-a/versions/1', 'type': 'uri_file', 'dataUri': 'https://blob/drift.jsonl'})
+    assert adapter.verify_resources(receipt) is False
 
 
 def test_region_and_network_errors_are_sanitized() -> None:
