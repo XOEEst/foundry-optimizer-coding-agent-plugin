@@ -125,15 +125,16 @@ def test_bash_launcher_parses() -> None:
         / "bootstrap"
         / "launch-bootstrap.sh"
     )
-    drive = path.drive.rstrip(":").lower()
-    wsl_path = f"/mnt/{drive}/{path.as_posix().split(':/', 1)[1]}"
     completed = subprocess.run(
-        [executable, "-lc", f"bash -n '{wsl_path}'"],
+        [executable, "-n"],
         check=False,
         capture_output=True,
-        text=True,
+        input=path.read_bytes(),
     )
-    assert completed.returncode == 0, completed.stderr
+    assert completed.returncode == 0, completed.stderr.decode(
+        "utf-8",
+        errors="replace",
+    )
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows launcher behavior")
