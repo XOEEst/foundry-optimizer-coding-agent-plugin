@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -39,27 +39,29 @@ class _VariableState:
 
 
 @dataclass(frozen=True)
-class _PolicyState:
+class _BranchPolicyState:
     exists: bool
     policy_id: int | None
     name: str | None
+    type: str | None
 
 
 @dataclass(frozen=True)
 class _EnvironmentState:
     name: str
     exists: bool
-    protection_rules: tuple[Mapping[str, object], ...]
     deployment_branch_policy: Mapping[str, object] | None
     variables: tuple[Mapping[str, object], ...]
     variable_state: _VariableState
     branch_policies: tuple[Mapping[str, object], ...]
-    default_branch_policy: _PolicyState
+    requested_branch_policy: _BranchPolicyState
 
 
 @dataclass(frozen=True)
 class _ActionSnapshot:
-    action: BootstrapAction
+    action_id: str
+    kind: str
+    target: str
     before: object
     expected_after: object
     ownership: str
@@ -67,16 +69,11 @@ class _ActionSnapshot:
 
 
 @dataclass(frozen=True)
-class _ApplyState:
+class _ApplyBinding:
+    receipt_hash: str
+    operation_id: str
+    repository: str
     snapshots: tuple[_ActionSnapshot, ...]
-
-
-def _redact(value: str | None) -> str:
-    return "<redacted>"
-
-
-def _redact_message(message: str, token: str) -> str:
-    return message.replace(token, _redact(token))
 
 
 def _bounded_text(value: object, *, field: str, max_length: int = 255) -> str:
@@ -95,29 +92,28 @@ def _canonical_repo(repository: str) -> tuple[str, str]:
     return match.group("owner"), match.group("repo")
 
 
-def _fingerprint(label: str, value: object) -> FingerprintRecord:
-    return FingerprintRecord(label=label, sha256=canonical_sha256(value))
-
-
-def _parse_link_header(value: str | None) -> Mapping[str, str]:
+def _parse_links(value: str | None) -> Mapping[str, str]:
     if not value:
         return {}
     return {rel: url for url, rel in _LINK_REL_PATTERN.findall(value)}
 
 
-def _canonical_environment_payload(payload: Mapping[str, object]) -> Mapping[str, object]:
-    return {
-        "name": payload.get("name"),
-        "protection_rules": payload.get("protection_rules", ()),
-        "deployment_branch_policy": payload.get("deployment_branch_policy"),
-    }
-
-
-def _exception(message: str) -> GitHubProviderApplyError:
+def _redacted_error(message: str) -> GitHubProviderApplyError:
     error = GitHubProviderApplyError(message)
     error.__cause__ = None
     error.__context__ = None
     return error
+
+
+def _redacted_transport_error(message: str) -> GitHubProviderTransportError:
+    error = GitHubProviderTransportError(message)
+    error.__cause__ = None
+    error.__context__ = None
+    return error
+
+
+def _fingerprint(label: str, value: object) -> FingerprintRecord:
+    return FingerprintRecord(label=label, sha256=canonical_sha256(value))
 
 
 class GitHubBootstrapProvider:
@@ -142,9 +138,7 @@ class GitHubBootstrapProvider:
             timeout=timeout,
         )
         self._json_max_bytes = int(json_max_bytes)
-        if self._json_max_bytes <= 0:
-            raise ValueError("json_max_bytes must be positive")
-        self._last_apply_state: _ApplyState | None = None
+        self._last_apply_binding: _ApplyBinding | None = None
 
     def close(self) -> None:
         if self._owns_client:
@@ -152,63 +146,53 @@ class GitHubBootstrapProvider:
 
     def read_repository_settings(self, repository: str) -> Mapping[str, object]:
         owner, repo = _canonical_repo(repository)
-        repo_payload = self._get_json(f"/repos/{owner}/{repo}")
-        repository_id = repo_payload.get("id")
-        default_branch = repo_payload.get("default_branch")
-        full_name = _bounded_text(repo_payload.get("full_name"), field="full_name")
+        payload = self._get_json(f"/repos/{owner}/{repo}")
+        full_name = _bounded_text(payload.get("full_name"), field="full_name")
         if full_name.casefold() != repository.casefold():
             raise GitHubProviderError("repository full_name did not match requested identity")
-        canonical_name = full_name
+        repository_id = payload.get("id")
+        default_branch = _bounded_text(payload.get("default_branch"), field="default_branch")
         if not isinstance(repository_id, int) or repository_id <= 0:
             raise GitHubProviderError("repository id is invalid")
-        if not isinstance(default_branch, str) or not default_branch:
-            raise GitHubProviderError("default branch is invalid")
-        environments = self.inventory_environments(canonical_name)
         return {
-            "repository": canonical_name,
+            "repository": full_name,
             "repository_id": repository_id,
             "default_branch": default_branch,
-            "environments": environments,
+            "environments": self.inventory_environments(full_name, default_branch=default_branch),
         }
 
-    def inventory_environments(self, repository: str) -> Sequence[Mapping[str, object]]:
+    def inventory_environments(self, repository: str, *, default_branch: str | None = None) -> Sequence[Mapping[str, object]]:
         owner, repo = _canonical_repo(repository)
-        result: list[Mapping[str, object]] = []
+        branch = default_branch or self.read_repository_settings(repository)["default_branch"]
+        results: list[Mapping[str, object]] = []
         for env_name in _ENVIRONMENTS:
-            env_payload = self._get_json(f"/repos/{owner}/{repo}/environments/{env_name}", allow_404=True)
-            state = self._inventory_environment(owner, repo, env_name, env_payload)
-            result.append(
+            env = self._inventory_environment(owner, repo, env_name, branch)
+            results.append(
                 {
-                    "name": state.name,
-                    "exists": state.exists,
-                    "protection_rules": state.protection_rules,
-                    "deployment_branch_policy": state.deployment_branch_policy,
-                    "variables": state.variables,
-                    "branch_policies": state.branch_policies,
+                    "name": env.name,
+                    "exists": env.exists,
+                    "deployment_branch_policy": env.deployment_branch_policy,
+                    "variables": env.variables,
+                    "branch_policies": env.branch_policies,
                 }
             )
-        repo_variables = self._list_paginated(f"/repos/{owner}/{repo}/actions/variables", "variables", allow_404=True)
-        result.append({"name": "repository", "exists": True, "variables": tuple(repo_variables)})
-        return tuple(result)
+        repo_variables = tuple(self._list_paginated(f"/repos/{owner}/{repo}/actions/variables", "variables", allow_404=True))
+        results.append({"name": "repository", "exists": True, "variables": repo_variables})
+        return tuple(results)
 
     def plan_changes(self, plan: BootstrapPlan) -> Sequence[BootstrapAction]:
-        repository_state = self.read_repository_settings(plan.repository_identity)
-        canonical_repository = repository_state["repository"]
-        envs = {item["name"]: item for item in repository_state["environments"] if isinstance(item, Mapping)}
-        planned: list[BootstrapAction] = []
+        repository = self.read_repository_settings(plan.repository_identity)["repository"]
+        result: list[BootstrapAction] = []
         for action in plan.actions:
             if action.phase != "github":
                 continue
-            if action.kind == "github-environment":
-                env = _bounded_text(action.diagnostics[0], field="environment")
-                planned.append(action.model_copy(update={"diagnostics": action.diagnostics + (("adopt" if envs.get(env, {}).get("exists") else "create"), canonical_repository)}))
-                continue
-            planned.append(action.model_copy(update={"diagnostics": action.diagnostics + (canonical_repository,)}))
-        return tuple(planned)
+            result.append(action.model_copy(update={"diagnostics": action.diagnostics + (repository,)}))
+        return tuple(result)
 
     def apply_changes(self, plan: BootstrapPlan) -> BootstrapReceipt:
         repository_state = self.read_repository_settings(plan.repository_identity)
         repository = _bounded_text(repository_state["repository"], field="repository")
+        default_branch = _bounded_text(repository_state["default_branch"], field="default_branch")
         owner, repo = _canonical_repo(repository)
         snapshots: list[_ActionSnapshot] = []
         created: list[str] = []
@@ -216,327 +200,255 @@ class GitHubBootstrapProvider:
         changed: list[str] = []
         try:
             for action in self.plan_changes(plan):
-                snapshot = self._apply_action(owner, repo, action)
+                snapshot = self._apply_action(owner, repo, default_branch, action, snapshots)
+                if snapshot is None:
+                    continue
                 snapshots.append(snapshot)
                 if snapshot.ownership == "created":
-                    created.append(action.action_id)
+                    created.append(snapshot.action_id)
                 elif snapshot.ownership == "adopted":
-                    adopted.append(action.action_id)
+                    adopted.append(snapshot.action_id)
                 else:
-                    changed.append(action.action_id)
-            self._verify_snapshots(owner, repo, snapshots)
+                    changed.append(snapshot.action_id)
+            self._verify_final_state(owner, repo, default_branch, snapshots)
         except GitHubProviderError as exc:
             self._rollback_snapshots(owner, repo, snapshots)
-            raise _exception(_redact_message(str(exc), self._token))
-        self._last_apply_state = _ApplyState(tuple(snapshots))
+            raise _redacted_error(str(exc))
         receipt = BootstrapReceipt.create(
             operation_id=plan.operation_id,
             runtime_repository=plan.runtime_repository,
             runtime_commit=plan.runtime_commit,
             repository_identity=repository,
             plan_hash=plan.plan_hash,
-            before_fingerprints=tuple(_fingerprint(f"{snapshot.action.action_id}:before", snapshot.before) for snapshot in snapshots),
-            after_fingerprints=tuple(_fingerprint(f"{snapshot.action.action_id}:after", snapshot.expected_after) for snapshot in snapshots),
+            before_fingerprints=tuple(_fingerprint(f"{snapshot.action_id}:before", snapshot.before) for snapshot in snapshots),
+            after_fingerprints=tuple(_fingerprint(f"{snapshot.action_id}:after", snapshot.expected_after) for snapshot in snapshots),
             created_actions=tuple(created),
             adopted_actions=tuple(adopted),
             changed_actions=tuple(changed),
         )
+        self._last_apply_binding = _ApplyBinding(receipt.receipt_hash, receipt.operation_id, repository, tuple(snapshots))
         return receipt
 
     def verify_changes(self, receipt: BootstrapReceipt) -> bool:
-        return bool(receipt.before_fingerprints) and len(receipt.before_fingerprints) == len(receipt.after_fingerprints)
+        binding = self._validate_receipt_binding(receipt)
+        owner, repo = _canonical_repo(binding.repository)
+        default_branch = self.read_repository_settings(binding.repository)["default_branch"]
+        self._verify_final_state(owner, repo, default_branch, binding.snapshots)
+        return True
 
     def rollback_changes(self, receipt: BootstrapReceipt) -> None:
-        if self._last_apply_state is None:
-            raise GitHubProviderApplyError("receipt-driven rollback is unsupported without action snapshots")
-        owner, repo = _canonical_repo(receipt.repository_identity)
-        self._rollback_snapshots(owner, repo, self._last_apply_state.snapshots)
+        binding = self._validate_receipt_binding(receipt)
+        owner, repo = _canonical_repo(binding.repository)
+        self._rollback_snapshots(owner, repo, list(binding.snapshots))
+
+    def _validate_receipt_binding(self, receipt: BootstrapReceipt) -> _ApplyBinding:
+        binding = self._last_apply_binding
+        if binding is None:
+            raise GitHubProviderApplyError("no apply binding is available for rollback or verification")
+        if binding.receipt_hash != receipt.receipt_hash or binding.operation_id != receipt.operation_id or binding.repository != receipt.repository_identity:
+            raise GitHubProviderApplyError("receipt does not match the current provider apply binding")
+        return binding
 
     def _apply_action(
         self,
         owner: str,
         repo: str,
+        default_branch: str,
         action: BootstrapAction,
-    ) -> _ActionSnapshot:
+        snapshots: list[_ActionSnapshot],
+    ) -> _ActionSnapshot | None:
         if action.kind == "github-environment":
             env_name = _bounded_text(action.diagnostics[0], field="environment")
-            env = self._inventory_environment(owner, repo, env_name)
-            before = {"name": env_name, "exists": env.exists, "protection_rules": env.protection_rules, "deployment_branch_policy": env.deployment_branch_policy}
+            env = self._inventory_environment(owner, repo, env_name, default_branch)
+            before = {"exists": env.exists, "deployment_branch_policy": env.deployment_branch_policy}
             if env.exists:
-                return _ActionSnapshot(action, before, before, "adopted", ())
-            payload = {"deployment_branch_policy": {"custom_branch_policies": True}}
-            self._put(f"/repos/{owner}/{repo}/environments/{env_name}", payload)
-            after = self._inventory_environment(owner, repo, env_name)
+                return _ActionSnapshot(action.action_id, action.kind, env_name, before, before, "adopted", ())
+            rollback = (("delete_environment", env_name, None),)
+            snapshots.append(_ActionSnapshot(action.action_id, action.kind, env_name, before, {"pending": True}, "created", rollback))
+            self._put(f"/repos/{owner}/{repo}/environments/{env_name}", {"deployment_branch_policy": {"protected_branches": False, "custom_branch_policies": True}})
+            after = self._inventory_environment(owner, repo, env_name, default_branch)
             if not after.exists:
                 raise GitHubProviderError("created environment verification failed")
-            expected = {
-                "name": env_name,
-                "exists": True,
-                "protection_rules": after.protection_rules,
-                "deployment_branch_policy": after.deployment_branch_policy,
-            }
-            rollback = (("delete_environment", env_name, None),)
-            return _ActionSnapshot(action, before, expected, "created", rollback)
+            snapshots.pop()
+            return _ActionSnapshot(
+                action.action_id,
+                action.kind,
+                env_name,
+                before,
+                {"exists": True, "deployment_branch_policy": after.deployment_branch_policy},
+                "created",
+                rollback,
+            )
         if action.kind == "github-variable":
             env_name = _bounded_text(action.diagnostics[0], field="environment")
             value = _bounded_text(action.diagnostics[1], field="client_id", max_length=512)
-            env = self._inventory_environment(owner, repo, env_name)
-            before = {"environment": env_name, "variable": {"exists": env.variable_state.exists, "value": env.variable_state.value}}
+            env = self._inventory_environment(owner, repo, env_name, default_branch)
+            before = {"exists": env.variable_state.exists, "value": env.variable_state.value}
             if env.variable_state.exists and env.variable_state.value == value:
-                return _ActionSnapshot(action, before, before, "adopted", ())
+                return _ActionSnapshot(action.action_id, action.kind, env_name, before, before, "adopted", ())
+            rollback = (("restore_variable", env_name, before) if env.variable_state.exists else ("delete_variable", env_name, None),)
+            snapshots.append(_ActionSnapshot(action.action_id, action.kind, env_name, before, {"pending": True}, "changed", rollback))
             if env.variable_state.exists:
-                self._patch(
-                    f"/repos/{owner}/{repo}/environments/{env_name}/variables/{_VAR_NAME}",
-                    {"name": _VAR_NAME, "value": value},
-                )
-                ownership = "changed"
-                rollback = (("restore_variable", env_name, env.variable_state.value),)
+                self._patch(f"/repos/{owner}/{repo}/environments/{env_name}/variables/{_VAR_NAME}", {"name": _VAR_NAME, "value": value})
             else:
-                self._post(
-                    f"/repos/{owner}/{repo}/environments/{env_name}/variables",
-                    {"name": _VAR_NAME, "value": value},
-                )
-                ownership = "changed"
-                rollback = (("delete_variable", env_name, None),)
-            after = self._read_environment_variable(owner, repo, env_name, _VAR_NAME)
-            expected = {"environment": env_name, "variable": {"exists": True, "value": value}}
-            if after.value != value:
+                self._post(f"/repos/{owner}/{repo}/environments/{env_name}/variables", {"name": _VAR_NAME, "value": value})
+            variable = self._read_environment_variable(owner, repo, env_name, _VAR_NAME)
+            if variable.value != value:
                 raise GitHubProviderError("variable verification failed")
-            return _ActionSnapshot(action, before, expected, ownership, rollback)
+            snapshots.pop()
+            return _ActionSnapshot(action.action_id, action.kind, env_name, before, {"exists": True, "value": value}, "changed", rollback)
         if action.kind == "github-branch-policy":
             env_name = _bounded_text(action.diagnostics[0], field="environment")
             branch_name = _bounded_text(action.diagnostics[1], field="default_branch")
-            env = self._inventory_environment(owner, repo, env_name)
+            env = self._inventory_environment(owner, repo, env_name, branch_name)
             before = {
-                "environment": env_name,
                 "deployment_branch_policy": env.deployment_branch_policy,
-                "default_branch_policy": {"exists": env.default_branch_policy.exists, "policy_id": env.default_branch_policy.policy_id, "name": env.default_branch_policy.name},
-            }
-            if env.default_branch_policy.exists:
-                return _ActionSnapshot(action, before, before, "adopted", ())
-            previous_environment_policy = env.deployment_branch_policy
-            environment_policy_changed = not (
-                previous_environment_policy or {}
-            ).get("custom_branch_policies", False)
-            self._ensure_environment_policy_enabled(
-                owner,
-                repo,
-                env_name,
-                previous_environment_policy,
-            )
-            try:
-                duplicate_allowed = False
-                try:
-                    self._post(
-                        f"/repos/{owner}/{repo}/environments/{env_name}/deployment_branch_policies",
-                        {"name": branch_name, "type": "branch"},
-                    )
-                except GitHubProviderTransportError as exc:
-                    if "duplicate" in str(exc).casefold() or "303" in str(exc):
-                        duplicate_allowed = True
-                    else:
-                        raise
-                after = self._inventory_environment(owner, repo, env_name)
-                if (
-                    not after.default_branch_policy.exists
-                    or after.default_branch_policy.name != branch_name
-                ):
-                    if duplicate_allowed:
-                        raise GitHubProviderError(
-                            "duplicate branch policy response did not verify existing state"
-                        )
-                    raise GitHubProviderError("branch policy verification failed")
-            except Exception:
-                if environment_policy_changed:
-                    self._restore_environment_policy(
-                        owner,
-                        repo,
-                        env_name,
-                        previous_environment_policy,
-                    )
-                raise
-            expected = {
-                "environment": env_name,
-                "deployment_branch_policy": after.deployment_branch_policy,
-                "default_branch_policy": {
-                    "exists": True,
-                    "policy_id": after.default_branch_policy.policy_id,
-                    "name": after.default_branch_policy.name,
+                "branch_policy": {
+                    "exists": env.requested_branch_policy.exists,
+                    "policy_id": env.requested_branch_policy.policy_id,
+                    "name": env.requested_branch_policy.name,
+                    "type": env.requested_branch_policy.type,
                 },
             }
-            rollback_steps: list[tuple[str, str, object]] = []
-            if environment_policy_changed:
-                rollback_steps.append(
-                    (
-                        "restore_environment_policy",
-                        env_name,
-                        previous_environment_policy,
-                    )
-                )
-            if not env.default_branch_policy.exists and after.default_branch_policy.policy_id is not None:
-                rollback_steps.append(("delete_branch_policy", env_name, after.default_branch_policy.policy_id))
-            rollback_steps.sort(key=lambda item: 0 if item[0] == "delete_branch_policy" else 1)
-            ownership = "changed" if not duplicate_allowed else "adopted"
-            return _ActionSnapshot(action, before, expected, ownership, tuple(rollback_steps))
+            if env.requested_branch_policy.exists:
+                return _ActionSnapshot(action.action_id, action.kind, env_name, before, before, "adopted", ())
+            rollback: list[tuple[str, str, object]] = []
+            if not self._policy_enabled(env.deployment_branch_policy):
+                rollback.append(("restore_environment_policy", env_name, env.deployment_branch_policy))
+            snapshots.append(_ActionSnapshot(action.action_id, action.kind, env_name, before, {"pending": True}, "changed", tuple(rollback)))
+            self._put(
+                f"/repos/{owner}/{repo}/environments/{env_name}",
+                {"deployment_branch_policy": self._enabled_policy_payload(env.deployment_branch_policy)},
+            )
+            response = self._post(
+                f"/repos/{owner}/{repo}/environments/{env_name}/deployment_branch_policies",
+                {"name": branch_name, "type": "branch"},
+                allow_statuses={200, 201, 303},
+            )
+            duplicate = response is not None and response.status_code == 303
+            after = self._inventory_environment(owner, repo, env_name, branch_name)
+            if not after.requested_branch_policy.exists:
+                raise GitHubProviderError("branch policy verification failed")
+            if not duplicate and after.requested_branch_policy.policy_id is not None:
+                rollback.insert(0, ("delete_branch_policy", env_name, after.requested_branch_policy.policy_id))
+            snapshots.pop()
+            return _ActionSnapshot(
+                action.action_id,
+                action.kind,
+                env_name,
+                before,
+                {
+                    "deployment_branch_policy": after.deployment_branch_policy,
+                    "branch_policy": {
+                        "exists": True,
+                        "policy_id": after.requested_branch_policy.policy_id,
+                        "name": after.requested_branch_policy.name,
+                        "type": after.requested_branch_policy.type,
+                    },
+                },
+                "adopted" if duplicate else "changed",
+                tuple(rollback),
+            )
         raise GitHubProviderError(f"unsupported github action kind: {action.kind}")
 
-    def _verify_snapshots(self, owner: str, repo: str, snapshots: Sequence[_ActionSnapshot]) -> None:
+    def _verify_final_state(self, owner: str, repo: str, default_branch: str, snapshots: Sequence[_ActionSnapshot]) -> None:
+        merged: dict[tuple[str, str], _ActionSnapshot] = {}
         for snapshot in snapshots:
-            action = snapshot.action
-            if action.kind == "github-environment":
-                env = self._inventory_environment(owner, repo, action.diagnostics[0])
-                current = {
-                    "name": env.name,
-                    "exists": env.exists,
-                    "protection_rules": env.protection_rules,
-                    "deployment_branch_policy": env.deployment_branch_policy,
-                }
-            elif action.kind == "github-variable":
-                variable = self._read_environment_variable(owner, repo, action.diagnostics[0], _VAR_NAME)
-                current = {"environment": action.diagnostics[0], "variable": {"exists": variable.exists, "value": variable.value}}
+            merged[(snapshot.kind, snapshot.target)] = snapshot
+        branch_policy_targets = {
+            snapshot.target
+            for snapshot in merged.values()
+            if snapshot.kind == "github-branch-policy"
+        }
+        for snapshot in merged.values():
+            if snapshot.kind == "github-environment":
+                env = self._inventory_environment(owner, repo, snapshot.target, default_branch)
+                if snapshot.target in branch_policy_targets:
+                    if not env.exists:
+                        raise GitHubProviderError(
+                            f"verification failed for action {snapshot.action_id}"
+                        )
+                    continue
+                current = {"exists": env.exists, "deployment_branch_policy": env.deployment_branch_policy}
+            elif snapshot.kind == "github-variable":
+                variable = self._read_environment_variable(owner, repo, snapshot.target, _VAR_NAME)
+                current = {"exists": variable.exists, "value": variable.value}
             else:
-                env = self._inventory_environment(owner, repo, action.diagnostics[0])
+                env = self._inventory_environment(owner, repo, snapshot.target, default_branch)
                 current = {
-                    "environment": action.diagnostics[0],
                     "deployment_branch_policy": env.deployment_branch_policy,
-                    "default_branch_policy": {
-                        "exists": env.default_branch_policy.exists,
-                        "policy_id": env.default_branch_policy.policy_id,
-                        "name": env.default_branch_policy.name,
+                    "branch_policy": {
+                        "exists": env.requested_branch_policy.exists,
+                        "policy_id": env.requested_branch_policy.policy_id,
+                        "name": env.requested_branch_policy.name,
+                        "type": env.requested_branch_policy.type,
                     },
                 }
             if canonical_sha256(current) != canonical_sha256(snapshot.expected_after):
-                raise GitHubProviderError(f"verification failed for action {action.action_id}")
+                raise GitHubProviderError(f"verification failed for action {snapshot.action_id}")
 
     def _rollback_snapshots(self, owner: str, repo: str, snapshots: Sequence[_ActionSnapshot]) -> None:
         operations: list[tuple[str, str, object]] = []
-        for snapshot in snapshots:
+        for snapshot in reversed(snapshots):
             operations.extend(snapshot.rollback)
-        operations.sort(key=lambda item: 0 if item[0] in {"delete_branch_policy", "delete_environment"} else 1)
         for operation, environment, value in operations:
-                if operation == "delete_environment":
-                    self._delete(f"/repos/{owner}/{repo}/environments/{environment}", allow_statuses={204, 404})
-                elif operation == "delete_variable":
-                    self._delete(f"/repos/{owner}/{repo}/environments/{environment}/variables/{_VAR_NAME}", allow_statuses={204, 404})
-                elif operation == "restore_variable":
-                    assert isinstance(value, str)
-                    self._patch(f"/repos/{owner}/{repo}/environments/{environment}/variables/{_VAR_NAME}", {"name": _VAR_NAME, "value": value})
-                elif operation == "delete_branch_policy":
-                    self._delete(f"/repos/{owner}/{repo}/environments/{environment}/deployment_branch_policies/{value}", allow_statuses={204, 404})
-                elif operation == "restore_environment_policy":
-                    self._restore_environment_policy(
-                        owner,
-                        repo,
-                        environment,
-                        value if isinstance(value, Mapping) else None,
-                    )
+            if operation == "delete_branch_policy":
+                self._delete(f"/repos/{owner}/{repo}/environments/{environment}/deployment_branch_policies/{value}", allow_statuses={204, 404})
+            elif operation == "restore_variable":
+                previous = value if isinstance(value, Mapping) else {}
+                previous_value = previous.get("value")
+                if isinstance(previous_value, str):
+                    self._patch(f"/repos/{owner}/{repo}/environments/{environment}/variables/{_VAR_NAME}", {"name": _VAR_NAME, "value": previous_value})
+            elif operation == "delete_variable":
+                self._delete(f"/repos/{owner}/{repo}/environments/{environment}/variables/{_VAR_NAME}", allow_statuses={204, 404})
+            elif operation == "restore_environment_policy":
+                self._put(f"/repos/{owner}/{repo}/environments/{environment}", {"deployment_branch_policy": value})
+            elif operation == "delete_environment":
+                self._delete(f"/repos/{owner}/{repo}/environments/{environment}", allow_statuses={204, 404})
 
-    def _restore_environment_policy(
-        self,
-        owner: str,
-        repo: str,
-        environment: str,
-        previous: Mapping[str, object] | None,
-    ) -> None:
-        payload = (
-            dict(previous)
-            if previous is not None
-            else {"custom_branch_policies": False}
-        )
-        self._put(
-            f"/repos/{owner}/{repo}/environments/{environment}",
-            {"deployment_branch_policy": payload},
-        )
+    def _policy_enabled(self, payload: Mapping[str, object] | None) -> bool:
+        return bool(isinstance(payload, Mapping) and payload.get("custom_branch_policies") is True and payload.get("protected_branches") is False)
 
-    def _inventory_environment(
-        self,
-        owner: str,
-        repo: str,
-        env_name: str,
-        env_payload: Mapping[str, object] | None = None,
-    ) -> _EnvironmentState:
-        payload = env_payload if env_payload is not None else self._get_json(f"/repos/{owner}/{repo}/environments/{env_name}", allow_404=True)
+    def _enabled_policy_payload(self, payload: Mapping[str, object] | None) -> Mapping[str, object]:
+        result = dict(payload or {})
+        result["protected_branches"] = False
+        result["custom_branch_policies"] = True
+        return result
+
+    def _inventory_environment(self, owner: str, repo: str, env_name: str, branch_name: str) -> _EnvironmentState:
+        payload = self._get_json(f"/repos/{owner}/{repo}/environments/{env_name}", allow_404=True)
         if not payload:
-            return _EnvironmentState(
-                name=env_name,
-                exists=False,
-                protection_rules=(),
-                deployment_branch_policy=None,
-                variables=(),
-                variable_state=_VariableState(False, None),
-                branch_policies=(),
-                default_branch_policy=_PolicyState(False, None, None),
-            )
+            return _EnvironmentState(env_name, False, None, (), _VariableState(False, None), (), _BranchPolicyState(False, None, None, None))
+        policy_payload = payload.get("deployment_branch_policy")
+        if policy_payload is not None and not isinstance(policy_payload, Mapping):
+            raise GitHubProviderError("deployment_branch_policy payload is invalid")
         variables = tuple(self._list_paginated(f"/repos/{owner}/{repo}/environments/{env_name}/variables", "variables", allow_404=True))
         variable = self._read_environment_variable(owner, repo, env_name, _VAR_NAME)
         policies = tuple(self._list_paginated(f"/repos/{owner}/{repo}/environments/{env_name}/deployment_branch_policies", "branch_policies", allow_404=True))
-        default_policy = _PolicyState(False, None, None)
+        branch_policy = _BranchPolicyState(False, None, None, None)
         for policy in policies:
             if not isinstance(policy, Mapping):
                 continue
             if policy.get("type") != "branch":
                 continue
-            name = policy.get("name")
-            if name == "main":
-                policy_id = policy.get("id")
-                default_policy = _PolicyState(True, policy_id if isinstance(policy_id, int) else None, name if isinstance(name, str) else None)
-        protection_rules = payload.get("protection_rules", ())
-        if not isinstance(protection_rules, Sequence):
-            protection_rules = ()
-        deployment_branch_policy = payload.get("deployment_branch_policy")
-        if deployment_branch_policy is not None and not isinstance(deployment_branch_policy, Mapping):
-            raise GitHubProviderError("deployment_branch_policy payload is invalid")
-        return _EnvironmentState(
-            name=env_name,
-            exists=True,
-            protection_rules=tuple(item for item in protection_rules if isinstance(item, Mapping)),
-            deployment_branch_policy=deployment_branch_policy,
-            variables=variables,
-            variable_state=variable,
-            branch_policies=policies,
-            default_branch_policy=default_policy,
-        )
+            if policy.get("name") != branch_name:
+                continue
+            policy_id = policy.get("id")
+            branch_policy = _BranchPolicyState(True, policy_id if isinstance(policy_id, int) else None, branch_name, "branch")
+            break
+        return _EnvironmentState(env_name, True, policy_payload, variables, variable, policies, branch_policy)
 
-    def _read_environment_variable(self, owner: str, repo: str, environment: str, name: str) -> _VariableState:
-        payload = self._get_json(f"/repos/{owner}/{repo}/environments/{environment}/variables/{name}", allow_404=True)
+    def _read_environment_variable(self, owner: str, repo: str, env_name: str, name: str) -> _VariableState:
+        payload = self._get_json(f"/repos/{owner}/{repo}/environments/{env_name}/variables/{name}", allow_404=True)
         if not payload:
             return _VariableState(False, None)
         value = payload.get("value")
         return _VariableState(True, value if isinstance(value, str) else None)
 
-    def _ensure_environment_policy_enabled(
-        self,
-        owner: str,
-        repo: str,
-        environment: str,
-        deployment_branch_policy: Mapping[str, object] | None,
-    ) -> None:
-        existing = dict(deployment_branch_policy or {})
-        if existing.get("custom_branch_policies") is True:
-            return
-        existing["custom_branch_policies"] = True
-        self._put(f"/repos/{owner}/{repo}/environments/{environment}", {"deployment_branch_policy": existing})
-
-    def _list_paginated(self, path: str, field: str, *, allow_404: bool = False) -> list[Mapping[str, object]]:
-        items: list[Mapping[str, object]] = []
-        next_path: str | None = path
-        while next_path is not None:
-            response = self._request("GET", next_path, allow_404=allow_404)
-            if response is None:
-                return items
-            payload = self._json(response)
-            current = payload.get(field, [])
-            if not isinstance(current, list):
-                raise GitHubProviderError(f"{field} payload is invalid")
-            items.extend(item for item in current if isinstance(item, Mapping))
-            next_link = _parse_link_header(response.headers.get("Link")).get("next")
-            next_path = next_link if next_link else None
-        return items
-
     def _headers(self) -> Mapping[str, str]:
         return {
             "Accept": "application/vnd.github+json",
-            "Authorization": "Bearer <redacted>",
+            "Authorization": f"Bearer {self._token}",
             "X-GitHub-Api-Version": _API_VERSION,
         }
 
@@ -546,14 +458,40 @@ class GitHubBootstrapProvider:
             return {}
         return self._json(response)
 
+    def _list_paginated(self, path: str, field: str, *, allow_404: bool = False) -> list[Mapping[str, object]]:
+        items: list[Mapping[str, object]] = []
+        next_url: str | None = path
+        while next_url is not None:
+            response = self._request("GET", next_url, allow_404=allow_404)
+            if response is None:
+                return items
+            payload = self._json(response)
+            current = payload.get(field, [])
+            if not isinstance(current, list):
+                raise GitHubProviderError(f"{field} payload is invalid")
+            items.extend(item for item in current if isinstance(item, Mapping))
+            next_url = _parse_links(response.headers.get("Link")).get("next")
+        return items
+
     def _put(self, path: str, payload: Mapping[str, object]) -> None:
         self._request("PUT", path, json=payload)
 
-    def _post(self, path: str, payload: Mapping[str, object]) -> None:
-        self._request("POST", path, json=payload, allow_statuses={200, 201, 303})
+    def _post(
+        self,
+        path: str,
+        payload: Mapping[str, object],
+        *,
+        allow_statuses: set[int] | None = None,
+    ) -> httpx.Response | None:
+        return self._request(
+            "POST",
+            path,
+            json=payload,
+            allow_statuses=allow_statuses,
+        )
 
     def _patch(self, path: str, payload: Mapping[str, object]) -> None:
-        self._request("PATCH", path, json=payload)
+        self._request("PATCH", path, json=payload, allow_statuses={200, 204})
 
     def _delete(self, path: str, *, allow_statuses: set[int] | None = None) -> None:
         self._request("DELETE", path, allow_statuses=allow_statuses or {204})
@@ -567,38 +505,55 @@ class GitHubBootstrapProvider:
         allow_404: bool = False,
         allow_statuses: set[int] | None = None,
     ) -> httpx.Response | None:
+        deferred_error: GitHubProviderTransportError | None = None
         try:
             request = self._http.build_request(method, path, headers=self._headers(), json=json)
-            streamed = self._http.send(request, stream=True)
+            response = self._http.send(request, stream=True)
             try:
-                if streamed.is_redirect:
+                if response.status_code == 303 and allow_statuses and 303 in allow_statuses:
+                    body = self._read_bounded(response)
+                    return httpx.Response(response.status_code, headers=response.headers, content=body, request=response.request)
+                if response.is_redirect:
                     raise GitHubProviderError("redirect responses are not allowed")
-                if allow_404 and streamed.status_code == 404:
+                body = self._read_bounded(response)
+                if allow_404 and response.status_code == 404:
                     return None
-                if allow_statuses and streamed.status_code in allow_statuses:
-                    return httpx.Response(streamed.status_code, headers=streamed.headers, content=streamed.read(), request=streamed.request)
-                if streamed.status_code == 403 and ("retry-after" in streamed.headers or streamed.headers.get("x-ratelimit-remaining") == "0"):
-                    raise GitHubProviderTransportError("GitHub request failed: rate_limited")
-                if streamed.status_code == 429:
-                    raise GitHubProviderTransportError("GitHub request failed: rate_limited")
-                if streamed.status_code == 403:
+                if allow_statuses and response.status_code in allow_statuses:
+                    return httpx.Response(response.status_code, headers=response.headers, content=body, request=response.request)
+                if response.status_code == 403:
+                    lowered = body.decode("utf-8", errors="ignore").casefold()
+                    if "secondary rate limit" in lowered or "rate limit" in lowered or "retry-after" in {key.casefold() for key in response.headers.keys()} or response.headers.get("x-ratelimit-remaining") == "0":
+                        raise GitHubProviderTransportError("GitHub request failed: rate_limited")
                     raise GitHubProviderTransportError("GitHub request failed: forbidden")
-                if streamed.status_code >= 400:
-                    raise GitHubProviderTransportError(f"GitHub request failed with HTTP {streamed.status_code}")
-                chunks: list[bytes] = []
-                total = 0
-                for chunk in streamed.iter_bytes():
-                    total += len(chunk)
-                    if total > self._json_max_bytes:
-                        raise GitHubProviderError("GitHub response exceeds the configured limit")
-                    chunks.append(chunk)
-                return httpx.Response(streamed.status_code, headers=streamed.headers, content=b"".join(chunks), request=streamed.request)
+                if response.status_code == 429:
+                    raise GitHubProviderTransportError("GitHub request failed: rate_limited")
+                if response.status_code >= 400:
+                    raise GitHubProviderTransportError(f"GitHub request failed with HTTP {response.status_code}")
+                return httpx.Response(response.status_code, headers=response.headers, content=body, request=response.request)
             finally:
-                streamed.close()
+                response.close()
         except httpx.TimeoutException:
-            raise GitHubProviderTransportError("GitHub request timed out") from None
+            deferred_error = _redacted_transport_error("GitHub request timed out")
         except httpx.HTTPError as exc:
-            raise GitHubProviderTransportError(_redact_message(f"GitHub transport failed: {exc}", self._token)) from None
+            message = str(exc).replace(self._token, "<redacted>")
+            deferred_error = _redacted_transport_error(
+                f"GitHub transport failed: {message}"
+            )
+        if deferred_error is not None:
+            deferred_error.__cause__ = None
+            deferred_error.__context__ = None
+            raise deferred_error from None
+        raise GitHubProviderTransportError("GitHub request failed without a response")
+
+    def _read_bounded(self, response: httpx.Response) -> bytes:
+        chunks: list[bytes] = []
+        total = 0
+        for chunk in response.iter_bytes():
+            total += len(chunk)
+            if total > self._json_max_bytes:
+                raise GitHubProviderError("GitHub response exceeds the configured limit")
+            chunks.append(chunk)
+        return b"".join(chunks)
 
     def _json(self, response: httpx.Response) -> Mapping[str, Any]:
         try:
