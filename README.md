@@ -21,6 +21,16 @@ repository until the public documentation is complete.
 Pre-release. Do not use floating `main` for privileged workflows until the
 documented branch-protection policy is enabled. Pin an exact reviewed commit.
 
+## Distribution trust
+
+New bootstrap operations resolve one exact runtime commit and retain it for the
+entire operation. Resumed optimize jobs reuse the commit recorded at job start.
+
+See:
+
+- [Distribution and pinning](docs/distribution.md)
+- [Recommended branch protection](docs/branch-protection.md)
+
 ## License
 
 [MIT](LICENSE)
