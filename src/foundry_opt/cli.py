@@ -16,17 +16,17 @@ import typer
 from pydantic import ValidationError
 
 from foundry_opt import __version__
+from foundry_opt.bootstrap.cli import register_bootstrap_commands
 from foundry_opt.poc import runtime as poc_runtime
 from foundry_opt.poc.auth import (
     AuthError,
     build_client_assertion_credential,
     detect_github_actions_oidc,
 )
-from foundry_opt.poc.bootstrap import (
+from foundry_opt.distribution import (
+    load_shared_pin,
     read_bootstrap_receipt,
     verify_shared_checkout,
-    write_bootstrap_receipt,
-    load_shared_pin,
 )
 from foundry_opt.poc.candidate import CandidateError
 from foundry_opt.poc.config import (
@@ -113,6 +113,7 @@ app.add_typer(issue_app, name="issue")
 app.add_typer(job_app, name="job")
 app.add_typer(acceptance_app, name="acceptance")
 app.add_typer(deploy_app, name="deploy")
+register_bootstrap_commands(bootstrap_app)
 
 _PIN_PATH = Path(".github/foundry-opt.lock.yml")
 _POLICY_PATH = Path(".github/foundry-optimizer.yaml")
@@ -463,28 +464,6 @@ def deploy_publish(
         raise typer.Exit(code=2)
     except _JOB_COMMAND_ERRORS as error:
         _emit_blocked(error)
-
-
-@bootstrap_app.command("verify")
-def bootstrap_verify(
-    pin_path: Path = typer.Option(..., "--pin"),
-    checkout: Path = typer.Option(..., "--checkout"),
-    receipt: Path = typer.Option(..., "--receipt"),
-) -> None:
-    """Verify an exact shared checkout and persist its bootstrap receipt."""
-
-    pin = load_shared_pin(pin_path)
-    verified = verify_shared_checkout(pin, checkout)
-    write_bootstrap_receipt(receipt, verified)
-    _echo_json(
-        {
-            "commit": verified.commit,
-            "receipt": str(receipt.resolve()),
-            "receipt_sha256": verified.receipt_sha256,
-            "repository": verified.repository,
-            "status": "verified",
-        }
-    )
 
 
 @issue_app.command("parse")
