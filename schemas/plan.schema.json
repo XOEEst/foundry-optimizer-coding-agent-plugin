@@ -136,10 +136,9 @@
           "title": "Destination Path",
           "type": "string"
         },
-        "payload": {
-          "additionalProperties": true,
-          "title": "Payload",
-          "type": "object"
+        "rendered_template": {
+          "title": "Rendered Template",
+          "type": "string"
         },
         "schema_version": {
           "const": 1,
@@ -163,7 +162,7 @@
       "required": [
         "template_id",
         "destination_path",
-        "payload"
+        "rendered_template"
       ],
       "title": "TemplatePayloadSpec",
       "type": "object"
