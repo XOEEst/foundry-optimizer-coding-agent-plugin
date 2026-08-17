@@ -356,6 +356,7 @@ class AzureIdentityInput(BootstrapDocument):
     existing_resource_id: str | None = None
     existing_client_id: Guid | None = None
     existing_object_id: Guid | None = None
+    create_if_missing: StrictBool = False
 
     @field_validator('existing_client_id', 'existing_object_id')
     @classmethod
@@ -377,11 +378,22 @@ class AzureIdentityInput(BootstrapDocument):
         if self.identity_kind == 'user_assigned_managed_identity':
             if self.existing_resource_id is None:
                 raise BootstrapConfigError('user_assigned_managed_identity requires existing_resource_id')
+            if self.create_if_missing and (
+                self.existing_client_id is not None
+                or self.existing_object_id is not None
+            ):
+                raise BootstrapConfigError(
+                    'new managed identity cannot predeclare generated client/object ids'
+                )
         elif self.identity_kind == 'entra_application':
             if self.existing_client_id is None or self.existing_object_id is None:
                 raise BootstrapConfigError('entra_application requires existing_client_id and existing_object_id')
+            if self.create_if_missing:
+                raise BootstrapConfigError(
+                    'v1 does not create Entra applications during bootstrap'
+                )
         else:
-            if any(value is not None for value in (self.existing_resource_id, self.existing_client_id, self.existing_object_id)):
+            if self.create_if_missing or any(value is not None for value in (self.existing_resource_id, self.existing_client_id, self.existing_object_id)):
                 raise BootstrapConfigError('unresolved_migration cannot set existing identity ids')
         return self
 
