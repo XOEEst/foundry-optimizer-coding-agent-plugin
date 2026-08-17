@@ -1,0 +1,20 @@
+schema_version: 1
+distribution:
+  schema_version: 1
+  repository: https://github.com/XOEEst/foundry-optimizer-coding-agent-plugin.git
+  channel: wave3
+  pin: c899b718f3baebcfd08209ee5184d0cf61d8153d
+github:
+  schema_version: 1
+  optimizer_environment: copilot
+  deployment_environment: foundry-production
+  client_id_variable: AZURE_OPTIMIZER_CLIENT_ID
+identity:
+  schema_version: 1
+  kind: unresolved_migration
+agents:
+  - schema_version: 1
+    agent_id: example-agent
+    root: agent
+    config_path: agent/.foundry/foundry-opt.yaml
+    enabled: true

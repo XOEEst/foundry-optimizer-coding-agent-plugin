@@ -4,4 +4,3 @@ __pycache__/
 .venv/
 .env
 .azure/
-.foundry-opt/

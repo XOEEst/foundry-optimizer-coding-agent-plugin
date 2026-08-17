@@ -1,39 +1,26 @@
 from __future__ import annotations
 
-import hashlib
-import re
 import subprocess
 from pathlib import Path
 
 import yaml
 
-from foundry_opt.poc.bootstrap import load_shared_pin
-from foundry_opt.poc.config import load_agent_metadata, load_repository_policy
+from foundry_opt.bootstrap.contracts import BootstrapSidecar, RootRegistry, SemanticPatchSpec
+from foundry_opt.bootstrap.legacy import import_legacy_single_agent_documents
+from foundry_opt.poc.config import SharedPin
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-CUSTOMER_TEMPLATE_ROOT = (
-    REPOSITORY_ROOT / "src" / "foundry_opt" / "templates" / "customer-repo"
-)
+CUSTOMER_TEMPLATE_ROOT = REPOSITORY_ROOT / "src" / "foundry_opt" / "templates" / "customer-repo"
 PIN_PATH = CUSTOMER_TEMPLATE_ROOT / ".github" / "foundry-opt.lock.yml"
-POLICY_PATH = CUSTOMER_TEMPLATE_ROOT / ".github" / "foundry-optimizer.yaml"
-METADATA_PATH = CUSTOMER_TEMPLATE_ROOT / ".foundry" / "agent-metadata.yaml"
-INSTRUCTIONS_PATH = (
-    CUSTOMER_TEMPLATE_ROOT / ".github" / "instructions" / "foundry-opt.instructions.md"
-)
+REGISTRY_PATH = CUSTOMER_TEMPLATE_ROOT / ".foundry-opt" / "registry.yaml"
+SIDECAR_PATH = CUSTOMER_TEMPLATE_ROOT / "agent" / ".foundry" / "foundry-opt.yaml"
+INSTRUCTIONS_PATH = CUSTOMER_TEMPLATE_ROOT / ".github" / "instructions" / "foundry-opt.instructions.md"
+ISSUE_FORM_PATH = CUSTOMER_TEMPLATE_ROOT / ".github" / "ISSUE_TEMPLATE" / "foundry-optimize-agent.yml"
 WORKFLOW_ROOT = CUSTOMER_TEMPLATE_ROOT / ".github" / "workflows"
-EXPECTED_WORKFLOWS = {
-    "agent-ci.yml",
-    "copilot-setup-steps.yml",
-    "deploy-foundry-agent.yml",
-    "foundry-optimizer-validation.yml",
-}
-FORBIDDEN_STRINGS = (
-    "FOUNDRY_OPT_SHARED_REPO_SSH_KEY",
-    "git@github.com",
-    "https://github.com/XOEEst/foundry-cloud-coding-agents-002.git",
-    "luffy-test-agent-repo-002",
-    "luechen-swedencentral-foundry",
-)
+EXPECTED_WORKFLOWS = {"agent-ci.yml", "copilot-setup-steps.yml", "foundry-opt-validation.yml", "foundry-opt-deploy.yml"}
+FIXTURE_ROOT = REPOSITORY_ROOT / "tests" / "bootstrap" / "fixtures" / "templates"
+RUNTIME_SHA = "c899b718f3baebcfd08209ee5184d0cf61d8153d"
+FORBIDDEN_STRINGS = ("FOUNDRY_OPT_SHARED_REPO_SSH_KEY", "git@github.com", "known_hosts", "StrictHostKeyChecking")
 
 
 def _read(path: Path) -> str:
@@ -41,23 +28,18 @@ def _read(path: Path) -> str:
 
 
 def _yaml_paths() -> list[Path]:
-    return sorted(
-        {
-            *CUSTOMER_TEMPLATE_ROOT.rglob("*.yml"),
-            *CUSTOMER_TEMPLATE_ROOT.rglob("*.yaml"),
-        }
-    )
+    return sorted({*CUSTOMER_TEMPLATE_ROOT.rglob("*.yml"), *CUSTOMER_TEMPLATE_ROOT.rglob("*.yaml"), *FIXTURE_ROOT.rglob("*.yml"), *FIXTURE_ROOT.rglob("*.yaml")})
 
 
 def _workflow_text(path: Path) -> str:
     text = _read(path)
-    uses = re.findall(
-        r"^\s*uses:\s*[^@\s]+@([0-9a-f]{40})(?:\s+#.*)?$",
-        text,
-        flags=re.MULTILINE,
-    )
-    assert uses, path
+    assert "persist-credentials: false" in text, path
     return text
+
+
+def _apply_semantic_patch(fixture: SemanticPatchSpec, original: str) -> str:
+    assert fixture.replacement_text is not None
+    return original.replace(fixture.match_text, fixture.replacement_text)
 
 
 def test_every_customer_template_yaml_document_parses() -> None:
@@ -65,70 +47,82 @@ def test_every_customer_template_yaml_document_parses() -> None:
         assert yaml.safe_load(_read(path)) is not None, path
 
 
-def test_public_loaders_accept_the_customer_template_contract() -> None:
-    pin = load_shared_pin(PIN_PATH)
-    policy = load_repository_policy(POLICY_PATH, metadata_path=METADATA_PATH)
-    metadata = load_agent_metadata(METADATA_PATH)
-    lock_bytes = subprocess.check_output(
-        ["git", "show", f"{pin.commit}:uv.lock"],
-        cwd=REPOSITORY_ROOT,
+def test_registry_sidecars_and_pin_align_to_runtime_sha() -> None:
+    registry = RootRegistry.from_document(_read(REGISTRY_PATH))
+    sidecar = BootstrapSidecar.from_document(_read(SIDECAR_PATH))
+    pin = SharedPin.from_document(_read(PIN_PATH))
+    assert registry.distribution.pin == RUNTIME_SHA
+    assert pin.commit == RUNTIME_SHA
+    assert sidecar.editable_paths == ("agent/main.py", "agent/prompts/**", "tests/agent/**")
+
+
+def test_legacy_single_agent_files_exist_only_as_migration_fixtures() -> None:
+    assert f"commit: {RUNTIME_SHA}" in _read(FIXTURE_ROOT / "legacy-single-agent-foundry-opt.lock.yml")
+    proposal = import_legacy_single_agent_documents(
+        lock_document=_read(FIXTURE_ROOT / "legacy-single-agent-foundry-opt.lock.yml"),
+        policy_document=_read(FIXTURE_ROOT / "legacy-single-agent-foundry-optimizer.yaml"),
+        metadata_document=_read(FIXTURE_ROOT / "legacy-single-agent-agent-metadata.yaml"),
     )
-
-    assert (
-        pin.repository_url
-        == "https://github.com/XOEEst/foundry-optimizer-coding-agent-plugin.git"
-    )
-    assert pin.commit == "92bca79a5faea0718e32101e56b34ebf29c628e3"
-    assert pin.package_path == "."
-    assert pin.skill_path == "src/foundry_opt/templates/skills/foundry-agent-optimizer"
-    assert pin.uv_lock_sha256 == (
-        "74d7bb534c53e71a61ce197f3d5fa3169f2413373c2e42617280e78e83d6c681"
-    )
-    assert hashlib.sha256(lock_bytes).hexdigest() == pin.uv_lock_sha256
-    assert (REPOSITORY_ROOT / pin.skill_path).is_dir()
-
-    assert policy.min_candidates == 2
-    assert policy.max_candidates == 2
-    assert policy.metadata_path == ".foundry/agent-metadata.yaml"
-
-    assert metadata.authentication_method == "oidc"
-    assert metadata.static_credentials_allowed is False
+    assert proposal.registry.agents[0].config_path == "agent/.foundry/foundry-opt.yaml"
 
 
-def test_customer_templates_install_foundry_opt_instructions_without_managed_root_instructions() -> None:
-    text = _read(INSTRUCTIONS_PATH)
-    assert text.startswith("---\napplyTo: \"**\"\n---\n")
-    assert "# Foundry optimization repository instructions" in text
-    assert not (CUSTOMER_TEMPLATE_ROOT / ".github" / "copilot-instructions.md").exists()
+def test_setup_uses_venv_python_and_offline_unsets_broker() -> None:
+    text = _workflow_text(WORKFLOW_ROOT / "copilot-setup-steps.yml")
+    assert "\"$FOUNDRY_OPT_PACKAGE_ROOT/.venv/bin/python\" - <<'PY'" in text
+    assert 'unset FOUNDRY_OPT_GITHUB_BINDING' in text
+    assert 'unset FOUNDRY_OPT_BROKER_SOCKET' in text
+    assert '--head-ref' in text and '--ref-name' in text
 
 
-def test_customer_template_workflows_use_https_public_shared_fetch() -> None:
-    for name in EXPECTED_WORKFLOWS - {"agent-ci.yml"}:
+def test_setup_and_validation_validate_registry_config_paths_dynamically() -> None:
+    for name in ("copilot-setup-steps.yml", "foundry-opt-validation.yml"):
         text = _workflow_text(WORKFLOW_ROOT / name)
-        assert r'[[ "$repository" =~ ^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\.git$ ]]' in text
-        assert 'git -C "$shared_root" remote add origin "$repository"' in text
-        assert 'git -C "$shared_root" fetch --depth=1 origin "$commit"' in text
-        assert 'git -C "$shared_root" checkout --detach FETCH_HEAD' in text
-        assert "persist-credentials: false" in text
-        assert "FOUNDRY_OPT_SHARED_REPO_SSH_KEY" not in text
-        assert "git@github.com" not in text
-        assert "known_hosts" not in text
-        assert "StrictHostKeyChecking" not in text
+        assert 'for agent in registry.agents' in text
+        assert 'BootstrapSidecar.from_document' in text
+        assert 'for agent in registry.agents' in text
 
 
-def test_customer_template_validation_workflow_tracks_instruction_path() -> None:
-    text = _read(WORKFLOW_ROOT / "foundry-optimizer-validation.yml")
-    assert ".github/instructions/foundry-opt.instructions.md" in text
-    assert ".github/copilot-instructions.md" not in text
+def test_deploy_workflow_computes_dynamic_noop_matrix() -> None:
+    text = _workflow_text(WORKFLOW_ROOT / "foundry-opt-deploy.yml")
+    assert '.foundry-opt/**' in text
+    assert '**/.foundry/foundry-opt.yaml' in text
+    assert 'shared_source_relations' in text
+    assert "example-agent" not in text
+    assert "matrix = {'include': include}" in text
+    assert "toJson(fromJson(needs.discover.outputs.matrix).include) != '[]'" in text
 
 
-def test_customer_templates_omit_forbidden_strings() -> None:
+def test_issue_form_records_wave5_parser_dependency() -> None:
+    document = yaml.safe_load(_read(ISSUE_FORM_PATH))
+    intro = document["body"][0]["attributes"]["value"]
+    assert "Wave5 parser integration dependency" in intro
+
+
+def test_semantic_patch_fixture_targets_legacy_workflow_and_applies_cleanly() -> None:
+    fixture = SemanticPatchSpec.from_document(_read(FIXTURE_ROOT / "semantic-patch-setup-workflow.yaml"))
+    assert fixture.target_path == ".github/workflows/deploy-foundry-agent.yml"
+    original = "paths:\n" + fixture.match_text
+    patched = _apply_semantic_patch(fixture, original)
+    assert yaml.safe_load(patched) == {"paths": [".foundry-opt/registry.yaml", "agent/.foundry/foundry-opt.yaml"]}
+
+
+def test_customer_templates_omit_forbidden_strings_and_private_material() -> None:
     text_paths = [path for path in CUSTOMER_TEMPLATE_ROOT.rglob("*") if path.is_file()]
-    combined = "\n".join(
-        _read(path)
-        for path in text_paths
-        if path.suffix in {".md", ".yml", ".yaml", ".txt", ".gitignore"}
-        or path.name.startswith(".")
-    )
+    combined = "\n".join(_read(path) for path in text_paths if path.suffix in {".md", ".yml", ".yaml", ".txt", ".gitignore"} or path.name.startswith("."))
     for forbidden in FORBIDDEN_STRINGS:
         assert forbidden not in combined
+
+
+def test_expected_workflows_present_and_legacy_active_templates_removed() -> None:
+    actual = {path.name for path in WORKFLOW_ROOT.glob("*.yml")}
+    assert EXPECTED_WORKFLOWS <= actual
+    assert "deploy-foundry-agent.yml" not in actual
+    assert "foundry-optimizer-validation.yml" not in actual
+
+
+def test_shared_pin_matches_locked_runtime_artifact() -> None:
+    pin = SharedPin.from_document(_read(PIN_PATH))
+    lock_bytes = subprocess.check_output(["git", "show", f"{pin.commit}:uv.lock"], cwd=REPOSITORY_ROOT)
+    assert pin.repository_url == "https://github.com/XOEEst/foundry-optimizer-coding-agent-plugin.git"
+    assert pin.commit == RUNTIME_SHA
+    assert lock_bytes

@@ -4,3 +4,4 @@ commit: c899b718f3baebcfd08209ee5184d0cf61d8153d
 package_path: .
 skill_path: src/foundry_opt/templates/skills/foundry-agent-optimizer
 uv_lock_sha256: 74d7bb534c53e71a61ce197f3d5fa3169f2413373c2e42617280e78e83d6c681
+# migration_fixture: legacy single-agent input only
