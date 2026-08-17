@@ -293,6 +293,8 @@ def test_plan_apply_partial_failure_rolls_back_only_created_assets() -> None:
     adapter.rollback_resources(receipt)
     assert datasets.delete_calls == [('dataset-new', '1')]
     assert restored.verify_rollback(receipt) is True
+    datasets.gets[('dataset-old', '1')] = _SdkValue({'name': 'dataset-old', 'version': '1', 'id': 'azureai://accounts/a/projects/p/data/dataset-old/versions/1', 'type': 'uri_file', 'dataUri': 'https://blob/changed.jsonl'})
+    assert restored.verify_rollback(receipt) is True
 
 
 def test_restore_provider_state_rejects_tamper_and_repository_mismatch() -> None:
@@ -318,10 +320,13 @@ def test_restore_provider_state_rejects_tamper_and_repository_mismatch() -> None
 def test_verify_resources_detects_immutable_drift_and_state_excludes_sdk_types() -> None:
     datasets = _Datasets([], gets={('dataset-a', '1'): _SdkValue({'name': 'dataset-a', 'version': '1', 'id': 'azureai://accounts/a/projects/p/data/dataset-a/versions/1', 'type': 'uri_file', 'dataUri': 'https://blob/data.jsonl'})})
     adapter = FoundryAdapter('https://account.services.ai.azure.com/api/projects/demo', _Cred(), client=_Client(beta=_Beta(datasets=_Jobs(create_results=[]), evaluators=_Jobs(create_results=[])), datasets=datasets))
-    receipt = adapter.apply_resources(_plan())
+    created_plan = BootstrapPlan.create(operation_id='z' * 64, runtime_repository='https://github.com/example/runtime.git', runtime_commit='a' * 40, repository_identity='org/repo', actions=(BootstrapAction(action_id='dataset-z:1', phase='evaluations', stage='planned', kind='dataset', diagnostics=('dataset-z','1','https://blob/data.jsonl','uri_file')),))
+    receipt = adapter.apply_resources(created_plan)
     state = adapter.export_provider_state(receipt)
     assert '"_SdkValue"' not in str(state)
-    datasets.gets[('dataset-a', '1')] = _SdkValue({'name': 'dataset-a', 'version': '1', 'id': 'azureai://accounts/a/projects/p/data/dataset-a/versions/1', 'type': 'uri_file', 'dataUri': 'https://blob/drift.jsonl'})
+    datasets.gets[('dataset-z', '1')] = _SdkValue({'name': 'dataset-z', 'version': '1', 'id': 'azureai://accounts/a/projects/p/data/dataset-z/versions/1', 'type': 'uri_file', 'dataUri': 'https://blob/drift.jsonl', 'tags': {'foundry_opt_operation': adapter._ownership_token(created_plan.operation_id, 'dataset-z:1')}})
+    assert adapter.verify_resources(receipt) is False
+    datasets.gets[('dataset-z', '1')] = _SdkValue({'name': 'dataset-z', 'version': '1', 'id': 'azureai://accounts/a/projects/p/data/dataset-z/versions/1', 'type': 'uri_file', 'dataUri': 'https://blob/data.jsonl', 'tags': {}})
     assert adapter.verify_resources(receipt) is False
 
 
@@ -363,6 +368,30 @@ def test_partial_apply_rollback_failure_carries_receipt_and_state() -> None:
         adapter.rollback_resources(receipt)
     assert caught.value.compensation_receipt is receipt
     assert caught.value.provider_state['receipt_hash'] == receipt.receipt_hash
+
+
+def test_rollback_skips_missing_but_rejects_id_or_tag_mismatch() -> None:
+    datasets = _Datasets([], gets={})
+    adapter = FoundryAdapter('https://account.services.ai.azure.com/api/projects/demo', _Cred(), client=_Client(beta=_Beta(datasets=_Jobs(create_results=[]), evaluators=_Jobs(create_results=[])), datasets=datasets))
+    plan = BootstrapPlan.create(operation_id='g'*64, runtime_repository='https://github.com/example/runtime.git', runtime_commit='a'*40, repository_identity='org/repo', actions=(BootstrapAction(action_id='dataset-g:1', phase='evaluations', stage='planned', kind='dataset', diagnostics=('dataset-g','1','https://blob/g.jsonl','uri_file')),))
+    receipt = adapter.apply_resources(plan)
+    datasets.gets.clear()
+    adapter.rollback_resources(receipt)
+    assert datasets.delete_calls == []
+    receipt2 = adapter.apply_resources(plan)
+    datasets.gets[('dataset-g', '1')] = _SdkValue({'name': 'dataset-g', 'version': '1', 'id': 'azureai://accounts/a/projects/p/data/other/versions/1', 'type': 'uri_file', 'dataUri': 'https://blob/g.jsonl', 'tags': {'foundry_opt_operation': adapter._ownership_token(plan.operation_id, 'dataset-g:1')}})
+    with pytest.raises(FoundryRollbackError):
+        adapter.rollback_resources(receipt2)
+
+
+def test_worst_case_plan_bounds_prevent_first_mutation() -> None:
+    datasets = _Datasets([], gets={})
+    adapter = FoundryAdapter('https://account.services.ai.azure.com/api/projects/demo', _Cred(), client=_Client(beta=_Beta(datasets=_Jobs(create_results=[]), evaluators=_Jobs(create_results=[])), datasets=datasets))
+    actions = tuple(BootstrapAction(action_id=f'dataset-{index}:1', phase='evaluations', stage='planned', kind='dataset', diagnostics=(f'dataset-{index}','1','https://blob/data.jsonl','uri_file')) for index in range(129))
+    plan = BootstrapPlan.create(operation_id='h'*64, runtime_repository='https://github.com/example/runtime.git', runtime_commit='a'*40, repository_identity='org/repo', actions=actions)
+    with pytest.raises(FoundryPrerequisiteError):
+        adapter.apply_resources(plan)
+    assert datasets.create_calls == []
 
 
 def test_oversize_state_rejected_before_mutation() -> None:

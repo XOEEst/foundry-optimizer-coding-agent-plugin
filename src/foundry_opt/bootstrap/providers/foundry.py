@@ -157,6 +157,12 @@ class FoundryRollbackError(FoundryAdapterError):
         self.provider_state = dict(provider_state or {})
 
 
+def rollback_failure_details(exc: BaseException) -> tuple[BootstrapReceipt | None, Mapping[str, object]]:
+    if isinstance(exc, FoundryRollbackError):
+        return exc.compensation_receipt, dict(exc.provider_state)
+    return None, {}
+
+
 class FoundryRejectedGenerationError(FoundryAdapterError):
     pass
 
@@ -251,6 +257,33 @@ class FoundryAdapter:
         encoded = _canonical_json(state).encode('utf-8')
         if len(encoded) > _MAX_PROVIDER_STATE_BYTES:
             raise FoundryPrerequisiteError('provider state exceeds safe persisted size', kind='prerequisite')
+
+    def _validate_plan_bounds(self, plan: BootstrapPlan) -> None:
+        actions = [action for action in self.plan_resources(plan) if action.kind == 'dataset']
+        if len(actions) > _MAX_PROVIDER_STATE_RESOURCES:
+            raise FoundryPrerequisiteError('provider state resource count exceeds safe bound', kind='prerequisite')
+        worst_case_resources = []
+        for index, action in enumerate(actions, start=1):
+            dataset_name, dataset_version, dataset_uri, dataset_type = self._dataset_request_from_action(action)
+            worst_case_resources.append(_ResourceRecord(action_id=action.action_id, resource_id=f'{_IMMUTABLE_DATASET_URI_PREFIX}accounts-max/projects/max/data/{dataset_name}/versions/{dataset_version}', name=dataset_name, version=dataset_version, kind='dataset', disposition='created', fingerprint=_fingerprint_dataset_content(dataset_uri, dataset_type), rollback_order=index, resource_type=dataset_type, ownership_token=self._ownership_token(plan.operation_id, action.action_id)))
+        self._validate_provider_state_bounds(worst_case_resources)
+        preview_receipt = BootstrapReceipt.create(operation_id=plan.operation_id, runtime_repository=plan.runtime_repository, runtime_commit=plan.runtime_commit, repository_identity=plan.repository_identity, plan_hash=plan.plan_hash)
+        self._validate_state_document_bounds(self._provider_state_from_receipt(preview_receipt, worst_case_resources))
+
+    def _resource_live_matches(self, resource: _ResourceRecord, live: Mapping[str, object] | None, *, require_ownership: bool) -> bool:
+        if live is None:
+            return False
+        if str(live.get('id')) != resource.resource_id:
+            return False
+        if resource.resource_type and str(live.get('type')) != resource.resource_type:
+            return False
+        if resource.fingerprint is not None and str(live.get('content_fingerprint')) != resource.fingerprint:
+            return False
+        if require_ownership:
+            tags = live.get('tags')
+            if not isinstance(tags, Mapping) or str(tags.get(_OWNERSHIP_TAG) or '') != str(resource.ownership_token or ''):
+                return False
+        return True
 
     def _beta(self, attr: str) -> object:
         beta = getattr(self._client, 'beta', None)
@@ -707,6 +740,7 @@ class FoundryAdapter:
         self._provider_state = state
 
     def apply_resources(self, plan: BootstrapPlan) -> BootstrapReceipt:
+        self._validate_plan_bounds(plan)
         created: list[str] = []
         adopted: list[str] = []
         changed: list[str] = []
@@ -721,9 +755,6 @@ class FoundryAdapter:
                     skipped.append(action.action_id)
                     continue
                 dataset_name, dataset_version, dataset_uri, dataset_type = self._dataset_request_from_action(action)
-                predicted_record = _ResourceRecord(action_id=action.action_id, resource_id=f'{_IMMUTABLE_DATASET_URI_PREFIX}pending/projects/p/data/{dataset_name}/versions/{dataset_version}', name=dataset_name, version=dataset_version, kind='dataset', disposition='created', fingerprint=_fingerprint_dataset_content(dataset_uri, dataset_type), rollback_order=len(created_resource_ids) + 1, resource_type=dataset_type, ownership_token=self._ownership_token(plan.operation_id, action.action_id))
-                self._validate_provider_state_bounds([*resource_records, predicted_record])
-                self._validate_state_document_bounds(self._provider_state_from_receipt(BootstrapReceipt.create(operation_id=plan.operation_id, runtime_repository=plan.runtime_repository, runtime_commit=plan.runtime_commit, repository_identity=plan.repository_identity, plan_hash=plan.plan_hash), [*resource_records, predicted_record]))
                 result = self.create_or_adopt_dataset(operation_id=plan.operation_id, action_id=action.action_id, dataset_name=dataset_name, dataset_version=dataset_version, dataset_content_uri=dataset_uri, dataset_type=dataset_type)
                 dataset = result['dataset']
                 before_fp, after_fp = self._fingerprints_for_dataset(action.action_id, dataset)
@@ -762,13 +793,7 @@ class FoundryAdapter:
             if resource.kind != 'dataset' or not resource.resource_id.startswith(_IMMUTABLE_DATASET_URI_PREFIX):
                 continue
             live = self.get_dataset(resource.name, resource.version)
-            if live is None:
-                return False
-            if str(live.get('id')) != resource.resource_id:
-                return False
-            if resource.resource_type and str(live.get('type')) != resource.resource_type:
-                return False
-            if resource.fingerprint is not None and str(live.get('content_fingerprint')) != resource.fingerprint:
+            if not self._resource_live_matches(resource, live, require_ownership=(resource.disposition == 'created')):
                 return False
         return True
 
@@ -781,7 +806,7 @@ class FoundryAdapter:
             resources = self._current_resource_records(receipt)
         except FoundryAdapterError as exc:
             raise FoundryRollbackError(str(exc), kind='prerequisite', retryable=False) from exc
-        rollback_order = state_order = self._provider_state.get('rollback_order') if isinstance(self._provider_state, Mapping) else None
+        rollback_order = self._provider_state.get('rollback_order') if isinstance(self._provider_state, Mapping) else None
         if not isinstance(rollback_order, Sequence) or isinstance(rollback_order, (str, bytes, bytearray)):
             raise FoundryRollbackError('provider state rollback order is invalid', kind='prerequisite', retryable=False, compensation_receipt=receipt, provider_state=self.export_provider_state(receipt))
         by_id = {resource.resource_id: resource for resource in resources if resource.disposition == 'created'}
@@ -789,6 +814,12 @@ class FoundryAdapter:
         for resource_id in rollback_order:
             resource = by_id.get(resource_id)
             if resource is None or resource.kind != 'dataset' or not resource.resource_id.startswith(_IMMUTABLE_DATASET_URI_PREFIX):
+                continue
+            live = self.get_dataset(resource.name, resource.version)
+            if live is None:
+                continue
+            if not self._resource_live_matches(resource, live, require_ownership=True):
+                failures.append(resource_id)
                 continue
             try:
                 deleter(resource.name, resource.version)
@@ -800,14 +831,11 @@ class FoundryAdapter:
     def verify_rollback(self, receipt: BootstrapReceipt) -> bool:
         resources = self._current_resource_records(receipt)
         for resource in resources:
-            live = self.get_dataset(resource.name, resource.version)
             if resource.disposition == 'created':
+                live = self.get_dataset(resource.name, resource.version)
                 if live is not None:
-                    return False
-            elif resource.disposition == 'adopted':
-                if live is None or str(live.get('id')) != resource.resource_id:
                     return False
         return True
 
 
-__all__ = [name for name in globals() if name.startswith('Foundry') or name == 'FoundryAdapter']
+__all__ = [name for name in globals() if name.startswith('Foundry') or name in {'rollback_failure_details', 'FoundryAdapter'}]
