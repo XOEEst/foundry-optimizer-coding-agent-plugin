@@ -8,8 +8,6 @@ from typing import Literal
 
 from foundry_opt.bootstrap.canonical import canonical_sha256, safe_persisted_document
 from foundry_opt.bootstrap.contracts import (
-    BootstrapAction,
-    BootstrapReceipt,
     DefaultEvaluatorBundle,
     EvaluatorNormalization,
     EvaluatorReference,
@@ -20,15 +18,29 @@ from foundry_opt.bootstrap.contracts import (
     ResolvedEvaluator,
     ResolvedWeightedObjective,
 )
-from foundry_opt.bootstrap.errors import BootstrapConfigError, BootstrapPlanError
+from foundry_opt.bootstrap.errors import BootstrapConfigError
 
 _TRACE_MIN_GENERATED_SAMPLES = 15
 _MIN_DEVELOPMENT_COUNT = 10
 _MIN_VALIDATING_COUNT = 5
 _DEVELOPMENT_RATIO = 2 / 3
 _ALLOWED_PROVENANCE = "auto_generated_unreviewed"
-_SCALAR_KINDS = {"scalar"}
-_PASS_FAIL_KINDS = {"pass_fail"}
+_PROHIBITED_FIELD_PARTS = frozenset(
+    {
+        "content",
+        "dataset",
+        "dataset_rows",
+        "prompt",
+        "prompts",
+        "raw",
+        "response",
+        "responses",
+        "row",
+        "rows",
+        "trace",
+        "traces",
+    }
+)
 
 
 def _require_mapping(value: object, *, field: str) -> Mapping[str, object]:
@@ -46,6 +58,12 @@ def _require_string(value: object, *, field: str) -> str:
 def _require_int(value: object, *, field: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise BootstrapConfigError(f"{field} must be an integer")
+    return value
+
+
+def _require_bool(value: object, *, field: str) -> bool:
+    if not isinstance(value, bool):
+        raise BootstrapConfigError(f"{field} must be boolean")
     return value
 
 
@@ -74,6 +92,25 @@ def _optional_string(value: object) -> str | None:
     return text or None
 
 
+def _normalized_key(value: str) -> str:
+    return "".join(character.lower() if character.isalnum() else "_" for character in value)
+
+
+def _reject_prohibited_fields(value: object, *, field: str) -> None:
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            if not isinstance(key, str):
+                raise BootstrapConfigError(f"{field} keys must be strings")
+            parts = {part for part in _normalized_key(key).split("_") if part}
+            if parts & _PROHIBITED_FIELD_PARTS:
+                raise BootstrapConfigError(f"{field} contains prohibited raw-content field {key!r}")
+            _reject_prohibited_fields(child, field=f"{field}.{key}")
+        return
+    if isinstance(value, (list, tuple)):
+        for index, child in enumerate(value):
+            _reject_prohibited_fields(child, field=f"{field}[{index}]")
+
+
 @dataclass(frozen=True)
 class AssetSuitability:
     asset_id: str
@@ -89,15 +126,36 @@ class DatasetSplitResult:
     split_hash: str
     development: tuple[str, ...]
     validating: tuple[str, ...]
+    development_groups: tuple[str, ...]
+    validating_groups: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class DeploymentDefaults:
+    environment: str
+    require_aligned_binding: bool
+    enabled: bool
+    hard_guardrail_names: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ReplacementOperation:
+    operation_id: str
+    runtime_repository: str
+    runtime_commit: str
+    repository_identity: str
 
 
 @dataclass(frozen=True)
 class EvaluatorLifecycleResult:
     action: Literal["reuse", "generate", "replace"]
-    bundle: DefaultEvaluatorBundle
+    active_bundle: DefaultEvaluatorBundle
+    previous_bundle: DefaultEvaluatorBundle | None
     lineage_hash: str
+    split_hash: str
     status: str
-    replacement_receipt: BootstrapReceipt | None = None
+    activated_bundle: DefaultEvaluatorBundle
+    replaced_bundle: DefaultEvaluatorBundle | None = None
 
 
 @dataclass(frozen=True)
@@ -161,53 +219,97 @@ def assess_evaluator_suitability(candidate: Mapping[str, object], *, expected_sc
 def choose_dataset_strategy(asset: Mapping[str, object]) -> Literal["trace", "synthetic_only"]:
     item = _require_mapping(asset, field="dataset_strategy")
     generated = _require_int(item.get("generated_samples"), field="dataset_strategy.generated_samples")
-    if generated >= _TRACE_MIN_GENERATED_SAMPLES:
+    prerequisites_available = bool(item.get("prerequisites_available", False))
+    if prerequisites_available and generated >= _TRACE_MIN_GENERATED_SAMPLES:
         return "trace"
     return "synthetic_only"
 
 
 def split_dataset_rows(rows: Sequence[Mapping[str, object]]) -> DatasetSplitResult:
-    canonical_groups: dict[str, Mapping[str, object]] = {}
+    grouped_rows: dict[str, dict[str, object]] = {}
     for raw in rows:
         item = _require_mapping(raw, field="dataset_row")
         row_id = _require_string(item.get("row_id"), field="dataset_row.row_id")
-        group = _optional_string(item.get("group_id")) or row_id.casefold()
+        group_id = _optional_string(item.get("group_id")) or row_id.casefold()
         category = _optional_string(item.get("category")) or ""
-        dedupe_key = canonical_sha256({"group_id": group.casefold(), "category": category.casefold()})
-        current = canonical_groups.get(dedupe_key)
-        candidate = {"row_id": row_id, "group_id": group, "category": category}
-        if current is None or row_id.casefold() < str(current["row_id"]).casefold():
-            canonical_groups[dedupe_key] = candidate
-    ordered_groups = [canonical_groups[key] for key in sorted(canonical_groups)]
-    if len(ordered_groups) < (_MIN_DEVELOPMENT_COUNT + _MIN_VALIDATING_COUNT):
-        raise BootstrapConfigError("dataset requires at least 15 unique grouped rows")
-    categories = {row["category"] for row in ordered_groups if row["category"]}
-    development_target = max(_MIN_DEVELOPMENT_COUNT, math.ceil(len(ordered_groups) * _DEVELOPMENT_RATIO))
-    validating_target = max(_MIN_VALIDATING_COUNT, len(ordered_groups) - development_target)
-    development_target = min(len(ordered_groups) - _MIN_VALIDATING_COUNT, development_target)
-    validating_target = len(ordered_groups) - development_target
-    if validating_target < _MIN_VALIDATING_COUNT:
+        entry = grouped_rows.setdefault(group_id.casefold(), {"group_id": group_id, "category": category, "row_ids": []})
+        if category and not entry["category"]:
+            entry["category"] = category
+        entry["row_ids"].append(row_id)  # type: ignore[index]
+    groups = [
+        {
+            "group_id": str(value["group_id"]),
+            "category": str(value["category"]),
+            "row_ids": tuple(sorted({str(row_id) for row_id in value["row_ids"]}, key=str.casefold)),
+        }
+        for _, value in sorted(grouped_rows.items(), key=lambda item: (str(item[1]["category"]).casefold(), str(item[1]["group_id"]).casefold()))
+    ]
+    if len(groups) < (_MIN_DEVELOPMENT_COUNT + _MIN_VALIDATING_COUNT):
+        raise BootstrapConfigError("dataset requires at least 15 unique groups")
+    total_groups = len(groups)
+    development_target = max(_MIN_DEVELOPMENT_COUNT, math.ceil(total_groups * _DEVELOPMENT_RATIO))
+    development_target = min(total_groups - _MIN_VALIDATING_COUNT, development_target)
+    validating_target = total_groups - development_target
+    if development_target < _MIN_DEVELOPMENT_COUNT or validating_target < _MIN_VALIDATING_COUNT:
+        raise BootstrapConfigError("dataset split must satisfy 10/5 minimums")
+    categories = defaultdict(list)
+    for group in groups:
+        categories[group["category"]].append(group)
+    development_groups: list[dict[str, object]] = []
+    validating_groups: list[dict[str, object]] = []
+    ordered_categories = sorted(categories, key=str.casefold)
+    for category in ordered_categories:
+        bucket = sorted(categories[category], key=lambda item: (str(item["group_id"]).casefold(), item["row_ids"]))
+        category_size = len(bucket)
+        category_development_target = math.ceil(category_size * _DEVELOPMENT_RATIO)
+        minimum_for_validating = 1 if category_size > 1 else 0
+        category_development_target = min(category_size - minimum_for_validating, category_development_target)
+        if development_target - len(development_groups) < category_development_target:
+            category_development_target = max(0, development_target - len(development_groups))
+        development_groups.extend(bucket[:category_development_target])
+        validating_groups.extend(bucket[category_development_target:])
+    remaining = [group for group in groups if group not in development_groups and group not in validating_groups]
+    validating_groups.extend(remaining)
+    if len(development_groups) < development_target:
+        movable = [group for group in validating_groups if len(validating_groups) - 1 >= _MIN_VALIDATING_COUNT]
+        while len(development_groups) < development_target and movable:
+            development_groups.append(movable.pop(0))
+            validating_groups = [group for group in validating_groups if group not in development_groups]
+    if len(validating_groups) < _MIN_VALIDATING_COUNT:
         raise BootstrapConfigError("dataset split cannot satisfy validating minimum")
-    development_rows = list(ordered_groups[:development_target])
-    validating_rows = list(ordered_groups[development_target:])
-    if {row["group_id"] for row in development_rows} & {row["group_id"] for row in validating_rows}:
+    development_groups = sorted(development_groups, key=lambda item: (str(item["category"]).casefold(), str(item["group_id"]).casefold()))
+    validating_groups = sorted(validating_groups, key=lambda item: (str(item["category"]).casefold(), str(item["group_id"]).casefold()))
+    if len(development_groups) != development_target:
+        raise BootstrapConfigError("dataset split did not reach target development size")
+    development_group_ids = {str(group["group_id"]) for group in development_groups}
+    validating_group_ids = {str(group["group_id"]) for group in validating_groups}
+    if development_group_ids & validating_group_ids:
         raise BootstrapConfigError("development and validating splits must not overlap")
-    if categories:
-        dev_categories = {row["category"] for row in development_rows if row["category"]}
-        val_categories = {row["category"] for row in validating_rows if row["category"]}
-        if not categories.issubset(dev_categories | val_categories):
-            raise BootstrapConfigError("dataset split lost category coverage")
+    labeled_categories = {str(group["category"]) for group in groups if str(group["category"])}
+    if labeled_categories:
+        dev_categories = {str(group["category"]) for group in development_groups if str(group["category"])}
+        val_categories = {str(group["category"]) for group in validating_groups if str(group["category"])}
+        if not dev_categories:
+            raise BootstrapConfigError("development split must retain labeled category coverage")
+        if len(labeled_categories) > 1 and not val_categories:
+            raise BootstrapConfigError("validating split must retain labeled category coverage")
+        if not labeled_categories.issubset(dev_categories | val_categories):
+            raise BootstrapConfigError("dataset split lost labeled category coverage")
+    development_rows = tuple(row_id for group in development_groups for row_id in group["row_ids"])
+    validating_rows = tuple(row_id for group in validating_groups for row_id in group["row_ids"])
     split_payload = {
-        "algorithm_version": "evaluation-core-split/v1",
-        "development": development_rows,
-        "validating": validating_rows,
+        "algorithm_version": "evaluation-core-split/v2",
+        "development_groups": [{"group_id": group["group_id"], "row_ids": group["row_ids"], "category": group["category"]} for group in development_groups],
+        "validating_groups": [{"group_id": group["group_id"], "row_ids": group["row_ids"], "category": group["category"]} for group in validating_groups],
     }
     split_hash = canonical_sha256(split_payload)
     return DatasetSplitResult(
-        algorithm_version="evaluation-core-split/v1",
+        algorithm_version="evaluation-core-split/v2",
         split_hash=split_hash,
-        development=tuple(str(row["row_id"]) for row in development_rows),
-        validating=tuple(str(row["row_id"]) for row in validating_rows),
+        development=development_rows,
+        validating=validating_rows,
+        development_groups=tuple(str(group["group_id"]) for group in development_groups),
+        validating_groups=tuple(str(group["group_id"]) for group in validating_groups),
     )
 
 
@@ -216,42 +318,66 @@ def validate_generated_rubric(document: Mapping[str, object]) -> None:
     dimensions = item.get("dimensions")
     if not isinstance(dimensions, Sequence) or isinstance(dimensions, (str, bytes)) or not dimensions:
         raise BootstrapConfigError("rubric.dimensions must be a non-empty sequence")
-    seen: set[str] = set()
+    seen_names: set[str] = set()
     for index, dimension in enumerate(dimensions):
         part = _require_mapping(dimension, field=f"rubric.dimensions[{index}]")
         name = _require_string(part.get("name"), field=f"rubric.dimensions[{index}].name")
-        key = name.casefold()
-        if key in seen:
+        normalized_name = name.casefold()
+        if normalized_name in seen_names:
             raise BootstrapConfigError("rubric dimensions must be unique")
-        seen.add(key)
+        seen_names.add(normalized_name)
         _require_positive_finite(part.get("weight"), field=f"rubric.dimensions[{index}].weight")
+        required_inputs = part.get("required_inputs")
+        if not isinstance(required_inputs, Sequence) or isinstance(required_inputs, (str, bytes)) or not required_inputs:
+            raise BootstrapConfigError("rubric dimensions must declare non-empty required_inputs")
+        normalized_inputs: set[str] = set()
+        for input_index, raw_input in enumerate(required_inputs):
+            required_input = _require_string(raw_input, field=f"rubric.dimensions[{index}].required_inputs[{input_index}]")
+            if required_input.casefold() in normalized_inputs:
+                raise BootstrapConfigError("rubric required_inputs must be unique")
+            normalized_inputs.add(required_input.casefold())
         if bool(part.get("pass_fail", False)):
-            if "required_inputs" not in part:
-                raise BootstrapConfigError("pass/fail dimensions must declare required_inputs")
-        else:
-            scalar_range = part.get("scalar_range")
-            scalar = _require_mapping(scalar_range, field=f"rubric.dimensions[{index}].scalar_range")
-            minimum = _require_finite_number(scalar.get("min"), field=f"rubric.dimensions[{index}].scalar_range.min")
-            maximum = _require_finite_number(scalar.get("max"), field=f"rubric.dimensions[{index}].scalar_range.max")
-            if maximum <= minimum:
-                raise BootstrapConfigError("scalar ranges must increase")
-            if "threshold" not in part:
-                raise BootstrapConfigError("scalar dimensions must declare threshold")
-            if "required_inputs" not in part:
-                raise BootstrapConfigError("scalar dimensions must declare required_inputs")
+            threshold = _require_finite_number(part.get("threshold"), field=f"rubric.dimensions[{index}].threshold")
+            if not 0.0 <= threshold <= 1.0:
+                raise BootstrapConfigError("pass/fail threshold must be between 0 and 1")
+            continue
+        scalar = _require_mapping(part.get("scalar_range"), field=f"rubric.dimensions[{index}].scalar_range")
+        minimum = _require_finite_number(scalar.get("min"), field=f"rubric.dimensions[{index}].scalar_range.min")
+        maximum = _require_finite_number(scalar.get("max"), field=f"rubric.dimensions[{index}].scalar_range.max")
+        if maximum <= minimum:
+            raise BootstrapConfigError("scalar ranges must increase")
+        threshold = _require_finite_number(part.get("threshold"), field=f"rubric.dimensions[{index}].threshold")
+        if threshold < minimum or threshold > maximum:
+            raise BootstrapConfigError("scalar threshold must lie within declared range")
 
 
 def validate_activation(*, cases: Sequence[Mapping[str, object]], guardrails: Sequence[Mapping[str, object]], generated_bundle: Mapping[str, object] | None = None) -> None:
     if not cases:
         raise BootstrapConfigError("activation requires executable cases")
-    finite_scores: list[float] = []
+    saw_scalar_headroom = False
+    saw_pass_fail_headroom = False
     for index, case in enumerate(cases):
         item = _require_mapping(case, field=f"cases[{index}]")
         if not bool(item.get("executable", False)):
             raise BootstrapConfigError("activation requires executable cases")
-        score = _require_finite_number(item.get("score"), field=f"cases[{index}].score")
-        finite_scores.append(score)
-    if max(finite_scores) - min(finite_scores) <= 0:
+        normalization = _require_mapping(item.get("normalization"), field=f"cases[{index}].normalization")
+        kind = _require_string(normalization.get("kind"), field=f"cases[{index}].normalization.kind")
+        raw_score = item.get("score")
+        if kind == "scalar":
+            score = _require_finite_number(raw_score, field=f"cases[{index}].score")
+            maximum = _require_finite_number(normalization.get("source_max"), field=f"cases[{index}].normalization.source_max")
+            minimum = _require_finite_number(normalization.get("source_min"), field=f"cases[{index}].normalization.source_min")
+            if maximum <= minimum:
+                raise BootstrapConfigError("activation scalar normalization bounds must increase")
+            if score < maximum:
+                saw_scalar_headroom = True
+        elif kind == "pass_fail":
+            normalized = _normalize_pass_fail_score(raw_score, field=f"cases[{index}].score")
+            if normalized == 0.0:
+                saw_pass_fail_headroom = True
+        else:
+            raise BootstrapConfigError(f"unsupported activation normalization kind: {kind}")
+    if not (saw_scalar_headroom or saw_pass_fail_headroom):
         raise BootstrapConfigError("activation requires measurable headroom")
     safety_rates = []
     for index, guardrail in enumerate(guardrails):
@@ -278,7 +404,6 @@ def resolve_issue_evaluators(
     request = IssueEvaluatorRequest.from_document(request_document)
     if len(request.evaluators) > max_evaluators:
         raise BootstrapConfigError("issue evaluator list exceeds sidecar maximum")
-    explicit_weights = [entry.weight is not None for entry in request.evaluators]
     resolved: list[ResolvedEvaluator] = []
     for entry in request.evaluators:
         metadata = metadata_by_id.get(entry.evaluator_id)
@@ -286,32 +411,40 @@ def resolve_issue_evaluators(
             raise BootstrapConfigError(f"unknown evaluator id: {entry.evaluator_id}")
         normalization = _resolve_normalization(metadata)
         provenance = _require_string(metadata.get("provenance"), field="metadata.provenance")
-        weight = entry.weight if entry.weight is not None else 1.0
         resolved.append(
             ResolvedEvaluator(
                 reference=EvaluatorReference(evaluator_id=entry.evaluator_id, provenance=provenance),  # type: ignore[arg-type]
                 normalization=normalization,
-                weight=weight,
+                weight=entry.weight if entry.weight is not None else 1.0,
             )
         )
-    if not all(explicit_weights) and any(explicit_weights):
-        resolved = [item.model_copy(update={"weight": item.weight}) for item in resolved]
     return ResolvedWeightedObjective.create(tuple(resolved))
 
 
 def _resolve_normalization(metadata: Mapping[str, object]) -> EvaluatorNormalization:
     item = _require_mapping(metadata, field="metadata")
     kind = _require_string(item.get("kind"), field="metadata.kind")
-    if kind in _PASS_FAIL_KINDS:
+    if kind == "pass_fail":
         return EvaluatorNormalization(kind="pass_fail")
-    if kind in _SCALAR_KINDS:
+    if kind == "scalar":
         bounds = _require_mapping(item.get("bounds"), field="metadata.bounds")
-        return EvaluatorNormalization(
-            kind="scalar",
-            source_min=_require_finite_number(bounds.get("min"), field="metadata.bounds.min"),
-            source_max=_require_finite_number(bounds.get("max"), field="metadata.bounds.max"),
-        )
+        minimum = _require_finite_number(bounds.get("min"), field="metadata.bounds.min")
+        maximum = _require_finite_number(bounds.get("max"), field="metadata.bounds.max")
+        if maximum <= minimum:
+            raise BootstrapConfigError("metadata scalar bounds must increase")
+        return EvaluatorNormalization(kind="scalar", source_min=minimum, source_max=maximum)
     raise BootstrapConfigError(f"unsupported evaluator normalization kind: {kind}")
+
+
+def _normalize_pass_fail_score(value: object, *, field: str) -> float:
+    if isinstance(value, bool):
+        return 1.0 if value else 0.0
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        numeric = float(value)
+        if numeric in (0.0, 1.0):
+            return numeric
+        raise BootstrapConfigError(f"{field} must be boolean or binary numeric")
+    raise BootstrapConfigError(f"{field} must be boolean or binary numeric")
 
 
 def normalize_issue_scores(objective: ResolvedWeightedObjective, raw_scores: Mapping[str, object]) -> ScoringEvidence:
@@ -320,10 +453,10 @@ def normalize_issue_scores(objective: ResolvedWeightedObjective, raw_scores: Map
         raw = raw_scores.get(evaluator.reference.evaluator_id)
         if raw is None:
             raise BootstrapConfigError(f"missing raw score for evaluator {evaluator.reference.evaluator_id}")
-        score = _require_finite_number(raw, field=f"raw_scores[{evaluator.reference.evaluator_id}]")
         if evaluator.normalization.kind == "pass_fail":
-            normalized = 1.0 if score > 0 else 0.0
+            normalized = _normalize_pass_fail_score(raw, field=f"raw_scores[{evaluator.reference.evaluator_id}]")
         else:
+            score = _require_finite_number(raw, field=f"raw_scores[{evaluator.reference.evaluator_id}]")
             span = evaluator.normalization.source_max - evaluator.normalization.source_min  # type: ignore[operator]
             normalized = (score - evaluator.normalization.source_min) / span  # type: ignore[operator]
             normalized = min(1.0, max(0.0, normalized))
@@ -338,8 +471,22 @@ def build_scoring_evidence(subject: Literal["baseline", "candidate", "validating
     return ScoringEvidence(subject=subject, aggregate_score=evidence.aggregate_score, evaluator_scores=evidence.evaluator_scores, score_hash=evidence.score_hash)
 
 
-def select_default_deployment_contract(defaults: Mapping[str, object]) -> Mapping[str, object]:
-    return safe_persisted_document(dict(_require_mapping(defaults, field="defaults")))
+def select_default_deployment_contract(defaults: Mapping[str, object]) -> DeploymentDefaults:
+    payload = dict(_require_mapping(defaults, field="defaults"))
+    _reject_prohibited_fields(payload, field="defaults")
+    safe_persisted_document(payload)
+    hard_guardrails = payload.get("hard_guardrail_names")
+    if not isinstance(hard_guardrails, Sequence) or isinstance(hard_guardrails, (str, bytes)) or not hard_guardrails:
+        raise BootstrapConfigError("defaults.hard_guardrail_names must be a non-empty sequence")
+    names = tuple(_require_string(item, field="defaults.hard_guardrail_names[]") for item in hard_guardrails)
+    if len({name.casefold() for name in names}) != len(names):
+        raise BootstrapConfigError("defaults.hard_guardrail_names must be unique")
+    return DeploymentDefaults(
+        environment=_require_string(payload.get("environment"), field="defaults.environment"),
+        require_aligned_binding=_require_bool(payload.get("require_aligned_binding"), field="defaults.require_aligned_binding"),
+        enabled=_require_bool(payload.get("enabled"), field="defaults.enabled"),
+        hard_guardrail_names=names,
+    )
 
 
 def choose_default_evaluator_bundle(
@@ -348,43 +495,78 @@ def choose_default_evaluator_bundle(
     generated_bundle: DefaultEvaluatorBundle | None,
     split_result: DatasetSplitResult,
     definitions: tuple[ImmutableDefinitionReference, ImmutableDefinitionReference],
-    replace_actions: Sequence[BootstrapAction] = (),
-    replacement_success: bool = True,
+    development_dataset: ImmutableDatasetReference,
+    validating_dataset: ImmutableDatasetReference,
+    split_lineage_hash: str,
+    explicit_replace: bool = False,
+    operation: ReplacementOperation | None = None,
+    activation_succeeded: bool = True,
 ) -> EvaluatorLifecycleResult:
-    if existing_bundle is not None:
-        return EvaluatorLifecycleResult(action="reuse", bundle=existing_bundle, lineage_hash=canonical_sha256(existing_bundle.model_dump(mode="json")), status="reused_existing")
+    expected_definitions = tuple(definitions)
+    if existing_bundle is not None and not explicit_replace:
+        return EvaluatorLifecycleResult(
+            action="reuse",
+            active_bundle=existing_bundle,
+            previous_bundle=existing_bundle,
+            lineage_hash=canonical_sha256(existing_bundle.model_dump(mode="json")),
+            split_hash=split_lineage_hash,
+            status="reused_existing",
+            activated_bundle=existing_bundle,
+            replaced_bundle=None,
+        )
     if generated_bundle is None:
         raise BootstrapConfigError("generated evaluator bundle required when no suitable existing bundle exists")
-    expected_dataset_ids = {
-        f"azureai://accounts/generated/projects/evaluation/data/{row_id}/versions/v1"
-        for row_id in split_result.development + split_result.validating
-    }
+    expected_dataset_ids = {development_dataset.dataset_id, validating_dataset.dataset_id}
     bundle_dataset_ids = {item.dataset_id for item in generated_bundle.datasets}
     if bundle_dataset_ids != expected_dataset_ids:
-        raise BootstrapConfigError("generated evaluator bundle must be created after dataset split")
-    if tuple(generated_bundle.definitions) != definitions:
+        raise BootstrapConfigError("generated evaluator bundle must use immutable development/validating dataset references")
+    if tuple(generated_bundle.definitions) != expected_definitions:
         raise BootstrapConfigError("generated evaluator bundle must preserve explicit definitions")
-    receipt = None
-    action: Literal["generate", "replace"] = "generate"
-    status = "generated_pending_activation"
-    if replace_actions:
-        action = "replace"
-        if replacement_success:
-            receipt = BootstrapReceipt.create(
-                operation_id="evaluation-replace",
-                runtime_repository="https://github.com/example/runtime.git",
-                runtime_commit="a" * 40,
-                repository_identity="org/repo",
-                plan_hash=canonical_sha256({"actions": [item.model_dump(mode="json") for item in replace_actions]}),
-                created_actions=tuple(action.action_id for action in replace_actions),
+    computed_split_hash = split_result.split_hash
+    if computed_split_hash != split_result.split_hash or split_lineage_hash != split_result.split_hash:
+        raise BootstrapConfigError("generated evaluator bundle split lineage hash mismatch")
+    if explicit_replace:
+        if existing_bundle is None:
+            raise BootstrapConfigError("explicit replace requires an existing bundle")
+        if operation is None:
+            raise BootstrapConfigError("explicit replace requires operation metadata")
+        if not activation_succeeded:
+            return EvaluatorLifecycleResult(
+                action="replace",
+                active_bundle=existing_bundle,
+                previous_bundle=existing_bundle,
+                lineage_hash=canonical_sha256(existing_bundle.model_dump(mode="json")),
+                split_hash=split_result.split_hash,
+                status=f"activation_failed:{operation.operation_id}",
+                activated_bundle=generated_bundle,
+                replaced_bundle=existing_bundle,
             )
-            status = "replaced"
-        else:
-            status = "rollback_preserved_old_contract"
+        lineage_hash = canonical_sha256(
+            {
+                "operation_id": operation.operation_id,
+                "runtime_repository": operation.runtime_repository,
+                "runtime_commit": operation.runtime_commit,
+                "repository_identity": operation.repository_identity,
+                "bundle_hash": canonical_sha256(generated_bundle.model_dump(mode="json")),
+            }
+        )
+        return EvaluatorLifecycleResult(
+            action="replace",
+            active_bundle=generated_bundle,
+            previous_bundle=existing_bundle,
+            lineage_hash=lineage_hash,
+            split_hash=split_result.split_hash,
+            status=f"replaced:{operation.operation_id}",
+            activated_bundle=generated_bundle,
+            replaced_bundle=existing_bundle,
+        )
     return EvaluatorLifecycleResult(
-        action=action,
-        bundle=generated_bundle,
+        action="generate",
+        active_bundle=generated_bundle,
+        previous_bundle=existing_bundle,
         lineage_hash=canonical_sha256(generated_bundle.model_dump(mode="json")),
-        status=status,
-        replacement_receipt=receipt,
+        split_hash=split_result.split_hash,
+        status="generated_pending_activation",
+        activated_bundle=generated_bundle,
+        replaced_bundle=existing_bundle,
     )
