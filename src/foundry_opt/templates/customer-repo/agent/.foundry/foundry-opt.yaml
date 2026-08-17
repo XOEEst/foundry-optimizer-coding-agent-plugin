@@ -3,7 +3,9 @@ repo_agent_id: example-agent
 source_root: agent
 package_root: agent
 editable_paths:
-  - agent/**
+  - agent/main.py
+  - agent/prompts/**
+  - tests/agent/**
 shared_source_relations: []
 runtime:
   schema_version: 1

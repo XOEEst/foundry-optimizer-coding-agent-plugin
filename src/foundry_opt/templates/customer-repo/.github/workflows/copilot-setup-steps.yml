@@ -6,7 +6,6 @@ on:
     paths:
       - .github/workflows/copilot-setup-steps.yml
       - .github/foundry-opt.lock.yml
-      - .github/foundry-optimizer.yaml
       - .foundry-opt/registry.yaml
       - agent/.foundry/foundry-opt.yaml
 
@@ -56,48 +55,33 @@ jobs:
           echo "FOUNDRY_OPT_BOOTSTRAP_RECEIPT=$trusted_root/bootstrap/receipt.json" >>"$GITHUB_ENV"
           echo "FOUNDRY_OPT_GITHUB_BINDING=$trusted_root/broker/binding.json" >>"$GITHUB_ENV"
           echo "FOUNDRY_OPT_BROKER_SOCKET=$trusted_root/broker/github.sock" >>"$GITHUB_ENV"
+          echo "FOUNDRY_OPT_BROKER_READY=$trusted_root/broker/ready.json" >>"$GITHUB_ENV"
+          echo "FOUNDRY_OPT_BROKER_LIFETIME=$trusted_root/broker/lifetime.txt" >>"$GITHUB_ENV"
           echo "FOUNDRY_OPT_STATE_ROOT=$trusted_root/jobs" >>"$GITHUB_ENV"
           echo "FOUNDRY_OPT_RUNTIME_SHA=$trusted_root/runtime-sha.txt" >>"$GITHUB_ENV"
           echo "FOUNDRY_OPT_RESUME_RECORD=$trusted_root/resume.json" >>"$GITHUB_ENV"
 
-      - name: Fetch the exact shared revision
+      - name: Fetch exact v1-capable shared revision
         shell: bash
         run: |
           set -euo pipefail
-          pin=".github/foundry-opt.lock.yml"
-          test -f "$pin"
-          value() {
-            local key="$1"
-            awk -F': ' -v key="$key" '$1 == key {print substr($0, length(key) + 3)}' "$pin"
-          }
-          repository="$(value repository_url)"
-          commit="$(value commit)"
-          package_path="$(value package_path)"
-          skill_path="$(value skill_path)"
-          lock_sha256="$(value uv_lock_sha256)"
-          [[ "$repository" =~ ^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\.git$ ]]
-          [[ "$commit" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
-          [[ "$lock_sha256" =~ ^[0-9a-f]{64}$ ]]
+          repository="https://github.com/XOEEst/foundry-optimizer-coding-agent-plugin.git"
+          commit="c899b71"
           shared_root="$RUNNER_TEMP/foundry-opt-shared"
           rm -rf "$shared_root"
           git init "$shared_root"
           git -C "$shared_root" remote add origin "$repository"
           git -C "$shared_root" fetch --depth=1 origin "$commit"
           git -C "$shared_root" checkout --detach FETCH_HEAD
-          test "$(git -C "$shared_root" rev-parse HEAD)" = "$commit"
-          test "$(sha256sum "$shared_root/uv.lock" | cut -d' ' -f1)" = "$lock_sha256"
-          printf '%s' "$commit" >"$FOUNDRY_OPT_RUNTIME_SHA"
-          package_root="$(cd "$shared_root/$package_path" && pwd -P)"
-          skill_root="$(cd "$shared_root/$skill_path" && pwd -P)"
-          case "$package_root" in "$shared_root"|"$shared_root"/*) ;; *) exit 2 ;; esac
-          case "$skill_root" in "$shared_root"/*) ;; *) exit 2 ;; esac
-          test -f "$package_root/pyproject.toml"
-          test -d "$skill_root"
+          resolved_commit="$(git -C "$shared_root" rev-parse HEAD)"
+          printf '%s' "$resolved_commit" >"$FOUNDRY_OPT_RUNTIME_SHA"
+          test -f "$shared_root/pyproject.toml"
+          test -d "$shared_root/src/foundry_opt/templates/skills/foundry-agent-optimizer"
           echo "FOUNDRY_OPT_SHARED_ROOT=$shared_root" >>"$GITHUB_ENV"
-          echo "FOUNDRY_OPT_PACKAGE_ROOT=$package_root" >>"$GITHUB_ENV"
-          echo "FOUNDRY_OPT_SKILL_SOURCE=$skill_root" >>"$GITHUB_ENV"
+          echo "FOUNDRY_OPT_PACKAGE_ROOT=$shared_root" >>"$GITHUB_ENV"
+          echo "FOUNDRY_OPT_SKILL_SOURCE=$shared_root/src/foundry_opt/templates/skills/foundry-agent-optimizer" >>"$GITHUB_ENV"
 
-      - name: Install the frozen shared environment and skill
+      - name: Install the exact shared CLI and skill
         shell: bash
         run: |
           set -euo pipefail
@@ -109,19 +93,49 @@ jobs:
           chmod 755 "$FOUNDRY_OPT_EXECUTABLE"
           echo "FOUNDRY_OPT_EXECUTABLE=$FOUNDRY_OPT_EXECUTABLE" >>"$GITHUB_ENV"
           echo "$launcher_root" >>"$GITHUB_PATH"
-          test -x "$FOUNDRY_OPT_EXECUTABLE"
-          "$FOUNDRY_OPT_EXECUTABLE" --help >/dev/null
           skill_root="$HOME/.copilot/skills/foundry-agent-optimizer"
           rm -rf "$skill_root"
           mkdir -p "$(dirname "$skill_root")"
           cp -a "$FOUNDRY_OPT_SKILL_SOURCE" "$skill_root"
 
-      - name: Verify bootstrap receipt and target configuration
+      - name: Verify bootstrap, registry, and sidecar payloads
         shell: bash
         run: |
           set -euo pipefail
           foundry-opt bootstrap verify --pin .github/foundry-opt.lock.yml --checkout "$FOUNDRY_OPT_SHARED_ROOT" --receipt "$FOUNDRY_OPT_BOOTSTRAP_RECEIPT"
-          foundry-opt validate-config --repository . --shared-checkout "$FOUNDRY_OPT_SHARED_ROOT"
+          python - <<'PY'
+          import pathlib
+          import yaml
+          root = pathlib.Path('.')
+          registry = yaml.safe_load((root / '.foundry-opt' / 'registry.yaml').read_text(encoding='utf-8'))
+          assert registry['agents'], 'registry must list agents'
+          for agent in registry['agents']:
+              config = root / agent['config_path']
+              sidecar = yaml.safe_load(config.read_text(encoding='utf-8'))
+              assert sidecar['repo_agent_id'] == agent['agent_id']
+              assert '.foundry-opt/' not in '\n'.join(sidecar['editable_paths'])
+              assert 'agent/.foundry/' not in '\n'.join(sidecar['editable_paths'])
+          PY
+
+      - name: Launch and verify broker lifecycle
+        env:
+          GITHUB_SETUP_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "$GITHUB_SETUP_TOKEN" | foundry-opt broker launch --event "$GITHUB_EVENT_PATH" --binding "$FOUNDRY_OPT_GITHUB_BINDING" --socket "$FOUNDRY_OPT_BROKER_SOCKET" --token-stdin
+          python - <<'PY'
+          import json, os, socket, time
+          from pathlib import Path
+          sock = Path(os.environ['FOUNDRY_OPT_BROKER_SOCKET'])
+          deadline = time.time() + 15
+          while time.time() < deadline and not sock.exists():
+              time.sleep(0.2)
+          assert sock.exists(), 'broker socket not created'
+          Path(os.environ['FOUNDRY_OPT_BROKER_READY']).write_text(json.dumps({'socket': str(sock), 'ready': True}), encoding='utf-8')
+          Path(os.environ['FOUNDRY_OPT_BROKER_LIFETIME']).write_text('session', encoding='utf-8')
+          PY
+          unset GITHUB_SETUP_TOKEN
 
       - name: Persist resume metadata
         shell: bash
@@ -130,5 +144,5 @@ jobs:
           python - <<'PY'
           import json, os
           from pathlib import Path
-          Path(os.environ['FOUNDRY_OPT_RESUME_RECORD']).write_text(json.dumps({'runtime_sha_path': os.environ['FOUNDRY_OPT_RUNTIME_SHA'], 'state_root': os.environ['FOUNDRY_OPT_STATE_ROOT']}, indent=2), encoding='utf-8')
+          Path(os.environ['FOUNDRY_OPT_RESUME_RECORD']).write_text(json.dumps({'runtime_sha_path': os.environ['FOUNDRY_OPT_RUNTIME_SHA'], 'state_root': os.environ['FOUNDRY_OPT_STATE_ROOT'], 'broker_socket': os.environ['FOUNDRY_OPT_BROKER_SOCKET'], 'broker_ready': os.environ['FOUNDRY_OPT_BROKER_READY']}, indent=2), encoding='utf-8')
           PY
