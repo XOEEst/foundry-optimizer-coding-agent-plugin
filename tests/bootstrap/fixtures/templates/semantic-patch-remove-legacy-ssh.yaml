@@ -1,0 +1,4 @@
+schema_version: 1
+target_path: .github/workflows/copilot-setup-steps.yml
+operation: delete
+match_text: FOUNDRY_OPT_SHARED_REPO_SSH_KEY

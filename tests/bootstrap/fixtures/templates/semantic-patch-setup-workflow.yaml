@@ -1,0 +1,6 @@
+schema_version: 1
+target_path: .github/workflows/copilot-setup-steps.yml
+operation: replace
+match_text: '.foundry/agent-metadata.yaml'
+replacement_text: '.foundry-opt/registry.yaml
+      - agent/.foundry/foundry-opt.yaml'
