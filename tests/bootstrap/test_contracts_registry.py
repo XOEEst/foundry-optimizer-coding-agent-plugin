@@ -1,62 +1,61 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
-from foundry_opt.bootstrap.contracts import BootstrapSidecar, DistributionSettings, ExplicitAgentEntry, IdentitySettings, RootRegistry
+from foundry_opt.bootstrap.contracts import (
+    BootstrapSidecar,
+    DistributionSettings,
+    EvaluatorNormalization,
+    EvaluatorReference,
+    ExplicitAgentEntry,
+    GitHubSettings,
+    IdentitySettings,
+    ResolvedEvaluator,
+    ResolvedWeightedObjective,
+    RootRegistry,
+)
 from foundry_opt.bootstrap.errors import BootstrapConfigError
+from foundry_opt.bootstrap.legacy import import_legacy_single_agent_documents
 
 
 def _sidecar() -> BootstrapSidecar:
-    from foundry_opt.bootstrap.contracts import EvaluatorReference, IssueEvaluatorRequestEntry, ResolvedWeightedObjective
-    objective = ResolvedWeightedObjective.create((IssueEvaluatorRequestEntry(evaluator=EvaluatorReference(evaluator_id='azureai://accounts/a/projects/p/evaluators/quality/versions/1', provenance='reused_existing')),)).model_dump(mode='json')
+    objective = ResolvedWeightedObjective.create((
+        ResolvedEvaluator(reference=EvaluatorReference(evaluator_id='azureai://accounts/a/projects/p/evaluators/quality/versions/1', provenance='reused_existing'), normalization=EvaluatorNormalization(kind='pass_fail'), weight=1.0),
+    )).model_dump(mode='json')
     return BootstrapSidecar.from_document({
         'repo_agent_id': 'agent-one',
-        'source_root': 'src/agent',
-        'package_root': 'src',
-        'editable_paths': ['src/agent/**'],
-        'runtime': {'kind': 'hosted', 'entrypoint': ['python', 'main.py'], 'protocol_name': 'responses', 'protocol_version': '2.0.0'},
-        'foundry_project': {
-            'project_endpoint': 'https://example.services.ai.azure.com/api/projects/example',
-            'account_resource_id': '/subscriptions/000/resourceGroups/rg/providers/Microsoft.CognitiveServices/accounts/example',
-            'agent_name': 'example-agent',
-            'expected_version': '92bca79a5faea0718e32101e56b34ebf29c628e3',
-        },
+        'source_root': 'agent',
+        'package_root': 'agent',
+        'editable_paths': ['agent/**'],
+        'runtime': {'kind': 'hosted', 'runtime': 'python_3_13', 'entrypoint': ['python', 'main.py'], 'dependency_resolution': 'remote_build', 'protocol_name': 'responses', 'protocol_version': '2.0.0', 'cpu': '0.5', 'memory': '1Gi', 'model_environment_variable': 'AZURE_AI_MODEL_DEPLOYMENT_NAME'},
+        'foundry_project': {'project_endpoint': 'https://example.services.ai.azure.com/api/projects/example', 'account_resource_id': '/subscriptions/000/resourceGroups/rg/providers/Microsoft.CognitiveServices/accounts/example', 'agent_name': 'example-agent', 'model_deployment_aliases': ['baseline-model']},
         'baseline_model': 'baseline-model',
         'allowed_models': ['baseline-model'],
+        'min_candidates': 2,
         'max_candidates': 2,
+        'primary_metric': 'primary_metric',
         'decision_policy': {'minimum_aggregate_delta': 0.1, 'focused_cases_required': True, 'max_regressions': 0},
         'development_dataset': {'dataset_id': 'azureai://accounts/a/projects/p/data/dev/versions/1'},
         'validating_dataset': {'dataset_id': 'azureai://accounts/a/projects/p/data/val/versions/1'},
-        'default_evaluator_bundle': {
-            'objective': {
-                'evaluators': [{'evaluator': {'evaluator_id': 'azureai://accounts/a/projects/p/evaluators/quality/versions/1', 'provenance': 'reused_existing'}}],
-                'normalized_weights': [1.0],
-                'objective_hash': objective['objective_hash'],
-                'score_normalization': {'minimum': 0.0, 'maximum': 1.0, 'normalized_range': [0.0, 1.0]},
-            },
-            'datasets': [{'dataset_id': 'azureai://accounts/a/projects/p/data/dev/versions/1'}],
-            'definitions': [{'definition_id': 'azureai://accounts/a/projects/p/evaluationDefinitions/default/versions/1'}],
-        },
+        'development_definition': {'definition_id': 'eval_development'},
+        'validating_definition': {'definition_id': 'eval_validating'},
+        'default_evaluator_bundle': {'objective': objective, 'datasets': [{'dataset_id': 'azureai://accounts/a/projects/p/data/dev/versions/1'}], 'definitions': [{'definition_id': 'eval_development'}]},
         'hard_guardrails': [{'evaluator_name': 'safety', 'required_pass_rate': 1.0, 'required': True}],
-        'deployment': {'environment': 'foundry-production', 'enabled': True, 'eligibility': 'eligible'},
+        'deployment': {'environment': 'foundry-production', 'enabled': True, 'require_aligned_binding': True},
     })
 
 
 def test_root_registry_rejects_casefold_duplicate_agent_ids() -> None:
     with pytest.raises(BootstrapConfigError):
         RootRegistry.from_document({
-            'distribution': {
-                'repository': 'org/repo',
-                'channel': 'wave2',
-                'optimizer_environment': 'copilot',
-                'deployment_environment': 'foundry-production',
-                'optimizer_client_id_variable': 'AZURE_OPTIMIZER_CLIENT_ID',
-                'deployment_client_id_variable': 'AZURE_DEPLOYMENT_CLIENT_ID',
-            },
-            'identity': {'kind': 'azure_subscription', 'resource_id': '/subscriptions/000/resourceGroups/rg/providers/Microsoft.CognitiveServices/accounts/example'},
+            'distribution': {'repository': 'https://github.com/org/repo.git', 'channel': 'wave2'},
+            'github': {'optimizer_environment': 'copilot', 'deployment_environment': 'foundry-production', 'client_id_variable': 'AZURE_OPTIMIZER_CLIENT_ID'},
+            'identity': {'kind': 'unresolved_migration'},
             'agents': [
-                {'agent_id': 'agent-one', 'root': 'src/one', 'config_path': '.foundry/a.yaml', 'enabled': True},
-                {'agent_id': 'Agent-One', 'root': 'src/two', 'config_path': '.foundry/b.yaml', 'enabled': True},
+                {'agent_id': 'agent-one', 'root': 'src/one', 'config_path': 'src/one/.foundry/foundry-opt.yaml', 'enabled': True},
+                {'agent_id': 'Agent-One', 'root': 'src/two', 'config_path': 'src/two/.foundry/foundry-opt.yaml', 'enabled': True},
             ],
         })
 
@@ -68,17 +67,23 @@ def test_sidecar_rejects_invalid_foundry_uri() -> None:
         BootstrapSidecar.from_document(document)
 
 
+def test_actual_template_legacy_import_succeeds() -> None:
+    root = Path(__file__).resolve().parents[2] / 'src' / 'foundry_opt' / 'templates' / 'customer-repo'
+    proposal = import_legacy_single_agent_documents(
+        lock_document=(root / '.github' / 'foundry-opt.lock.yml').read_text(encoding='utf-8'),
+        policy_document=(root / '.github' / 'foundry-optimizer.yaml').read_text(encoding='utf-8'),
+        metadata_document=(root / '.foundry' / 'agent-metadata.yaml').read_text(encoding='utf-8'),
+    )
+    assert proposal.registry.distribution.repository.endswith('foundry-optimizer-coding-agent-plugin.git')
+    assert proposal.sidecars[0].development_definition.definition_id == 'eval_development'
+    assert proposal.actions[0].kind == 'unresolved-shared-identity'
+
+
 def test_root_registry_accepts_explicit_agents() -> None:
     registry = RootRegistry(
-        distribution=DistributionSettings(
-            repository='org/repo',
-            channel='wave2',
-            optimizer_environment='copilot',
-            deployment_environment='foundry-production',
-            optimizer_client_id_variable='AZURE_OPTIMIZER_CLIENT_ID',
-            deployment_client_id_variable='AZURE_DEPLOYMENT_CLIENT_ID',
-        ),
-        identity=IdentitySettings(kind='azure_subscription', resource_id='/subscriptions/000/resourceGroups/rg/providers/Microsoft.CognitiveServices/accounts/example'),
-        agents=(ExplicitAgentEntry(agent_id='agent-one', root='src/one', config_path='.foundry/a.yaml'),),
+        distribution=DistributionSettings(repository='https://github.com/org/repo.git', channel='wave2'),
+        github=GitHubSettings(optimizer_environment='copilot', deployment_environment='foundry-production', client_id_variable='AZURE_OPTIMIZER_CLIENT_ID'),
+        identity=IdentitySettings(kind='unresolved_migration', resource_id=None),
+        agents=(ExplicitAgentEntry(agent_id='agent-one', root='src/one', config_path='src/one/.foundry/foundry-opt.yaml'),),
     )
     assert registry.agents[0].enabled is True

@@ -47,14 +47,6 @@
           "title": "Definitions",
           "type": "array"
         },
-        "evaluator_lineage": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/EvaluatorLineageEntry"
-          },
-          "title": "Evaluator Lineage",
-          "type": "array"
-        },
         "objective": {
           "$ref": "#/$defs/ResolvedWeightedObjective"
         },
@@ -76,15 +68,6 @@
     "DeploymentSettings": {
       "additionalProperties": false,
       "properties": {
-        "eligibility": {
-          "enum": [
-            "eligible",
-            "ineligible",
-            "unknown"
-          ],
-          "title": "Eligibility",
-          "type": "string"
-        },
         "enabled": {
           "title": "Enabled",
           "type": "boolean"
@@ -92,6 +75,10 @@
         "environment": {
           "title": "Environment",
           "type": "string"
+        },
+        "require_aligned_binding": {
+          "title": "Require Aligned Binding",
+          "type": "boolean"
         },
         "schema_version": {
           "const": 1,
@@ -103,16 +90,21 @@
       "required": [
         "environment",
         "enabled",
-        "eligibility"
+        "require_aligned_binding"
       ],
       "title": "DeploymentSettings",
       "type": "object"
     },
-    "EvaluatorLineageEntry": {
+    "EvaluatorNormalization": {
       "additionalProperties": false,
       "properties": {
-        "evaluator": {
-          "$ref": "#/$defs/EvaluatorReference"
+        "kind": {
+          "enum": [
+            "pass_fail",
+            "scalar"
+          ],
+          "title": "Kind",
+          "type": "string"
         },
         "schema_version": {
           "const": 1,
@@ -120,30 +112,52 @@
           "title": "Schema Version",
           "type": "integer"
         },
-        "source": {
-          "enum": [
-            "default_bundle",
-            "issue_request",
-            "legacy_metadata"
+        "source_max": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
           ],
-          "title": "Source",
-          "type": "string"
+          "default": null,
+          "title": "Source Max"
+        },
+        "source_min": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Min"
         }
       },
       "required": [
-        "evaluator",
-        "source"
+        "kind"
       ],
-      "title": "EvaluatorLineageEntry",
+      "title": "EvaluatorNormalization",
       "type": "object"
     },
     "EvaluatorReference": {
       "additionalProperties": false,
       "properties": {
         "evaluator_id": {
-          "pattern": "^azureai://accounts/[^/]+/projects/[^/]+/(?:evaluators|data|evaluationDefinitions)/[^/]+/versions/[^/]+$",
-          "title": "Evaluator Id",
-          "type": "string"
+          "anyOf": [
+            {
+              "pattern": "^azureai://accounts/[^/]+/projects/[^/]+/evaluators/[^/]+/versions/[^/]+$",
+              "type": "string"
+            },
+            {
+              "pattern": "^azureai://built-in/evaluators/[^/]+$",
+              "type": "string"
+            }
+          ],
+          "title": "Evaluator Id"
         },
         "provenance": {
           "enum": [
@@ -180,8 +194,24 @@
           "type": "string"
         },
         "expected_version": {
-          "title": "Expected Version",
-          "type": "string"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Version"
+        },
+        "model_deployment_aliases": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Model Deployment Aliases",
+          "type": "array"
         },
         "project_endpoint": {
           "title": "Project Endpoint",
@@ -197,8 +227,7 @@
       "required": [
         "project_endpoint",
         "account_resource_id",
-        "agent_name",
-        "expected_version"
+        "agent_name"
       ],
       "title": "FoundryProjectSettings",
       "type": "object"
@@ -237,7 +266,7 @@
       "additionalProperties": false,
       "properties": {
         "dataset_id": {
-          "pattern": "^azureai://accounts/[^/]+/projects/[^/]+/(?:evaluators|data|evaluationDefinitions)/[^/]+/versions/[^/]+$",
+          "pattern": "^azureai://accounts/[^/]+/projects/[^/]+/data/[^/]+/versions/[^/]+$",
           "title": "Dataset Id",
           "type": "string"
         },
@@ -258,7 +287,7 @@
       "additionalProperties": false,
       "properties": {
         "definition_id": {
-          "pattern": "^azureai://accounts/[^/]+/projects/[^/]+/(?:evaluators|data|evaluationDefinitions)/[^/]+/versions/[^/]+$",
+          "pattern": "^(?:eval_[A-Za-z0-9_.-]+|azureai://accounts/[^/]+/projects/[^/]+/evaluationDefinitions/[^/]+/versions/[^/]+)$",
           "title": "Definition Id",
           "type": "string"
         },
@@ -275,10 +304,13 @@
       "title": "ImmutableDefinitionReference",
       "type": "object"
     },
-    "IssueEvaluatorRequestEntry": {
+    "ResolvedEvaluator": {
       "additionalProperties": false,
       "properties": {
-        "evaluator": {
+        "normalization": {
+          "$ref": "#/$defs/EvaluatorNormalization"
+        },
+        "reference": {
           "$ref": "#/$defs/EvaluatorReference"
         },
         "schema_version": {
@@ -288,22 +320,16 @@
           "type": "integer"
         },
         "weight": {
-          "anyOf": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Weight"
+          "title": "Weight",
+          "type": "number"
         }
       },
       "required": [
-        "evaluator"
+        "reference",
+        "normalization",
+        "weight"
       ],
-      "title": "IssueEvaluatorRequestEntry",
+      "title": "ResolvedEvaluator",
       "type": "object"
     },
     "ResolvedWeightedObjective": {
@@ -311,16 +337,9 @@
       "properties": {
         "evaluators": {
           "items": {
-            "$ref": "#/$defs/IssueEvaluatorRequestEntry"
+            "$ref": "#/$defs/ResolvedEvaluator"
           },
           "title": "Evaluators",
-          "type": "array"
-        },
-        "normalized_weights": {
-          "items": {
-            "type": "number"
-          },
-          "title": "Normalized Weights",
           "type": "array"
         },
         "objective_hash": {
@@ -333,14 +352,10 @@
           "default": 1,
           "title": "Schema Version",
           "type": "integer"
-        },
-        "score_normalization": {
-          "$ref": "#/$defs/ScoreNormalizationContract"
         }
       },
       "required": [
         "evaluators",
-        "normalized_weights",
         "objective_hash"
       ],
       "title": "ResolvedWeightedObjective",
@@ -349,6 +364,22 @@
     "RuntimeProtocolSettings": {
       "additionalProperties": false,
       "properties": {
+        "cpu": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cpu"
+        },
+        "dependency_resolution": {
+          "title": "Dependency Resolution",
+          "type": "string"
+        },
         "entrypoint": {
           "items": {
             "type": "string"
@@ -361,12 +392,40 @@
           "title": "Kind",
           "type": "string"
         },
+        "memory": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Memory"
+        },
+        "model_environment_variable": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Environment Variable"
+        },
         "protocol_name": {
           "title": "Protocol Name",
           "type": "string"
         },
         "protocol_version": {
           "title": "Protocol Version",
+          "type": "string"
+        },
+        "runtime": {
+          "title": "Runtime",
           "type": "string"
         },
         "schema_version": {
@@ -378,52 +437,13 @@
       },
       "required": [
         "kind",
+        "runtime",
         "entrypoint",
+        "dependency_resolution",
         "protocol_name",
         "protocol_version"
       ],
       "title": "RuntimeProtocolSettings",
-      "type": "object"
-    },
-    "ScoreNormalizationContract": {
-      "additionalProperties": false,
-      "properties": {
-        "maximum": {
-          "default": 1.0,
-          "title": "Maximum",
-          "type": "number"
-        },
-        "minimum": {
-          "default": 0.0,
-          "title": "Minimum",
-          "type": "number"
-        },
-        "normalized_range": {
-          "default": [
-            0.0,
-            1.0
-          ],
-          "maxItems": 2,
-          "minItems": 2,
-          "prefixItems": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "number"
-            }
-          ],
-          "title": "Normalized Range",
-          "type": "array"
-        },
-        "schema_version": {
-          "const": 1,
-          "default": 1,
-          "title": "Schema Version",
-          "type": "integer"
-        }
-      },
-      "title": "ScoreNormalizationContract",
       "type": "object"
     },
     "SharedSourceRelation": {
@@ -479,6 +499,9 @@
     "development_dataset": {
       "$ref": "#/$defs/ImmutableDatasetReference"
     },
+    "development_definition": {
+      "$ref": "#/$defs/ImmutableDefinitionReference"
+    },
     "editable_paths": {
       "items": {
         "type": "string"
@@ -505,8 +528,16 @@
       "title": "Max Issue Evaluators",
       "type": "integer"
     },
+    "min_candidates": {
+      "title": "Min Candidates",
+      "type": "integer"
+    },
     "package_root": {
       "title": "Package Root",
+      "type": "string"
+    },
+    "primary_metric": {
+      "title": "Primary Metric",
       "type": "string"
     },
     "repo_agent_id": {
@@ -537,6 +568,9 @@
     },
     "validating_dataset": {
       "$ref": "#/$defs/ImmutableDatasetReference"
+    },
+    "validating_definition": {
+      "$ref": "#/$defs/ImmutableDefinitionReference"
     }
   },
   "required": [
@@ -548,10 +582,14 @@
     "foundry_project",
     "baseline_model",
     "allowed_models",
+    "min_candidates",
     "max_candidates",
+    "primary_metric",
     "decision_policy",
     "development_dataset",
     "validating_dataset",
+    "development_definition",
+    "validating_definition",
     "default_evaluator_bundle",
     "hard_guardrails",
     "deployment"

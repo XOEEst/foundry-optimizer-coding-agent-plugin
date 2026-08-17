@@ -7,6 +7,14 @@
           "title": "Action Id",
           "type": "string"
         },
+        "diagnostics": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Diagnostics",
+          "type": "array"
+        },
         "kind": {
           "title": "Kind",
           "type": "string"
@@ -180,12 +188,18 @@
       "type": "string"
     },
     "repository_identity": {
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
       "title": "Repository Identity",
       "type": "string"
     },
-    "runtime_sha256": {
-      "pattern": "^[0-9a-f]{64}$",
-      "title": "Runtime Sha256",
+    "runtime_commit": {
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+      "title": "Runtime Commit",
+      "type": "string"
+    },
+    "runtime_repository": {
+      "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\\.git)?$",
+      "title": "Runtime Repository",
       "type": "string"
     },
     "schema_version": {
@@ -197,7 +211,8 @@
   },
   "required": [
     "operation_id",
-    "runtime_sha256",
+    "runtime_repository",
+    "runtime_commit",
     "repository_identity",
     "actions",
     "plan_hash"

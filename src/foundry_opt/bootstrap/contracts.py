@@ -5,76 +5,66 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Annotated, Literal, Self
 
-from pydantic import Field, StringConstraints, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, Field, StringConstraints, ValidationError, field_validator, model_validator
 
 from foundry_opt.bootstrap.canonical import canonical_sha256, safe_persisted_document
 from foundry_opt.bootstrap.errors import BootstrapConfigError, BootstrapPlanError
 from foundry_opt.models import FrozenModel
-from foundry_opt.poc.config import (
-    POCConfigurationError,
-    _validate_resource_id,
-    load_strict_yaml_mapping,
-    validate_repository_relative_path,
-    validate_repository_relative_paths,
-)
+from foundry_opt.poc.config import POCConfigurationError, _validate_resource_id, load_strict_yaml_mapping, validate_repository_relative_path, validate_repository_relative_paths
 
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+GitCommit = Annotated[str, StringConstraints(pattern=r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")]
+RepositoryIdentity = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")]
+RepositoryUrl = Annotated[str, StringConstraints(pattern=r"^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?$")]
 AgentId = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")]
-AzureAIResourceUri = Annotated[
-    str,
-    StringConstraints(
-        pattern=(
-            r"^azureai://accounts/[^/]+/projects/[^/]+/"
-            r"(?:evaluators|data|evaluationDefinitions)/[^/]+/versions/[^/]+$"
-        )
-    ),
-]
+DatasetUri = Annotated[str, StringConstraints(pattern=r"^azureai://accounts/[^/]+/projects/[^/]+/data/[^/]+/versions/[^/]+$")]
+VersionedEvaluatorUri = Annotated[str, StringConstraints(pattern=r"^azureai://accounts/[^/]+/projects/[^/]+/evaluators/[^/]+/versions/[^/]+$")]
+BuiltInEvaluatorId = Annotated[str, StringConstraints(pattern=r"^azureai://built-in/evaluators/[^/]+$")]
+EvaluationDefinitionId = Annotated[str, StringConstraints(pattern=r"^(?:eval_[A-Za-z0-9_.-]+|azureai://accounts/[^/]+/projects/[^/]+/evaluationDefinitions/[^/]+/versions/[^/]+)$")]
 ApplyPhase = Literal["repository", "github", "azure", "evaluations"]
 OperationStage = Literal["planned", "applying", "verifying", "completed", "failed", "compensation_required"]
 BindingClassification = Literal["bound-aligned", "bound-diverged", "bound-unknown", "ready-unbound", "not-ready"]
-ResourceApplyState = Literal["planned", "created", "adopted", "updated", "verified", "failed", "skipped"]
 EvaluatorProvenance = Literal["reused_existing", "auto_generated_unreviewed", "issue_supplied_existing"]
+IdentityKind = Literal["user_assigned_managed_identity", "entra_application", "unresolved_migration"]
 RuntimeKind = Literal["hosted"]
-DeploymentEligibility = Literal["eligible", "ineligible", "unknown"]
-IdentityKind = Literal["azure_subscription"]
 OwnershipMode = Literal["owned", "shared-template", "adopted"]
+OwnerScope = Literal["repository", "agent", "shared-runtime"]
 ActivationOutcome = Literal["succeeded", "failed", "compensation_required", "unknown"]
 SemanticPatchOperation = Literal["replace", "insert_before", "insert_after", "delete"]
+NormalizationKind = Literal["pass_fail", "scalar"]
 
-PROHIBITED_CONTENT_KEYS: frozenset[str] = frozenset({
-    "prompt", "prompts", "response", "responses", "trace", "traces", "dataset_rows",
-    "token", "tokens", "raw_prompt", "raw_response", "transcript", "content",
-})
+PROHIBITED_CONTENT_KEYS = frozenset({"prompt", "prompts", "response", "responses", "trace", "traces", "dataset_rows", "token", "tokens", "raw_prompt", "raw_response", "transcript", "content"})
 MAX_ISSUE_EVALUATORS = 8
 _PROJECT_ENDPOINT_RE = re.compile(r"^https://[^\s]+/api/projects/[^\s/]+/?$")
 
 
 def _jsonable(value: object) -> object:
-    if isinstance(value, FrozenModel):
-        return value.model_dump(mode="json")
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode='json')
     if isinstance(value, tuple):
-        return [_jsonable(item) for item in value]
+        return [_jsonable(v) for v in value]
     if isinstance(value, list):
-        return [_jsonable(item) for item in value]
+        return [_jsonable(v) for v in value]
     if isinstance(value, Mapping):
-        return {key: _jsonable(item) for key, item in value.items()}
+        return {k: _jsonable(v) for k, v in value.items()}
     return value
 
 
 def _casefold_unique(values: Sequence[str], *, field: str) -> tuple[str, ...]:
     seen: dict[str, str] = {}
-    ordered: list[str] = []
+    out: list[str] = []
     for value in values:
         key = value.casefold()
-        previous = seen.get(key)
-        if previous is not None:
-            raise BootstrapConfigError(f"{field} contains case-fold duplicate values: {previous!r} and {value!r}")
+        if key in seen:
+            raise BootstrapConfigError(f"{field} contains case-fold duplicate values: {seen[key]!r} and {value!r}")
         seen[key] = value
-        ordered.append(value)
-    return tuple(ordered)
+        out.append(value)
+    return tuple(out)
 
 
-def _validate_safe_path(value: str, *, field: str) -> str:
+def _validate_safe_path(value: str, *, field: str, allow_dot: bool = False) -> str:
+    if allow_dot and value == '.':
+        return value
     return validate_repository_relative_path(value, field=field)
 
 
@@ -82,6 +72,12 @@ def _validate_project_endpoint(value: str, *, field: str) -> str:
     if _PROJECT_ENDPOINT_RE.fullmatch(value) is None:
         raise BootstrapConfigError(f"{field} must be an HTTPS Foundry project endpoint")
     return value
+
+
+def _reject_prohibited_mapping(value: Mapping[str, object], *, field: str) -> None:
+    overlap = {k.casefold() for k in value} & PROHIBITED_CONTENT_KEYS
+    if overlap:
+        raise BootstrapPlanError(f"{field} includes prohibited persisted content: {sorted(overlap)!r}")
 
 
 def _validate_weight(value: float | None, *, field: str) -> float | None:
@@ -92,30 +88,13 @@ def _validate_weight(value: float | None, *, field: str) -> float | None:
     return value
 
 
-def _reject_prohibited_mapping(value: Mapping[str, object], *, field: str) -> None:
-    lowered = {key.casefold() for key in value}
-    overlap = lowered & PROHIBITED_CONTENT_KEYS
-    if overlap:
-        raise BootstrapPlanError(f"{field} includes prohibited persisted content: {sorted(overlap)!r}")
-
-
-def _normalize_weight_inputs(entries: Sequence["IssueEvaluatorRequestEntry"]) -> tuple[float, ...]:
-    explicit = [entry.weight is not None for entry in entries]
-    if not entries:
-        return ()
-    raw = [entry.weight if entry.weight is not None else 1.0 for entry in entries] if any(explicit) else [1.0 for _ in entries]
-    total = sum(raw)
-    return tuple(weight / total for weight in raw)
-
-
 class BootstrapDocument(FrozenModel):
     schema_version: Literal[1] = 1
 
     @classmethod
     def from_document(cls, document: str | bytes | Mapping[str, object]) -> Self:
         try:
-            payload = load_strict_yaml_mapping(document, subject=cls.__name__)
-            return cls.model_validate(payload)
+            return cls.model_validate(load_strict_yaml_mapping(document, subject=cls.__name__))
         except POCConfigurationError as exc:
             raise BootstrapConfigError(str(exc)) from exc
         except ValidationError as exc:
@@ -123,23 +102,20 @@ class BootstrapDocument(FrozenModel):
 
 
 class DistributionSettings(BootstrapDocument):
-    repository: str
+    repository: RepositoryUrl
     channel: str
-    pin: str | None = None
+    pin: GitCommit | None = None
+
+
+class GitHubSettings(BootstrapDocument):
     optimizer_environment: str
     deployment_environment: str
-    optimizer_client_id_variable: str
-    deployment_client_id_variable: str
+    client_id_variable: str
 
 
 class IdentitySettings(BootstrapDocument):
     kind: IdentityKind
-    resource_id: str
-
-    @field_validator("resource_id")
-    @classmethod
-    def validate_resource_id(cls, value: str) -> str:
-        return _validate_resource_id(value, "resource_id")
+    resource_id: str | None = None
 
 
 class ExplicitAgentEntry(BootstrapDocument):
@@ -148,7 +124,7 @@ class ExplicitAgentEntry(BootstrapDocument):
     config_path: str
     enabled: bool = True
 
-    @field_validator("root", "config_path")
+    @field_validator('root', 'config_path')
     @classmethod
     def validate_paths(cls, value: str, info) -> str:
         return _validate_safe_path(value, field=info.field_name)
@@ -156,43 +132,55 @@ class ExplicitAgentEntry(BootstrapDocument):
 
 class RootRegistry(BootstrapDocument):
     distribution: DistributionSettings
+    github: GitHubSettings
     identity: IdentitySettings
     agents: tuple[ExplicitAgentEntry, ...]
 
-    @model_validator(mode="after")
+    @model_validator(mode='after')
     def validate_agents(self) -> Self:
-        _casefold_unique([agent.agent_id for agent in self.agents], field="agents")
-        _casefold_unique([agent.root for agent in self.agents], field="agent roots")
+        _casefold_unique([a.agent_id for a in self.agents], field='agents')
         return self
+
+
+class BindingAssessment(BootstrapDocument):
+    agent_id: AgentId
+    classification: BindingClassification
+    detail: str | None = None
 
 
 class SharedSourceRelation(BootstrapDocument):
     agent_id: AgentId
-    relation: Literal["shared-source"]
+    relation: Literal['shared-source']
 
 
 class RuntimeProtocolSettings(BootstrapDocument):
     kind: RuntimeKind
+    runtime: str
     entrypoint: tuple[str, ...]
+    dependency_resolution: str
     protocol_name: str
     protocol_version: str
+    cpu: str | None = None
+    memory: str | None = None
+    model_environment_variable: str | None = None
 
 
 class FoundryProjectSettings(BootstrapDocument):
     project_endpoint: str
     account_resource_id: str
     agent_name: str
-    expected_version: str
+    expected_version: str | None = None
+    model_deployment_aliases: tuple[str, ...] = ()
 
-    @field_validator("project_endpoint")
+    @field_validator('project_endpoint')
     @classmethod
-    def validate_project_endpoint_field(cls, value: str) -> str:
-        return _validate_project_endpoint(value, field="project_endpoint")
+    def validate_endpoint(cls, value: str) -> str:
+        return _validate_project_endpoint(value, field='project_endpoint')
 
-    @field_validator("account_resource_id")
+    @field_validator('account_resource_id')
     @classmethod
-    def validate_account_resource_id(cls, value: str) -> str:
-        return _validate_resource_id(value, "account_resource_id")
+    def validate_arm_id(cls, value: str) -> str:
+        return _validate_resource_id(value, 'account_resource_id')
 
 
 class DecisionPolicy(BootstrapDocument):
@@ -201,84 +189,90 @@ class DecisionPolicy(BootstrapDocument):
     max_regressions: int
 
 
-class ImmutableDatasetReference(BootstrapDocument):
-    dataset_id: AzureAIResourceUri
+class EvaluatorNormalization(BootstrapDocument):
+    kind: NormalizationKind
+    source_min: float | None = None
+    source_max: float | None = None
 
-
-class ImmutableDefinitionReference(BootstrapDocument):
-    definition_id: AzureAIResourceUri
-
-
-class EvaluatorReference(BootstrapDocument):
-    evaluator_id: AzureAIResourceUri
-    provenance: EvaluatorProvenance
-
-
-class EvaluatorLineageEntry(BootstrapDocument):
-    evaluator: EvaluatorReference
-    source: Literal["default_bundle", "issue_request", "legacy_metadata"]
-
-
-class ScoreNormalizationContract(BootstrapDocument):
-    minimum: float = 0.0
-    maximum: float = 1.0
-    normalized_range: tuple[float, float] = (0.0, 1.0)
-
-    @model_validator(mode="after")
-    def validate_range(self) -> Self:
-        if (self.minimum, self.maximum) != (0.0, 1.0) or self.normalized_range != (0.0, 1.0):
-            raise BootstrapConfigError("score normalization contract must remain 0-1")
+    @model_validator(mode='after')
+    def validate_bounds(self) -> Self:
+        if self.kind == 'pass_fail':
+            if self.source_min is not None or self.source_max is not None:
+                raise BootstrapConfigError('pass_fail normalization cannot carry scalar bounds')
+        else:
+            if self.source_min is None or self.source_max is None or self.source_max <= self.source_min:
+                raise BootstrapConfigError('scalar normalization requires increasing source_min/source_max')
         return self
 
 
+class ImmutableDatasetReference(BootstrapDocument):
+    dataset_id: DatasetUri
+
+
+class ImmutableDefinitionReference(BootstrapDocument):
+    definition_id: EvaluationDefinitionId
+
+
+class EvaluatorReference(BootstrapDocument):
+    evaluator_id: VersionedEvaluatorUri | BuiltInEvaluatorId
+    provenance: EvaluatorProvenance
+
+
+class ResolvedEvaluator(BootstrapDocument):
+    reference: EvaluatorReference
+    normalization: EvaluatorNormalization
+    weight: float
+
+    @field_validator('weight')
+    @classmethod
+    def validate_weight(cls, value: float) -> float:
+        checked = _validate_weight(value, field='weight')
+        assert checked is not None
+        return checked
+
+
 class IssueEvaluatorRequestEntry(BootstrapDocument):
-    evaluator: EvaluatorReference
+    evaluator_id: VersionedEvaluatorUri | BuiltInEvaluatorId
     weight: float | None = None
 
-    @field_validator("weight")
+    @field_validator('weight')
     @classmethod
-    def validate_weight(cls, value: float | None) -> float | None:
-        return _validate_weight(value, field="weight")
+    def validate_weight_field(cls, value: float | None) -> float | None:
+        return _validate_weight(value, field='weight')
 
 
 class IssueEvaluatorRequest(BootstrapDocument):
     primary_objective_only: Literal[True] = True
     evaluators: tuple[IssueEvaluatorRequestEntry, ...]
 
-    @model_validator(mode="after")
+    @model_validator(mode='after')
     def validate_entries(self) -> Self:
         if not self.evaluators:
-            raise BootstrapConfigError("evaluators must not be empty")
+            raise BootstrapConfigError('evaluators must not be empty')
         if len(self.evaluators) > MAX_ISSUE_EVALUATORS:
-            raise BootstrapConfigError("default issue evaluator bundle cannot exceed 8 evaluators")
+            raise BootstrapConfigError('default issue evaluator bundle cannot exceed 8 evaluators')
         return self
 
 
 class ResolvedWeightedObjective(BootstrapDocument):
-    evaluators: tuple[IssueEvaluatorRequestEntry, ...]
-    normalized_weights: tuple[float, ...]
+    evaluators: tuple[ResolvedEvaluator, ...]
     objective_hash: Sha256
-    score_normalization: ScoreNormalizationContract = Field(default_factory=ScoreNormalizationContract)
 
     @classmethod
-    def create(cls, entries: Sequence[IssueEvaluatorRequestEntry]) -> "ResolvedWeightedObjective":
-        normalized = _normalize_weight_inputs(entries)
-        payload = {
-            "evaluators": [entry.model_dump(mode="json") for entry in entries],
-            "normalized_weights": list(normalized),
-            "score_normalization": ScoreNormalizationContract().model_dump(mode="json"),
-        }
-        return cls(evaluators=tuple(entries), normalized_weights=normalized, objective_hash=canonical_sha256(payload))
+    def create(cls, evaluators: Sequence[ResolvedEvaluator]) -> 'ResolvedWeightedObjective':
+        if not evaluators:
+            raise BootstrapConfigError('evaluators must not be empty')
+        weights = [e.weight for e in evaluators]
+        total = sum(weights)
+        normalized = tuple(e.model_copy(update={'weight': e.weight / total}) for e in evaluators)
+        payload = {'evaluators': [entry.model_dump(mode='json') for entry in normalized]}
+        return cls(evaluators=normalized, objective_hash=canonical_sha256(payload))
 
-    @model_validator(mode="after")
+    @model_validator(mode='after')
     def validate_hash(self) -> Self:
-        payload = {
-            "evaluators": [entry.model_dump(mode="json") for entry in self.evaluators],
-            "normalized_weights": list(self.normalized_weights),
-            "score_normalization": self.score_normalization.model_dump(mode="json"),
-        }
+        payload = {'evaluators': [entry.model_dump(mode='json') for entry in self.evaluators]}
         if self.objective_hash != canonical_sha256(payload):
-            raise BootstrapConfigError("objective_hash does not match normalized objective payload")
+            raise BootstrapConfigError('objective_hash does not match normalized objective payload')
         return self
 
 
@@ -286,7 +280,6 @@ class DefaultEvaluatorBundle(BootstrapDocument):
     objective: ResolvedWeightedObjective
     datasets: tuple[ImmutableDatasetReference, ...]
     definitions: tuple[ImmutableDefinitionReference, ...]
-    evaluator_lineage: tuple[EvaluatorLineageEntry, ...] = ()
 
 
 class HardGuardrail(BootstrapDocument):
@@ -298,7 +291,7 @@ class HardGuardrail(BootstrapDocument):
 class DeploymentSettings(BootstrapDocument):
     environment: str
     enabled: bool
-    eligibility: DeploymentEligibility
+    require_aligned_binding: bool
 
 
 class BootstrapSidecar(BootstrapDocument):
@@ -311,65 +304,61 @@ class BootstrapSidecar(BootstrapDocument):
     foundry_project: FoundryProjectSettings
     baseline_model: str
     allowed_models: tuple[str, ...]
+    min_candidates: int
     max_candidates: int
+    primary_metric: str
     decision_policy: DecisionPolicy
     development_dataset: ImmutableDatasetReference
     validating_dataset: ImmutableDatasetReference
+    development_definition: ImmutableDefinitionReference
+    validating_definition: ImmutableDefinitionReference
     default_evaluator_bundle: DefaultEvaluatorBundle
     max_issue_evaluators: int = MAX_ISSUE_EVALUATORS
     hard_guardrails: tuple[HardGuardrail, ...]
     deployment: DeploymentSettings
 
-    @field_validator("source_root", "package_root")
+    @field_validator('source_root')
     @classmethod
-    def validate_root_paths(cls, value: str, info) -> str:
-        if info.field_name == 'package_root' and value == '.':
-            return value
-        return _validate_safe_path(value, field=info.field_name)
+    def validate_source_root(cls, value: str) -> str:
+        return _validate_safe_path(value, field='source_root')
 
-    @field_validator("editable_paths")
+    @field_validator('package_root')
+    @classmethod
+    def validate_package_root(cls, value: str) -> str:
+        return _validate_safe_path(value, field='package_root', allow_dot=True)
+
+    @field_validator('editable_paths')
     @classmethod
     def validate_editable_paths(cls, value: Sequence[str]) -> tuple[str, ...]:
-        return validate_repository_relative_paths(value, field="editable_paths", allow_glob=True)
+        return validate_repository_relative_paths(value, field='editable_paths', allow_glob=True)
 
-    @model_validator(mode="after")
-    def validate_source_relationships(self) -> Self:
-        editable_roots = tuple(path.split('/')[0] for path in self.editable_paths)
-        _casefold_unique(editable_roots, field="editable path roots")
-        if self.max_issue_evaluators > MAX_ISSUE_EVALUATORS:
-            raise BootstrapConfigError("max_issue_evaluators cannot exceed default ceiling of 8")
-        return self
+
+class CloudResourceLedgerEntry(BootstrapDocument):
+    provider: str
+    kind: str
+    resource_id: str
+    ownership: Literal['created', 'adopted']
+    action_id: str
 
 
 class ManagedFileEntry(BootstrapDocument):
     path: str
     ownership_mode: OwnershipMode
+    owner_scope: OwnerScope
+    template_id: str
     template_base_sha256: Sha256
     applied_sha256: Sha256
     semantic_patch_id: str | None = None
 
-    @field_validator("path")
+    @field_validator('path')
     @classmethod
     def validate_path(cls, value: str) -> str:
-        return _validate_safe_path(value, field="path")
+        return _validate_safe_path(value, field='path')
 
 
 class GitHubEnvironmentLedgerEntry(BootstrapDocument):
     environment: str
     variable_names: tuple[str, ...]
-
-
-class IdentityOwnershipLedgerEntry(BootstrapDocument):
-    fic_resource_id: str | None = None
-    rbac_resource_id: str | None = None
-    foundry_resource_id: str | None = None
-
-    @field_validator("fic_resource_id", "rbac_resource_id", "foundry_resource_id")
-    @classmethod
-    def validate_optional_resource_id(cls, value: str | None, info) -> str | None:
-        if value is None:
-            return None
-        return _validate_resource_id(value, info.field_name)
 
 
 class ActivationOutcomeRecord(BootstrapDocument):
@@ -379,19 +368,19 @@ class ActivationOutcomeRecord(BootstrapDocument):
 
 class BootstrapLock(BootstrapDocument):
     engine: str
-    runtime_repository: str
+    runtime_repository: RepositoryUrl
     channel: str
-    exact_revision: str
+    runtime_commit: GitCommit
     managed_files: tuple[ManagedFileEntry, ...]
     github_environments: tuple[GitHubEnvironmentLedgerEntry, ...]
-    identity_ownership: tuple[IdentityOwnershipLedgerEntry, ...]
+    cloud_resources: tuple[CloudResourceLedgerEntry, ...]
     sidecar_paths: tuple[str, ...]
     last_activation: ActivationOutcomeRecord
 
-    @field_validator("sidecar_paths")
+    @field_validator('sidecar_paths')
     @classmethod
     def validate_sidecar_paths(cls, value: Sequence[str]) -> tuple[str, ...]:
-        return tuple(_validate_safe_path(item, field="sidecar_paths") for item in value)
+        return tuple(_validate_safe_path(v, field='sidecar_paths') for v in value)
 
 
 class SemanticPatchSpec(BootstrapDocument):
@@ -400,10 +389,10 @@ class SemanticPatchSpec(BootstrapDocument):
     match_text: str
     replacement_text: str | None = None
 
-    @field_validator("target_path")
+    @field_validator('target_path')
     @classmethod
-    def validate_target_path(cls, value: str) -> str:
-        return _validate_safe_path(value, field="target_path")
+    def validate_target(cls, value: str) -> str:
+        return _validate_safe_path(value, field='target_path')
 
 
 class TemplatePayloadSpec(BootstrapDocument):
@@ -412,15 +401,15 @@ class TemplatePayloadSpec(BootstrapDocument):
     payload: Mapping[str, object]
     semantic_patches: tuple[SemanticPatchSpec, ...] = ()
 
-    @field_validator("destination_path")
+    @field_validator('destination_path')
     @classmethod
-    def validate_destination_path(cls, value: str) -> str:
-        return _validate_safe_path(value, field="destination_path")
+    def validate_destination(cls, value: str) -> str:
+        return _validate_safe_path(value, field='destination_path')
 
-    @model_validator(mode="after")
+    @model_validator(mode='after')
     def validate_payload(self) -> Self:
-        _reject_prohibited_mapping(self.payload, field="payload")
-        safe_persisted_document(self.model_dump(mode="json"))
+        _reject_prohibited_mapping(self.payload, field='payload')
+        safe_persisted_document(self.model_dump(mode='json'))
         return self
 
 
@@ -431,6 +420,7 @@ class BootstrapAction(BootstrapDocument):
     kind: str
     target_agent_id: AgentId | None = None
     template_payload: TemplatePayloadSpec | None = None
+    diagnostics: tuple[str, ...] = ()
 
 
 class FingerprintRecord(BootstrapDocument):
@@ -443,38 +433,37 @@ class RedactedStatusInfo(BootstrapDocument):
     summary: str
 
 
-class BootstrapPlan(BootstrapDocument):
+class BootstrapPlanPayload(BootstrapDocument):
     operation_id: str
-    runtime_sha256: Sha256
-    repository_identity: str
+    runtime_repository: RepositoryUrl
+    runtime_commit: GitCommit
+    repository_identity: RepositoryIdentity
     actions: tuple[BootstrapAction, ...]
+
+
+class BootstrapPlan(BootstrapPlanPayload):
     plan_hash: Sha256
 
-    @model_validator(mode="after")
+    @model_validator(mode='after')
     def validate_hash(self) -> Self:
-        payload = self._hash_payload()
-        if self.plan_hash != canonical_sha256(payload):
-            raise BootstrapPlanError("plan_hash does not match canonical plan payload")
+        payload = BootstrapPlanPayload.model_validate(self.model_dump(mode='python', exclude={'plan_hash'}))
+        if self.plan_hash != canonical_sha256(payload.model_dump(mode='json')):
+            raise BootstrapPlanError('plan_hash does not match canonical plan payload')
         return self
 
-    def _hash_payload(self) -> dict[str, object]:
-        payload = _jsonable(self.model_dump(mode="json", exclude={"plan_hash"}))
-        _reject_prohibited_mapping(payload, field="plan")
-        return payload
-
     @classmethod
-    def create(cls, **values: object) -> "BootstrapPlan":
+    def create(cls, **values: object) -> 'BootstrapPlan':
         payload = _jsonable(dict(values))
         _reject_prohibited_mapping(payload, field='plan')
-        candidate = cls.model_construct(schema_version=1, plan_hash='0' * 64, **payload)
-        hashed = canonical_sha256(candidate._hash_payload())
-        return cls.model_validate({**payload, 'plan_hash': hashed})
+        validated = BootstrapPlanPayload.model_validate(payload)
+        return cls.model_validate({**validated.model_dump(mode='json'), 'plan_hash': canonical_sha256(validated.model_dump(mode='json'))})
 
 
-class BootstrapReceipt(BootstrapDocument):
+class BootstrapReceiptPayload(BootstrapDocument):
     operation_id: str
-    runtime_sha256: Sha256
-    repository_identity: str
+    runtime_repository: RepositoryUrl
+    runtime_commit: GitCommit
+    repository_identity: RepositoryIdentity
     plan_hash: Sha256
     before_fingerprints: tuple[FingerprintRecord, ...] = ()
     after_fingerprints: tuple[FingerprintRecord, ...] = ()
@@ -485,23 +474,24 @@ class BootstrapReceipt(BootstrapDocument):
     compensation_required_actions: tuple[str, ...] = ()
     error_info: RedactedStatusInfo | None = None
     resume_info: RedactedStatusInfo | None = None
+
+
+class BootstrapReceipt(BootstrapReceiptPayload):
     receipt_hash: Sha256
 
-    @model_validator(mode="after")
+    @model_validator(mode='after')
     def validate_hash(self) -> Self:
-        payload = _jsonable(self.model_dump(mode="json", exclude={"receipt_hash"}))
-        _reject_prohibited_mapping(payload, field="receipt")
-        if self.receipt_hash != canonical_sha256(payload):
-            raise BootstrapPlanError("receipt_hash does not match canonical receipt payload")
+        payload = BootstrapReceiptPayload.model_validate(self.model_dump(mode='python', exclude={'receipt_hash'}))
+        if self.receipt_hash != canonical_sha256(payload.model_dump(mode='json')):
+            raise BootstrapPlanError('receipt_hash does not match canonical receipt payload')
         return self
 
     @classmethod
-    def create(cls, **values: object) -> "BootstrapReceipt":
+    def create(cls, **values: object) -> 'BootstrapReceipt':
         payload = _jsonable(dict(values))
         _reject_prohibited_mapping(payload, field='receipt')
-        candidate = cls.model_construct(schema_version=1, receipt_hash='0' * 64, **payload)
-        hash_payload = _jsonable(candidate.model_dump(mode='json', exclude={'receipt_hash'}))
-        return cls.model_validate({**payload, 'receipt_hash': canonical_sha256(hash_payload)})
+        validated = BootstrapReceiptPayload.model_validate(payload)
+        return cls.model_validate({**validated.model_dump(mode='json'), 'receipt_hash': canonical_sha256(validated.model_dump(mode='json'))})
 
 
 class LegacyMigrationProposal(BootstrapDocument):
@@ -510,4 +500,4 @@ class LegacyMigrationProposal(BootstrapDocument):
     actions: tuple[BootstrapAction, ...] = ()
 
 
-__all__ = [name for name in globals() if not name.startswith("_")]
+__all__ = [name for name in globals() if not name.startswith('_')]

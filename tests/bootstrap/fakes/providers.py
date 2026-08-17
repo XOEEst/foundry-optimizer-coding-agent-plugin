@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 
-from foundry_opt.bootstrap.contracts import BootstrapPlan, BootstrapReceipt, IssueEvaluatorRequestEntry, ResolvedWeightedObjective
+from foundry_opt.bootstrap.contracts import BootstrapPlan, BootstrapReceipt, ResolvedWeightedObjective
 
 
 class FakeGitHubApply:
@@ -17,10 +17,11 @@ class FakeGitHubApply:
         self.plans.append(plan)
         return BootstrapReceipt.create(
             operation_id=plan.operation_id,
-            runtime_sha256=plan.runtime_sha256,
+            runtime_repository=plan.runtime_repository,
+            runtime_commit=plan.runtime_commit,
             repository_identity=plan.repository_identity,
             plan_hash=plan.plan_hash,
-            created_actions=[action.action_id for action in plan.actions],
+            created_actions=tuple(action.action_id for action in plan.actions),
         )
 
     def verify_changes(self, receipt: BootstrapReceipt) -> bool:
@@ -31,5 +32,5 @@ class FakeGitHubApply:
 
 
 class FakeEvaluationOnboarding:
-    def resolve_objective(self, request: Sequence[IssueEvaluatorRequestEntry]) -> ResolvedWeightedObjective:
-        return ResolvedWeightedObjective.create(request)
+    def resolve_objective(self, request: Sequence[Mapping[str, object]]) -> ResolvedWeightedObjective:
+        return ResolvedWeightedObjective.model_validate(request[0]['resolved'])

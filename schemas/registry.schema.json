@@ -7,25 +7,10 @@
           "title": "Channel",
           "type": "string"
         },
-        "deployment_client_id_variable": {
-          "title": "Deployment Client Id Variable",
-          "type": "string"
-        },
-        "deployment_environment": {
-          "title": "Deployment Environment",
-          "type": "string"
-        },
-        "optimizer_client_id_variable": {
-          "title": "Optimizer Client Id Variable",
-          "type": "string"
-        },
-        "optimizer_environment": {
-          "title": "Optimizer Environment",
-          "type": "string"
-        },
         "pin": {
           "anyOf": [
             {
+              "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
               "type": "string"
             },
             {
@@ -36,6 +21,7 @@
           "title": "Pin"
         },
         "repository": {
+          "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\\.git)?$",
           "title": "Repository",
           "type": "string"
         },
@@ -48,11 +34,7 @@
       },
       "required": [
         "repository",
-        "channel",
-        "optimizer_environment",
-        "deployment_environment",
-        "optimizer_client_id_variable",
-        "deployment_client_id_variable"
+        "channel"
       ],
       "title": "DistributionSettings",
       "type": "object"
@@ -93,16 +75,19 @@
       "title": "ExplicitAgentEntry",
       "type": "object"
     },
-    "IdentitySettings": {
+    "GitHubSettings": {
       "additionalProperties": false,
       "properties": {
-        "kind": {
-          "const": "azure_subscription",
-          "title": "Kind",
+        "client_id_variable": {
+          "title": "Client Id Variable",
           "type": "string"
         },
-        "resource_id": {
-          "title": "Resource Id",
+        "deployment_environment": {
+          "title": "Deployment Environment",
+          "type": "string"
+        },
+        "optimizer_environment": {
+          "title": "Optimizer Environment",
           "type": "string"
         },
         "schema_version": {
@@ -113,8 +98,46 @@
         }
       },
       "required": [
-        "kind",
-        "resource_id"
+        "optimizer_environment",
+        "deployment_environment",
+        "client_id_variable"
+      ],
+      "title": "GitHubSettings",
+      "type": "object"
+    },
+    "IdentitySettings": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "user_assigned_managed_identity",
+            "entra_application",
+            "unresolved_migration"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "resource_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resource Id"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind"
       ],
       "title": "IdentitySettings",
       "type": "object"
@@ -132,6 +155,9 @@
     "distribution": {
       "$ref": "#/$defs/DistributionSettings"
     },
+    "github": {
+      "$ref": "#/$defs/GitHubSettings"
+    },
     "identity": {
       "$ref": "#/$defs/IdentitySettings"
     },
@@ -144,6 +170,7 @@
   },
   "required": [
     "distribution",
+    "github",
     "identity",
     "agents"
   ],

@@ -128,6 +128,7 @@
       "type": "string"
     },
     "repository_identity": {
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
       "title": "Repository Identity",
       "type": "string"
     },
@@ -142,9 +143,14 @@
       ],
       "default": null
     },
-    "runtime_sha256": {
-      "pattern": "^[0-9a-f]{64}$",
-      "title": "Runtime Sha256",
+    "runtime_commit": {
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+      "title": "Runtime Commit",
+      "type": "string"
+    },
+    "runtime_repository": {
+      "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\\.git)?$",
+      "title": "Runtime Repository",
       "type": "string"
     },
     "schema_version": {
@@ -164,7 +170,8 @@
   },
   "required": [
     "operation_id",
-    "runtime_sha256",
+    "runtime_repository",
+    "runtime_commit",
     "repository_identity",
     "plan_hash",
     "receipt_hash"

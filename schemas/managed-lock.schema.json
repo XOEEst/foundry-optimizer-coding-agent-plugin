@@ -38,6 +38,50 @@
       "title": "ActivationOutcomeRecord",
       "type": "object"
     },
+    "CloudResourceLedgerEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "action_id": {
+          "title": "Action Id",
+          "type": "string"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "ownership": {
+          "enum": [
+            "created",
+            "adopted"
+          ],
+          "title": "Ownership",
+          "type": "string"
+        },
+        "provider": {
+          "title": "Provider",
+          "type": "string"
+        },
+        "resource_id": {
+          "title": "Resource Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "provider",
+        "kind",
+        "resource_id",
+        "ownership",
+        "action_id"
+      ],
+      "title": "CloudResourceLedgerEntry",
+      "type": "object"
+    },
     "GitHubEnvironmentLedgerEntry": {
       "additionalProperties": false,
       "properties": {
@@ -66,61 +110,21 @@
       "title": "GitHubEnvironmentLedgerEntry",
       "type": "object"
     },
-    "IdentityOwnershipLedgerEntry": {
-      "additionalProperties": false,
-      "properties": {
-        "fic_resource_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Fic Resource Id"
-        },
-        "foundry_resource_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Foundry Resource Id"
-        },
-        "rbac_resource_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Rbac Resource Id"
-        },
-        "schema_version": {
-          "const": 1,
-          "default": 1,
-          "title": "Schema Version",
-          "type": "integer"
-        }
-      },
-      "title": "IdentityOwnershipLedgerEntry",
-      "type": "object"
-    },
     "ManagedFileEntry": {
       "additionalProperties": false,
       "properties": {
         "applied_sha256": {
           "pattern": "^[0-9a-f]{64}$",
           "title": "Applied Sha256",
+          "type": "string"
+        },
+        "owner_scope": {
+          "enum": [
+            "repository",
+            "agent",
+            "shared-runtime"
+          ],
+          "title": "Owner Scope",
           "type": "string"
         },
         "ownership_mode": {
@@ -158,11 +162,17 @@
           "pattern": "^[0-9a-f]{64}$",
           "title": "Template Base Sha256",
           "type": "string"
+        },
+        "template_id": {
+          "title": "Template Id",
+          "type": "string"
         }
       },
       "required": [
         "path",
         "ownership_mode",
+        "owner_scope",
+        "template_id",
         "template_base_sha256",
         "applied_sha256"
       ],
@@ -176,12 +186,15 @@
       "title": "Channel",
       "type": "string"
     },
+    "cloud_resources": {
+      "items": {
+        "$ref": "#/$defs/CloudResourceLedgerEntry"
+      },
+      "title": "Cloud Resources",
+      "type": "array"
+    },
     "engine": {
       "title": "Engine",
-      "type": "string"
-    },
-    "exact_revision": {
-      "title": "Exact Revision",
       "type": "string"
     },
     "github_environments": {
@@ -189,13 +202,6 @@
         "$ref": "#/$defs/GitHubEnvironmentLedgerEntry"
       },
       "title": "Github Environments",
-      "type": "array"
-    },
-    "identity_ownership": {
-      "items": {
-        "$ref": "#/$defs/IdentityOwnershipLedgerEntry"
-      },
-      "title": "Identity Ownership",
       "type": "array"
     },
     "last_activation": {
@@ -208,7 +214,13 @@
       "title": "Managed Files",
       "type": "array"
     },
+    "runtime_commit": {
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+      "title": "Runtime Commit",
+      "type": "string"
+    },
     "runtime_repository": {
+      "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\\.git)?$",
       "title": "Runtime Repository",
       "type": "string"
     },
@@ -230,10 +242,10 @@
     "engine",
     "runtime_repository",
     "channel",
-    "exact_revision",
+    "runtime_commit",
     "managed_files",
     "github_environments",
-    "identity_ownership",
+    "cloud_resources",
     "sidecar_paths",
     "last_activation"
   ],

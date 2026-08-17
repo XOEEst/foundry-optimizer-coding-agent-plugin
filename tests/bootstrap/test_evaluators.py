@@ -5,50 +5,50 @@ from pydantic import ValidationError
 
 from foundry_opt.bootstrap.contracts import (
     DefaultEvaluatorBundle,
+    EvaluatorNormalization,
     EvaluatorReference,
     ImmutableDatasetReference,
     ImmutableDefinitionReference,
     IssueEvaluatorRequest,
     IssueEvaluatorRequestEntry,
+    ResolvedEvaluator,
     ResolvedWeightedObjective,
-    ScoreNormalizationContract,
 )
 from foundry_opt.bootstrap.errors import BootstrapConfigError
 
 
 def test_issue_evaluators_normalize_equal_weights_when_omitted() -> None:
     resolved = ResolvedWeightedObjective.create((
-        IssueEvaluatorRequestEntry(evaluator=EvaluatorReference(evaluator_id='azureai://accounts/a/projects/p/evaluators/quality/versions/1', provenance='reused_existing')),
-        IssueEvaluatorRequestEntry(evaluator=EvaluatorReference(evaluator_id='azureai://accounts/a/projects/p/evaluators/safety/versions/1', provenance='auto_generated_unreviewed')),
+        ResolvedEvaluator(reference=EvaluatorReference(evaluator_id='azureai://accounts/a/projects/p/evaluators/quality/versions/1', provenance='reused_existing'), normalization=EvaluatorNormalization(kind='pass_fail'), weight=1.0),
+        ResolvedEvaluator(reference=EvaluatorReference(evaluator_id='azureai://built-in/evaluators/groundedness', provenance='auto_generated_unreviewed'), normalization=EvaluatorNormalization(kind='scalar', source_min=0.0, source_max=5.0), weight=1.0),
     ))
-    assert resolved.normalized_weights == (0.5, 0.5)
+    assert tuple(item.weight for item in resolved.evaluators) == (0.5, 0.5)
 
 
-def test_issue_evaluators_mixed_weights_default_omitted_to_one() -> None:
-    resolved = ResolvedWeightedObjective.create((
-        IssueEvaluatorRequestEntry(evaluator=EvaluatorReference(evaluator_id='azureai://accounts/a/projects/p/evaluators/quality/versions/1', provenance='reused_existing'), weight=2.0),
-        IssueEvaluatorRequestEntry(evaluator=EvaluatorReference(evaluator_id='azureai://accounts/a/projects/p/evaluators/safety/versions/1', provenance='issue_supplied_existing')),
-    ))
-    assert resolved.normalized_weights == pytest.approx((2.0 / 3.0, 1.0 / 3.0))
+def test_issue_request_accepts_builtin_and_versioned_ids() -> None:
+    request = IssueEvaluatorRequest.from_document({'evaluators': [
+        {'evaluator_id': 'azureai://built-in/evaluators/groundedness'},
+        {'evaluator_id': 'azureai://accounts/a/projects/p/evaluators/quality/versions/1', 'weight': 2.0},
+    ]})
+    assert len(request.evaluators) == 2
 
 
 def test_issue_evaluator_request_rejects_invalid_weight_and_too_many() -> None:
     with pytest.raises(BootstrapConfigError):
-        IssueEvaluatorRequest.from_document({'evaluators': [{'evaluator': {'evaluator_id': 'azureai://accounts/a/projects/p/evaluators/metric/versions/1', 'provenance': 'reused_existing'}, 'weight': 0.0}]})
+        IssueEvaluatorRequest.from_document({'evaluators': [{'evaluator_id': 'azureai://built-in/evaluators/groundedness', 'weight': 0.0}]})
     with pytest.raises(BootstrapConfigError):
-        IssueEvaluatorRequest.from_document({'evaluators': [{'evaluator': {'evaluator_id': f'azureai://accounts/a/projects/p/evaluators/metric{i}/versions/1', 'provenance': 'reused_existing'}} for i in range(9)]})
+        IssueEvaluatorRequest.from_document({'evaluators': [{'evaluator_id': f'azureai://built-in/evaluators/metric{i}'} for i in range(9)]})
 
 
-def test_score_normalization_contract_is_fixed_zero_to_one() -> None:
-    assert ScoreNormalizationContract().normalized_range == (0.0, 1.0)
+def test_scalar_normalization_requires_bounds() -> None:
     with pytest.raises(ValidationError):
-        ScoreNormalizationContract(minimum=-1.0)
+        EvaluatorNormalization(kind='scalar')
 
 
 def test_default_evaluator_bundle_keeps_immutable_refs() -> None:
     bundle = DefaultEvaluatorBundle(
-        objective=ResolvedWeightedObjective.create((IssueEvaluatorRequestEntry(evaluator=EvaluatorReference(evaluator_id='azureai://accounts/a/projects/p/evaluators/quality/versions/1', provenance='reused_existing')),)),
+        objective=ResolvedWeightedObjective.create((ResolvedEvaluator(reference=EvaluatorReference(evaluator_id='azureai://accounts/a/projects/p/evaluators/quality/versions/1', provenance='reused_existing'), normalization=EvaluatorNormalization(kind='pass_fail'), weight=1.0),)),
         datasets=(ImmutableDatasetReference(dataset_id='azureai://accounts/a/projects/p/data/dataset/versions/2026.08.17'),),
-        definitions=(ImmutableDefinitionReference(definition_id='azureai://accounts/a/projects/p/evaluationDefinitions/definition/versions/1'),),
+        definitions=(ImmutableDefinitionReference(definition_id='eval_development'),),
     )
-    assert bundle.datasets[0].dataset_id.endswith('/versions/2026.08.17')
+    assert bundle.definitions[0].definition_id == 'eval_development'
