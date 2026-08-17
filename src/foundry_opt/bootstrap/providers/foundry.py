@@ -39,6 +39,10 @@ from foundry_opt.models import FrozenModel
 
 _CONTENT_SAFETY_ID = 'azureai://built-in/evaluators/content_safety'
 _IMMUTABLE_DATASET_URI_PREFIX = 'azureai://accounts/'
+_PROVIDER_STATE_SCHEMA_VERSION = 1
+_MAX_PROVIDER_STATE_BYTES = 32768
+_MAX_PROVIDER_STATE_RESOURCES = 128
+_OWNERSHIP_TAG = 'foundry_opt_operation'
 
 
 def _as_mapping(value: object) -> Mapping[str, object]:
@@ -147,7 +151,16 @@ class FoundryOperationDeadlineError(FoundryAdapterError):
 
 
 class FoundryRollbackError(FoundryAdapterError):
-    pass
+    def __init__(self, message: str, *, kind: str, retryable: bool = False, status_code: int | None = None, code: str | None = None, compensation_receipt: BootstrapReceipt | None = None, provider_state: Mapping[str, object] | None = None) -> None:
+        super().__init__(message, kind=kind, retryable=retryable, status_code=status_code, code=code)
+        self.compensation_receipt = compensation_receipt
+        self.provider_state = dict(provider_state or {})
+
+
+def rollback_failure_details(exc: BaseException) -> tuple[BootstrapReceipt | None, Mapping[str, object]]:
+    if isinstance(exc, FoundryRollbackError):
+        return exc.compensation_receipt, dict(exc.provider_state)
+    return None, {}
 
 
 class FoundryRejectedGenerationError(FoundryAdapterError):
@@ -161,6 +174,20 @@ class FoundryOperationHandle:
     continuation_token: str | None
     polling_url: str | None
     created: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _ResourceRecord:
+    action_id: str
+    resource_id: str
+    name: str
+    version: str
+    kind: str
+    disposition: str
+    fingerprint: str | None
+    rollback_order: int | None
+    resource_type: str | None = None
+    ownership_token: str | None = None
 
 
 class FoundryCapabilityProbe(FrozenModel):
@@ -180,7 +207,83 @@ class FoundryAdapter:
         self._time = time_source or time.monotonic
         self._sleep = sleep or time.sleep
         self._default_poll_interval = default_poll_interval
-        self._receipt_resources: dict[str, tuple[str, ...]] = {}
+        self._provider_state: dict[str, object] | None = None
+
+    def _ownership_token(self, operation_id: str, action_id: str) -> str:
+        return hashlib.sha256(_canonical_json({'operation_id': operation_id, 'action_id': action_id, 'project_endpoint': self._project_endpoint}).encode('utf-8')).hexdigest()[:32]
+
+    def _with_ownership_tags(self, tags: Mapping[str, str] | None, *, operation_id: str, action_id: str) -> dict[str, str]:
+        merged = {str(key): str(value) for key, value in dict(tags or {}).items()}
+        merged[_OWNERSHIP_TAG] = self._ownership_token(operation_id, action_id)
+        return merged
+
+    def _resource_state_payload(self, resources: Sequence[_ResourceRecord]) -> list[dict[str, object]]:
+        return [
+            {
+                'action_id': item.action_id,
+                'id': item.resource_id,
+                'name': item.name,
+                'version': item.version,
+                'kind': item.kind,
+                'disposition': item.disposition,
+                'resource_type': item.resource_type,
+                'fingerprint': item.fingerprint,
+                'rollback_order': item.rollback_order,
+                'ownership_token': item.ownership_token,
+            }
+            for item in resources
+        ]
+
+    def _binding_payload(self, *, receipt_hash: str, operation_id: str, repository_identity: str, plan_hash: str) -> Mapping[str, object]:
+        return {'receipt_hash': receipt_hash, 'operation_id': operation_id, 'repository_identity': repository_identity, 'plan_hash': plan_hash}
+
+    def _state_hash(self, state: Mapping[str, object]) -> str:
+        payload = {
+            'schema_version': state.get('schema_version'),
+            'binding': self._binding_payload(receipt_hash=str(state.get('receipt_hash') or ''), operation_id=str(state.get('operation_id') or ''), repository_identity=str(state.get('repository_identity') or ''), plan_hash=str(state.get('plan_hash') or '')),
+            'resources': state.get('resources'),
+            'rollback_order': state.get('rollback_order'),
+        }
+        return hashlib.sha256(_canonical_json(payload).encode('utf-8')).hexdigest()
+
+    def _validate_provider_state_bounds(self, resources: Sequence[_ResourceRecord]) -> None:
+        if len(resources) > _MAX_PROVIDER_STATE_RESOURCES:
+            raise FoundryPrerequisiteError('provider state resource count exceeds safe bound', kind='prerequisite')
+        for resource in resources:
+            if len(_canonical_json({'action_id': resource.action_id, 'id': resource.resource_id, 'name': resource.name, 'version': resource.version, 'kind': resource.kind, 'disposition': resource.disposition, 'resource_type': resource.resource_type, 'fingerprint': resource.fingerprint, 'rollback_order': resource.rollback_order, 'ownership_token': resource.ownership_token}).encode('utf-8')) > (_MAX_PROVIDER_STATE_BYTES // 4):
+                raise FoundryPrerequisiteError('provider state resource entry exceeds safe bound', kind='prerequisite')
+
+    def _validate_state_document_bounds(self, state: Mapping[str, object]) -> None:
+        encoded = _canonical_json(state).encode('utf-8')
+        if len(encoded) > _MAX_PROVIDER_STATE_BYTES:
+            raise FoundryPrerequisiteError('provider state exceeds safe persisted size', kind='prerequisite')
+
+    def _validate_plan_bounds(self, plan: BootstrapPlan) -> None:
+        actions = [action for action in self.plan_resources(plan) if action.kind == 'dataset']
+        if len(actions) > _MAX_PROVIDER_STATE_RESOURCES:
+            raise FoundryPrerequisiteError('provider state resource count exceeds safe bound', kind='prerequisite')
+        worst_case_resources = []
+        for index, action in enumerate(actions, start=1):
+            dataset_name, dataset_version, dataset_uri, dataset_type = self._dataset_request_from_action(action)
+            worst_case_resources.append(_ResourceRecord(action_id=action.action_id, resource_id=f'{_IMMUTABLE_DATASET_URI_PREFIX}accounts-max/projects/max/data/{dataset_name}/versions/{dataset_version}', name=dataset_name, version=dataset_version, kind='dataset', disposition='created', fingerprint=_fingerprint_dataset_content(dataset_uri, dataset_type), rollback_order=index, resource_type=dataset_type, ownership_token=self._ownership_token(plan.operation_id, action.action_id)))
+        self._validate_provider_state_bounds(worst_case_resources)
+        preview_receipt = BootstrapReceipt.create(operation_id=plan.operation_id, runtime_repository=plan.runtime_repository, runtime_commit=plan.runtime_commit, repository_identity=plan.repository_identity, plan_hash=plan.plan_hash)
+        self._validate_state_document_bounds(self._provider_state_from_receipt(preview_receipt, worst_case_resources))
+
+    def _resource_live_matches(self, resource: _ResourceRecord, live: Mapping[str, object] | None, *, require_ownership: bool) -> bool:
+        if live is None:
+            return False
+        if str(live.get('id')) != resource.resource_id:
+            return False
+        if resource.resource_type and str(live.get('type')) != resource.resource_type:
+            return False
+        if resource.fingerprint is not None and str(live.get('content_fingerprint')) != resource.fingerprint:
+            return False
+        if require_ownership:
+            tags = live.get('tags')
+            if not isinstance(tags, Mapping) or str(tags.get(_OWNERSHIP_TAG) or '') != str(resource.ownership_token or ''):
+                return False
+        return True
 
     def _beta(self, attr: str) -> object:
         beta = getattr(self._client, 'beta', None)
@@ -305,7 +408,8 @@ class FoundryAdapter:
         getter = getattr(self._client.datasets, 'get', None)
         if callable(getter):
             try:
-                return self._normalize_dataset(getter(dataset_name, dataset_version))
+                raw = _as_mapping(getter(dataset_name, dataset_version))
+                return self._normalize_dataset(raw, fingerprint=_fingerprint_dataset_content(str(raw.get('data_uri') or raw.get('dataUri') or ''), str(raw.get('type') or '')))
             except ResourceNotFoundError:
                 return None
             except Exception as exc:
@@ -320,18 +424,21 @@ class FoundryAdapter:
         dataset_id = data.get('id')
         if not isinstance(dataset_id, str) or not dataset_id.startswith(_IMMUTABLE_DATASET_URI_PREFIX):
             raise FoundryPrerequisiteError('dataset immutable identifier is invalid', kind='prerequisite')
-        normalized = {'name': data.get('name'), 'version': data.get('version'), 'id': dataset_id, 'type': data.get('type'), 'data_uri': data.get('data_uri') or data.get('dataUri'), 'content_fingerprint': fingerprint, 'raw': _plain(data)}
+        normalized = {'name': data.get('name'), 'version': data.get('version'), 'id': dataset_id, 'type': data.get('type'), 'data_uri': data.get('data_uri') or data.get('dataUri'), 'content_fingerprint': fingerprint, 'tags': _plain(data.get('tags') or {}), 'raw': _plain(data)}
         return normalized
 
-    def create_or_adopt_dataset(self, *, dataset_name: str, dataset_version: str, dataset_content_uri: str, dataset_type: str, connection_name: str | None = None, description: str | None = None, tags: Mapping[str, str] | None = None) -> Mapping[str, object]:
+    def create_or_adopt_dataset(self, *, operation_id: str, action_id: str, dataset_name: str, dataset_version: str, dataset_content_uri: str, dataset_type: str, connection_name: str | None = None, description: str | None = None, tags: Mapping[str, str] | None = None) -> Mapping[str, object]:
         expected_fingerprint = _fingerprint_dataset_content(dataset_content_uri, dataset_type)
+        ownership_token = self._ownership_token(operation_id, action_id)
         existing = self.get_dataset(dataset_name, dataset_version)
         if existing is not None:
             if existing.get('type') != dataset_type or existing.get('data_uri') != dataset_content_uri:
                 raise FoundryPrerequisiteError('existing dataset version does not match requested content', kind='prerequisite')
-            return {'created': False, 'adopted': True, 'replayed': False, 'dataset': {**existing, 'content_fingerprint': expected_fingerprint}, 'resource_id': str(existing['id'])}
+            existing_tags = existing.get('tags')
+            owned = isinstance(existing_tags, Mapping) and str(existing_tags.get(_OWNERSHIP_TAG) or '') == ownership_token
+            return {'created': owned, 'adopted': not owned, 'replayed': False, 'dataset': {**existing, 'content_fingerprint': expected_fingerprint}, 'resource_id': str(existing['id']), 'ownership_token': ownership_token}
         payload_cls = FileDatasetVersion if dataset_type == 'uri_file' else FolderDatasetVersion
-        payload = payload_cls(data_uri=dataset_content_uri, type=dataset_type, connection_name=connection_name, description=description, tags=dict(tags or {}))
+        payload = payload_cls(data_uri=dataset_content_uri, type=dataset_type, connection_name=connection_name, description=description, tags=self._with_ownership_tags(tags, operation_id=operation_id, action_id=action_id))
         try:
             created = self._client.datasets.create_or_update(dataset_name, dataset_version, payload)
         except Exception as exc:
@@ -346,6 +453,7 @@ class FoundryAdapter:
             'replayed': False,
             'dataset': normalized,
             'resource_id': str(normalized['id']),
+            'ownership_token': ownership_token,
         }
 
     def resolve_builtin_content_safety(self) -> Mapping[str, object]:
@@ -532,20 +640,113 @@ class FoundryAdapter:
         payload = action.diagnostics
         if len(payload) < 4:
             raise FoundryPrerequisiteError('dataset action diagnostics are incomplete', kind='prerequisite')
-        return str(payload[0]), str(payload[1]), str(payload[2]), str(payload[3])
+        dataset_name, dataset_version, dataset_uri, dataset_type = str(payload[0]), str(payload[1]), str(payload[2]), str(payload[3])
+        if len(dataset_uri.encode('utf-8')) > (_MAX_PROVIDER_STATE_BYTES // 4):
+            raise FoundryPrerequisiteError('dataset action content uri exceeds safe persisted bound', kind='prerequisite')
+        return dataset_name, dataset_version, dataset_uri, dataset_type
 
     def _fingerprints_for_dataset(self, action_id: str, dataset: Mapping[str, object]) -> tuple[FingerprintRecord, FingerprintRecord]:
         before = FingerprintRecord(label=f'{action_id}:before', sha256=str(dataset.get('content_fingerprint') or hashlib.sha256(str(dataset.get('id')).encode('utf-8')).hexdigest()))
         after = FingerprintRecord(label=f'{action_id}:after', sha256=str(dataset.get('content_fingerprint') or hashlib.sha256(_canonical_json(dataset).encode('utf-8')).hexdigest()))
         return before, after
 
+    def _build_resource_record(self, *, action_id: str, result: Mapping[str, object], rollback_order: int | None) -> _ResourceRecord:
+        dataset = result.get('dataset')
+        if not isinstance(dataset, Mapping):
+            raise FoundryPrerequisiteError('dataset result missing dataset mapping', kind='prerequisite')
+        return _ResourceRecord(
+            action_id=action_id,
+            resource_id=str(result['resource_id']),
+            name=str(dataset.get('name') or ''),
+            version=str(dataset.get('version') or ''),
+            kind='dataset',
+            disposition='created' if bool(result.get('created')) else 'adopted',
+            fingerprint=str(dataset.get('content_fingerprint')) if dataset.get('content_fingerprint') else None,
+            rollback_order=rollback_order,
+            resource_type=str(dataset.get('type') or ''),
+            ownership_token=str(result.get('ownership_token')) if result.get('ownership_token') else None,
+        )
+
+    def _provider_state_from_receipt(self, receipt: BootstrapReceipt, resources: Sequence[_ResourceRecord]) -> dict[str, object]:
+        self._validate_provider_state_bounds(resources)
+        resource_state = self._resource_state_payload(resources)
+        state: dict[str, object] = {
+            'schema_version': _PROVIDER_STATE_SCHEMA_VERSION,
+            'receipt_hash': receipt.receipt_hash,
+            'operation_id': receipt.operation_id,
+            'repository_identity': receipt.repository_identity,
+            'plan_hash': receipt.plan_hash,
+            'binding_hash': hashlib.sha256(_canonical_json(self._binding_payload(receipt_hash=receipt.receipt_hash, operation_id=receipt.operation_id, repository_identity=receipt.repository_identity, plan_hash=receipt.plan_hash)).encode('utf-8')).hexdigest(),
+            'resources': resource_state,
+            'rollback_order': [item.resource_id for item in sorted((resource for resource in resources if resource.disposition == 'created' and resource.rollback_order is not None), key=lambda item: int(item.rollback_order or 0), reverse=True)],
+        }
+        state['state_hash'] = self._state_hash(state)
+        self._validate_state_document_bounds(state)
+        return json.loads(_canonical_json(state))
+
+    def export_provider_state(self, receipt: BootstrapReceipt) -> Mapping[str, object]:
+        resources = self._current_resource_records(receipt)
+        state = self._provider_state_from_receipt(receipt, resources)
+        self._provider_state = state
+        return state
+
+    def _validate_provider_state_binding(self, receipt: BootstrapReceipt, state: Mapping[str, object]) -> None:
+        if state.get('schema_version') != _PROVIDER_STATE_SCHEMA_VERSION:
+            raise FoundryPrerequisiteError('provider state schema_version mismatch', kind='prerequisite')
+        if state.get('receipt_hash') != receipt.receipt_hash or state.get('operation_id') != receipt.operation_id:
+            raise FoundryPrerequisiteError('provider state receipt binding mismatch', kind='prerequisite')
+        if state.get('repository_identity') != receipt.repository_identity or state.get('plan_hash') != receipt.plan_hash:
+            raise FoundryPrerequisiteError('provider state repository binding mismatch', kind='prerequisite')
+        expected = hashlib.sha256(_canonical_json(self._binding_payload(receipt_hash=receipt.receipt_hash, operation_id=receipt.operation_id, repository_identity=receipt.repository_identity, plan_hash=receipt.plan_hash)).encode('utf-8')).hexdigest()
+        if state.get('binding_hash') != expected:
+            raise FoundryPrerequisiteError('provider state binding hash mismatch', kind='prerequisite')
+        if state.get('state_hash') != self._state_hash(state):
+            raise FoundryPrerequisiteError('provider state hash mismatch', kind='prerequisite')
+
+    def _resource_records_from_state(self, state: Mapping[str, object]) -> tuple[_ResourceRecord, ...]:
+        resources = state.get('resources')
+        if not isinstance(resources, Sequence) or isinstance(resources, (str, bytes, bytearray)):
+            raise FoundryPrerequisiteError('provider state resources are invalid', kind='prerequisite')
+        records: list[_ResourceRecord] = []
+        for item in resources:
+            if not isinstance(item, Mapping):
+                raise FoundryPrerequisiteError('provider state resource entry is invalid', kind='prerequisite')
+            records.append(_ResourceRecord(action_id=str(item.get('action_id') or ''), resource_id=str(item.get('id') or ''), name=str(item.get('name') or ''), version=str(item.get('version') or ''), kind=str(item.get('kind') or ''), disposition=str(item.get('disposition') or ''), fingerprint=str(item.get('fingerprint')) if item.get('fingerprint') is not None else None, rollback_order=int(item['rollback_order']) if isinstance(item.get('rollback_order'), int) else None, resource_type=str(item.get('resource_type')) if item.get('resource_type') is not None else None, ownership_token=str(item.get('ownership_token')) if item.get('ownership_token') is not None else None))
+        self._validate_provider_state_bounds(records)
+        return tuple(records)
+
+    def _current_resource_records(self, receipt: BootstrapReceipt) -> tuple[_ResourceRecord, ...]:
+        if self._provider_state is None:
+            raise FoundryPrerequisiteError('provider state unavailable for receipt export', kind='prerequisite')
+        self._validate_provider_state_binding(receipt, self._provider_state)
+        return self._resource_records_from_state(self._provider_state)
+
+    def restore_provider_state(self, mapping: Mapping[str, object]) -> None:
+        encoded = _canonical_json(mapping).encode('utf-8')
+        state = json.loads(encoded.decode('utf-8'))
+        self._resource_records_from_state(state)
+        if state.get('schema_version') != _PROVIDER_STATE_SCHEMA_VERSION:
+            raise FoundryPrerequisiteError('provider state schema_version mismatch', kind='prerequisite')
+        for field in ('receipt_hash', 'operation_id', 'repository_identity', 'plan_hash', 'binding_hash', 'state_hash'):
+            value = state.get(field)
+            if not isinstance(value, str) or not value:
+                raise FoundryPrerequisiteError(f'provider state {field} is invalid', kind='prerequisite')
+        expected = hashlib.sha256(_canonical_json(self._binding_payload(receipt_hash=state['receipt_hash'], operation_id=state['operation_id'], repository_identity=state['repository_identity'], plan_hash=state['plan_hash'])).encode('utf-8')).hexdigest()
+        if state.get('binding_hash') != expected:
+            raise FoundryPrerequisiteError('provider state binding hash mismatch', kind='prerequisite')
+        if state.get('state_hash') != self._state_hash(state):
+            raise FoundryPrerequisiteError('provider state hash mismatch', kind='prerequisite')
+        self._validate_state_document_bounds(state)
+        self._provider_state = state
+
     def apply_resources(self, plan: BootstrapPlan) -> BootstrapReceipt:
+        self._validate_plan_bounds(plan)
         created: list[str] = []
         adopted: list[str] = []
         changed: list[str] = []
         skipped: list[str] = []
         created_resource_ids: list[str] = []
-        all_resource_ids: list[str] = []
+        resource_records: list[_ResourceRecord] = []
         before_fingerprints: list[FingerprintRecord] = []
         after_fingerprints: list[FingerprintRecord] = []
         try:
@@ -554,47 +755,45 @@ class FoundryAdapter:
                     skipped.append(action.action_id)
                     continue
                 dataset_name, dataset_version, dataset_uri, dataset_type = self._dataset_request_from_action(action)
-                result = self.create_or_adopt_dataset(dataset_name=dataset_name, dataset_version=dataset_version, dataset_content_uri=dataset_uri, dataset_type=dataset_type)
+                result = self.create_or_adopt_dataset(operation_id=plan.operation_id, action_id=action.action_id, dataset_name=dataset_name, dataset_version=dataset_version, dataset_content_uri=dataset_uri, dataset_type=dataset_type)
                 dataset = result['dataset']
                 before_fp, after_fp = self._fingerprints_for_dataset(action.action_id, dataset)
                 before_fingerprints.append(before_fp)
                 after_fingerprints.append(after_fp)
                 resource_id = str(result['resource_id'])
-                all_resource_ids.append(resource_id)
                 if result['created']:
                     created.append(action.action_id)
                     created_resource_ids.append(resource_id)
+                    resource_records.append(self._build_resource_record(action_id=action.action_id, result=result, rollback_order=len(created_resource_ids)))
                 elif result['adopted']:
                     adopted.append(action.action_id)
+                    resource_records.append(self._build_resource_record(action_id=action.action_id, result=result, rollback_order=None))
                 elif result.get('replayed'):
                     changed.append(action.action_id)
                 else:
                     skipped.append(action.action_id)
             receipt = BootstrapReceipt.create(operation_id=plan.operation_id, runtime_repository=plan.runtime_repository, runtime_commit=plan.runtime_commit, repository_identity=plan.repository_identity, plan_hash=plan.plan_hash, before_fingerprints=tuple(before_fingerprints), after_fingerprints=tuple(after_fingerprints), created_actions=tuple(created), adopted_actions=tuple(adopted), changed_actions=tuple(changed), skipped_actions=tuple(skipped), compensation_required_actions=tuple(created_resource_ids))
+            self._provider_state = self._provider_state_from_receipt(receipt, resource_records)
         except Exception as exc:
             compensation_receipt = BootstrapReceipt.create(operation_id=plan.operation_id, runtime_repository=plan.runtime_repository, runtime_commit=plan.runtime_commit, repository_identity=plan.repository_identity, plan_hash=plan.plan_hash, before_fingerprints=tuple(before_fingerprints), after_fingerprints=tuple(after_fingerprints), created_actions=tuple(created), adopted_actions=tuple(adopted), changed_actions=tuple(changed), skipped_actions=tuple(skipped), compensation_required_actions=tuple(created_resource_ids), error_info=RedactedStatusInfo(code='apply_failed', summary='resource apply failed'))
+            if created or adopted:
+                self._provider_state = self._provider_state_from_receipt(compensation_receipt, resource_records)
+            if not created_resource_ids:
+                raise self._classify_error(exc) from None
             try:
                 self.rollback_resources(compensation_receipt)
             except FoundryRollbackError as rollback_exc:
                 raise rollback_exc from None
             raise self._classify_error(exc) from None
-        self._receipt_resources[receipt.receipt_hash] = tuple(all_resource_ids)
         return receipt
 
     def verify_resources(self, receipt: BootstrapReceipt) -> bool:
-        resources = self._receipt_resources.get(receipt.receipt_hash)
-        if resources is None:
-            return False
-        for resource_id in resources:
-            if not isinstance(resource_id, str) or not resource_id.startswith(_IMMUTABLE_DATASET_URI_PREFIX):
+        resources = self._current_resource_records(receipt)
+        for resource in resources:
+            if resource.kind != 'dataset' or not resource.resource_id.startswith(_IMMUTABLE_DATASET_URI_PREFIX):
                 continue
-            marker = '/data/'
-            version_marker = '/versions/'
-            if marker not in resource_id or version_marker not in resource_id:
-                return False
-            name = resource_id.split(marker, 1)[1].split(version_marker, 1)[0]
-            version = resource_id.rsplit(version_marker, 1)[1]
-            if self.get_dataset(name, version) is None:
+            live = self.get_dataset(resource.name, resource.version)
+            if not self._resource_live_matches(resource, live, require_ownership=(resource.disposition == 'created')):
                 return False
         return True
 
@@ -603,21 +802,40 @@ class FoundryAdapter:
         if not callable(deleter):
             return
         failures: list[str] = []
-        for resource_id in receipt.compensation_required_actions:
-            if not isinstance(resource_id, str) or not resource_id.startswith(_IMMUTABLE_DATASET_URI_PREFIX):
+        try:
+            resources = self._current_resource_records(receipt)
+        except FoundryAdapterError as exc:
+            raise FoundryRollbackError(str(exc), kind='prerequisite', retryable=False) from exc
+        rollback_order = self._provider_state.get('rollback_order') if isinstance(self._provider_state, Mapping) else None
+        if not isinstance(rollback_order, Sequence) or isinstance(rollback_order, (str, bytes, bytearray)):
+            raise FoundryRollbackError('provider state rollback order is invalid', kind='prerequisite', retryable=False, compensation_receipt=receipt, provider_state=self.export_provider_state(receipt))
+        by_id = {resource.resource_id: resource for resource in resources if resource.disposition == 'created'}
+        failures_state = self.export_provider_state(receipt)
+        for resource_id in rollback_order:
+            resource = by_id.get(resource_id)
+            if resource is None or resource.kind != 'dataset' or not resource.resource_id.startswith(_IMMUTABLE_DATASET_URI_PREFIX):
                 continue
-            marker = '/data/'
-            version_marker = '/versions/'
-            if marker not in resource_id or version_marker not in resource_id:
+            live = self.get_dataset(resource.name, resource.version)
+            if live is None:
                 continue
-            name = resource_id.split(marker, 1)[1].split(version_marker, 1)[0]
-            version = resource_id.rsplit(version_marker, 1)[1]
+            if not self._resource_live_matches(resource, live, require_ownership=True):
+                failures.append(resource_id)
+                continue
             try:
-                deleter(name, version)
+                deleter(resource.name, resource.version)
             except Exception:
                 failures.append(resource_id)
         if failures:
-            raise FoundryRollbackError('rollback failed', kind='platform', retryable=False)
+            raise FoundryRollbackError('rollback failed', kind='platform', retryable=False, compensation_receipt=receipt, provider_state=failures_state)
+
+    def verify_rollback(self, receipt: BootstrapReceipt) -> bool:
+        resources = self._current_resource_records(receipt)
+        for resource in resources:
+            if resource.disposition == 'created':
+                live = self.get_dataset(resource.name, resource.version)
+                if live is not None:
+                    return False
+        return True
 
 
-__all__ = [name for name in globals() if name.startswith('Foundry') or name == 'FoundryAdapter']
+__all__ = [name for name in globals() if name.startswith('Foundry') or name in {'rollback_failure_details', 'FoundryAdapter'}]

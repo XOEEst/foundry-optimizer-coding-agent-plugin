@@ -9,6 +9,7 @@ from foundry_opt.bootstrap.contracts import BindingAssessment, BootstrapAction, 
 from foundry_opt.bootstrap.discovery import DiscoveryResult, discover_repository_agents
 from foundry_opt.bootstrap.errors import BootstrapApplyError
 from foundry_opt.bootstrap.operation_state import OperationStateEnvelope, SelectionPlan, next_generation, read_operation_state, status_from_state, write_operation_state
+from foundry_opt.bootstrap.providers.foundry import rollback_failure_details
 from foundry_opt.bootstrap.receipts import ApplyPhaseName, ApprovalRecord, EvaluationReplacementRecord, PhaseReceipt, failure_receipt, summarize_receipt
 
 _PHASES: tuple[ApplyPhaseName, ...] = ("repository", "github", "azure", "evaluations")
@@ -135,16 +136,22 @@ class BootstrapOrchestrator:
             code, summary = self._sanitize_error(exc)
             compensation_actions = ()
             original_receipt: BootstrapReceipt | None = None
+            provider_state = self._safe_provider_state(locals().get("receipt") if isinstance(locals().get("receipt"), BootstrapReceipt) else None, phase)
             if isinstance(exc, BootstrapApplyError):
                 pass
             elif isinstance(exc, BaseException) and hasattr(exc, "args"):
                 pass
+            rollback_receipt, rollback_state = rollback_failure_details(exc)
+            if rollback_receipt is not None:
+                original_receipt = rollback_receipt
+                compensation_actions = rollback_receipt.compensation_required_actions
+                provider_state = rollback_state
             if 'receipt' in locals() and isinstance(locals().get("receipt"), BootstrapReceipt):
                 original_receipt = locals()["receipt"]
                 compensation_actions = original_receipt.compensation_required_actions
             failure = failure_receipt(phase=phase, provider=phase, operation_id=envelope.operation_id, runtime_repository=envelope.runtime_repository, runtime_commit=envelope.runtime_commit, repository_identity=envelope.bootstrap_plan.repository_identity, parent_plan_hash=envelope.bootstrap_plan.plan_hash, phase_plan_hash=phase_plan.plan_hash, before_fingerprints=live_fingerprints, code=code, summary=summary, compensation_required_actions=compensation_actions)
             state = "compensation_required" if compensation_actions else "failed"
-            failed_receipt = PhaseReceipt(phase=phase, state=state, provider=phase, receipt=original_receipt or failure.receipt, parent_plan_hash=envelope.bootstrap_plan.plan_hash, phase_plan_hash=phase_plan.plan_hash, approval_hash=approval.approval_hash, summary=failure.summary, provider_state=self._safe_provider_state(original_receipt, phase), recorded_fingerprints=live_fingerprints)
+            failed_receipt = PhaseReceipt(phase=phase, state=state, provider=phase, receipt=original_receipt or failure.receipt, parent_plan_hash=envelope.bootstrap_plan.plan_hash, phase_plan_hash=phase_plan.plan_hash, approval_hash=approval.approval_hash, summary=failure.summary, provider_state=provider_state, recorded_fingerprints=live_fingerprints)
             envelope = next_generation(envelope, phase_receipts=self._replace_phase(envelope.phase_receipts, failed_receipt))
             write_operation_state(envelope, expected_generation=updated.generation, state_root=self._state_root)
             return failed_receipt
