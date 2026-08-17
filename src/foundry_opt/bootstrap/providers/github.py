@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-from foundry_opt.bootstrap.canonical import canonical_sha256
+from foundry_opt.bootstrap.canonical import canonical_sha256, safe_persisted_document
 from foundry_opt.bootstrap.contracts import BootstrapAction, BootstrapPlan, BootstrapReceipt, FingerprintRecord
 from foundry_opt.bootstrap.errors import BootstrapApplyError, BootstrapProviderError
 
@@ -76,11 +76,14 @@ class _ApplyBinding:
     snapshots: tuple[_ActionSnapshot, ...]
 
 
-def _bounded_text(value: object, *, field: str, max_length: int = 255) -> str:
+_STATE_VERSION = 1
+
+
+def _bounded_text(value: object, *, field: str, max_length: int = 255, error_type: type[Exception] = GitHubProviderError) -> str:
     if not isinstance(value, str) or not value:
-        raise GitHubProviderError(f"{field} must be a non-empty string")
+        raise error_type(f"{field} must be a non-empty string")
     if len(value) > max_length:
-        raise GitHubProviderError(f"{field} exceeds its bounded length")
+        raise error_type(f"{field} exceeds its bounded length")
     return value
 
 
@@ -114,6 +117,69 @@ def _redacted_transport_error(message: str) -> GitHubProviderTransportError:
 
 def _fingerprint(label: str, value: object) -> FingerprintRecord:
     return FingerprintRecord(label=label, sha256=canonical_sha256(value))
+
+
+def _json_safe(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(child) for key, child in value.items()}
+    if isinstance(value, tuple):
+        return [_json_safe(child) for child in value]
+    if isinstance(value, list):
+        return [_json_safe(child) for child in value]
+    return value
+
+
+def _as_mapping(value: object, *, field: str) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        raise GitHubProviderApplyError(f"{field} must be a mapping")
+    return value
+
+
+def _canonicalized_document(value: object) -> object:
+    return json.loads(json.dumps(_json_safe(value), sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False))
+
+
+def _decode_rollback_step(value: object) -> tuple[str, str, object]:
+    if not isinstance(value, list) or len(value) != 3:
+        raise GitHubProviderApplyError("rollback step is invalid")
+    operation = _bounded_text(value[0], field="rollback operation", error_type=GitHubProviderApplyError)
+    environment = _bounded_text(value[1], field="rollback environment", error_type=GitHubProviderApplyError)
+    payload = _canonicalized_document(value[2])
+    return operation, environment, payload
+
+
+def _encode_snapshot(snapshot: _ActionSnapshot) -> Mapping[str, object]:
+    return {
+        "action_id": snapshot.action_id,
+        "kind": snapshot.kind,
+        "target": snapshot.target,
+        "before": _canonicalized_document(snapshot.before),
+        "expected_after": _canonicalized_document(snapshot.expected_after),
+        "ownership": snapshot.ownership,
+        "rollback": [_canonicalized_document([operation, environment, payload]) for operation, environment, payload in snapshot.rollback],
+    }
+
+
+def _decode_snapshot(value: object) -> _ActionSnapshot:
+    mapping = _as_mapping(value, field="snapshot")
+    action_id = _bounded_text(mapping.get("action_id"), field="snapshot.action_id", error_type=GitHubProviderApplyError)
+    kind = _bounded_text(mapping.get("kind"), field="snapshot.kind", error_type=GitHubProviderApplyError)
+    target = _bounded_text(mapping.get("target"), field="snapshot.target", error_type=GitHubProviderApplyError)
+    ownership = _bounded_text(mapping.get("ownership"), field="snapshot.ownership", error_type=GitHubProviderApplyError)
+    if ownership not in {"created", "adopted", "changed"}:
+        raise GitHubProviderApplyError("snapshot ownership is invalid")
+    rollback_raw = mapping.get("rollback", [])
+    if not isinstance(rollback_raw, list):
+        raise GitHubProviderApplyError("snapshot.rollback must be a list")
+    return _ActionSnapshot(
+        action_id=action_id,
+        kind=kind,
+        target=target,
+        before=_canonicalized_document(mapping.get("before")),
+        expected_after=_canonicalized_document(mapping.get("expected_after")),
+        ownership=ownership,
+        rollback=tuple(_decode_rollback_step(item) for item in rollback_raw),
+    )
 
 
 class GitHubBootstrapProvider:
@@ -229,6 +295,40 @@ class GitHubBootstrapProvider:
         self._last_apply_binding = _ApplyBinding(receipt.receipt_hash, receipt.operation_id, repository, tuple(snapshots))
         return receipt
 
+    def export_provider_state(self, receipt: BootstrapReceipt) -> Mapping[str, object]:
+        binding = self._validate_receipt_binding(receipt)
+        state = {
+            "version": _STATE_VERSION,
+            "receipt_hash": binding.receipt_hash,
+            "operation_id": binding.operation_id,
+            "repository": binding.repository,
+            "snapshots": [_encode_snapshot(snapshot) for snapshot in binding.snapshots],
+        }
+        safe = _canonicalized_document(state)
+        safe_persisted_document(safe)
+        return safe if isinstance(safe, Mapping) else {}
+
+    def restore_provider_state(self, mapping: Mapping[str, object]) -> None:
+        payload = _as_mapping(mapping, field="provider state")
+        version = payload.get("version")
+        if version != _STATE_VERSION:
+            raise GitHubProviderApplyError("provider state version is invalid")
+        receipt_hash = _bounded_text(payload.get("receipt_hash"), field="provider state receipt_hash", max_length=128, error_type=GitHubProviderApplyError)
+        operation_id = _bounded_text(payload.get("operation_id"), field="provider state operation_id", max_length=255, error_type=GitHubProviderApplyError)
+        repository = _bounded_text(payload.get("repository"), field="provider state repository", error_type=GitHubProviderApplyError)
+        owner, repo = _canonical_repo(repository)
+        canonical_repository = f"{owner}/{repo}"
+        snapshots_raw = payload.get("snapshots", [])
+        if not isinstance(snapshots_raw, list):
+            raise GitHubProviderApplyError("provider state snapshots must be a list")
+        snapshots = tuple(_decode_snapshot(item) for item in snapshots_raw)
+        safe_persisted_document(payload)
+        self._last_apply_binding = _ApplyBinding(receipt_hash, operation_id, canonical_repository, snapshots)
+
+    def live_fingerprints(self, receipt: BootstrapReceipt) -> Sequence[FingerprintRecord]:
+        binding = self._validate_receipt_binding(receipt)
+        return tuple(self._live_fingerprints_for_binding(binding))
+
     def verify_changes(self, receipt: BootstrapReceipt) -> bool:
         binding = self._validate_receipt_binding(receipt)
         owner, repo = _canonical_repo(binding.repository)
@@ -240,6 +340,13 @@ class GitHubBootstrapProvider:
         binding = self._validate_receipt_binding(receipt)
         owner, repo = _canonical_repo(binding.repository)
         self._rollback_snapshots(owner, repo, list(binding.snapshots))
+
+    def verify_rollback(self, receipt: BootstrapReceipt) -> bool:
+        binding = self._validate_receipt_binding(receipt)
+        owner, repo = _canonical_repo(binding.repository)
+        default_branch = self.read_repository_settings(binding.repository)["default_branch"]
+        self._verify_rollback_state(owner, repo, default_branch, binding.snapshots)
+        return True
 
     def _validate_receipt_binding(self, receipt: BootstrapReceipt) -> _ApplyBinding:
         binding = self._last_apply_binding
@@ -350,6 +457,52 @@ class GitHubBootstrapProvider:
                 tuple(rollback),
             )
         raise GitHubProviderError(f"unsupported github action kind: {action.kind}")
+
+    def _live_fingerprints_for_binding(self, binding: _ApplyBinding) -> Sequence[FingerprintRecord]:
+        owner, repo = _canonical_repo(binding.repository)
+        default_branch = self.read_repository_settings(binding.repository)["default_branch"]
+        return tuple(_fingerprint(f"{snapshot.action_id}:live", self._read_live_state(owner, repo, default_branch, snapshot)) for snapshot in binding.snapshots)
+
+    def _read_live_state(self, owner: str, repo: str, default_branch: str, snapshot: _ActionSnapshot) -> object:
+        if snapshot.kind == "github-environment":
+            env = self._inventory_environment(owner, repo, snapshot.target, default_branch)
+            return {"exists": env.exists, "deployment_branch_policy": env.deployment_branch_policy}
+        if snapshot.kind == "github-variable":
+            variable = self._read_environment_variable(owner, repo, snapshot.target, _VAR_NAME)
+            return {"exists": variable.exists, "value": variable.value}
+        env = self._inventory_environment(owner, repo, snapshot.target, default_branch)
+        branch_policy = {
+            "exists": env.requested_branch_policy.exists,
+            "policy_id": env.requested_branch_policy.policy_id,
+            "name": env.requested_branch_policy.name,
+            "type": env.requested_branch_policy.type,
+        }
+        if not branch_policy["exists"]:
+            branch_policy["policy_id"] = None
+            branch_policy["name"] = None
+            branch_policy["type"] = None
+        return {
+            "deployment_branch_policy": env.deployment_branch_policy,
+            "branch_policy": branch_policy,
+        }
+
+    def _verify_rollback_state(self, owner: str, repo: str, default_branch: str, snapshots: Sequence[_ActionSnapshot]) -> None:
+        merged: dict[tuple[str, str], _ActionSnapshot] = {}
+        for snapshot in snapshots:
+            merged[(snapshot.kind, snapshot.target)] = snapshot
+        environments_with_branch_policy = {snapshot.target for snapshot in merged.values() if snapshot.kind == "github-branch-policy"}
+        for snapshot in merged.values():
+            current = self._read_live_state(owner, repo, default_branch, snapshot)
+            expected_before = snapshot.before
+            if snapshot.kind == "github-environment" and snapshot.target in environments_with_branch_policy and isinstance(expected_before, Mapping):
+                expected_before = {"exists": expected_before.get("exists"), "deployment_branch_policy": current.get("deployment_branch_policy") if isinstance(current, Mapping) else None}
+            if snapshot.kind == "github-branch-policy" and isinstance(expected_before, Mapping):
+                expected_before = {
+                    "deployment_branch_policy": current.get("deployment_branch_policy") if isinstance(current, Mapping) else None,
+                    "branch_policy": expected_before.get("branch_policy"),
+                }
+            if canonical_sha256(current) != canonical_sha256(expected_before):
+                raise GitHubProviderError(f"rollback verification failed for action {snapshot.action_id}")
 
     def _verify_final_state(self, owner: str, repo: str, default_branch: str, snapshots: Sequence[_ActionSnapshot]) -> None:
         merged: dict[tuple[str, str], _ActionSnapshot] = {}
