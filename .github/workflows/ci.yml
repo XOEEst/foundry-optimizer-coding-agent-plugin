@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+        python:
+          - "3.12"
+          - "3.13"
+
+    steps:
+      - name: Check out the public runtime
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78
+        with:
+          version: "0.11.6"
+          enable-cache: true
+
+      - name: Install the frozen environment
+        shell: bash
+        run: uv sync --frozen
+
+      - name: Check the public tree
+        shell: bash
+        run: uv run python tools/check_public_tree.py
+
+      - name: Run tests
+        shell: bash
+        run: uv run pytest -q
+
+      - name: Build distributions
+        shell: bash
+        run: uv build --quiet
+
+      - name: Smoke-test the wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          smoke_root="$RUNNER_TEMP/foundry-opt-wheel-smoke"
+          python -m venv "$smoke_root"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            smoke_python="$smoke_root/Scripts/python.exe"
+          else
+            smoke_python="$smoke_root/bin/python"
+          fi
+          "$smoke_python" -m pip install --disable-pip-version-check dist/*.whl
+          "$smoke_python" -c "import foundry_opt; print(foundry_opt.__version__)"

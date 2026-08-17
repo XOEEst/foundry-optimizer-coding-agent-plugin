@@ -956,7 +956,19 @@ def _create_runtime_repository(tmp_path: Path) -> tuple[Path, str, dict[str, str
 
 
 def _invoke(arguments: list[str], env: dict[str, str]) -> Any:
-    return runner.invoke(app, arguments, env={**os.environ, **env})
+    invocation_environment = {**os.environ, **env}
+    for key in (
+        "GITHUB_EVENT_PATH",
+        "GITHUB_WORKSPACE",
+        "GITHUB_HEAD_REF",
+        "GITHUB_REF_NAME",
+        "FOUNDRY_OPT_GITHUB_BINDING",
+        "FOUNDRY_OPT_PULL_REQUEST_NUMBER",
+        "FOUNDRY_OPT_PULL_REQUEST_BASE_BRANCH",
+    ):
+        if key not in env:
+            invocation_environment[key] = ""
+    return runner.invoke(app, arguments, env=invocation_environment)
 
 
 def _replace_text(path: Path, old: str, new: str) -> None:
