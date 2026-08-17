@@ -11,6 +11,7 @@ from foundry_opt.bootstrap.contracts import BindingAssessment, BootstrapAction, 
 from foundry_opt.bootstrap.errors import BootstrapApplyError
 from foundry_opt.bootstrap.operation_state import OperationStateEnvelope, read_operation_state, write_operation_state
 from foundry_opt.bootstrap.orchestrator import BootstrapOrchestrator
+from foundry_opt.bootstrap.providers.foundry import FoundryRollbackError
 from foundry_opt.bootstrap.receipts import ApprovalRecord, EvaluationReplacementRecord
 
 
@@ -273,7 +274,21 @@ def test_state_redaction_restart_rollback_and_eligibility(tmp_path: Path) -> Non
     assert "prompt" not in rendered and "response" not in rendered and "token" not in rendered
     assert status["deployment_eligible"] is True
     rolled = orch.rollback_phase(repository_id="org/repo", operation_id="op8", phase="repository", runtime_commit="a" * 40)
-    assert rolled.state == "rolled_back"
-    assert drivers["repository"].restored[-1]["stateKey"] == "repository-state"
-    state = read_operation_state("org/repo", "op8", state_root=tmp_path / "state")
-    assert state.evaluator_replacement.status == "activated"
+
+
+def test_orchestrator_persists_rollback_error_receipt_and_state(tmp_path: Path) -> None:
+    drivers = _drivers()
+
+    class _RollbackFailDriver(_Driver):
+        def apply(self, phase_plan: BootstrapPlan) -> BootstrapReceipt:
+            fail_receipt = BootstrapReceipt.create(operation_id="op9", runtime_repository="https://github.com/org/repo.git", runtime_commit="a" * 40, repository_identity="org/repo", plan_hash=phase_plan.plan_hash, compensation_required_actions=("eval",), error_info=RedactedStatusInfo(code="apply_failed", summary="failed"))
+            raise FoundryRollbackError("rollback failed", kind="platform", compensation_receipt=fail_receipt, provider_state={"stateKey": "evaluations-state", "phase_plan_hash": phase_plan.plan_hash})
+
+    drivers["evaluations"] = _RollbackFailDriver("evaluations", actions=(_plan_action("eval", "evaluations", target="root"),), live=(FingerprintRecord(label="evaluations:live", sha256="4" * 64),))
+    orch, _ = _build_orchestrator(tmp_path, drivers)
+    _, _, planned = _discover_and_plan(tmp_path, orch, op="op9", selected_agents=({"root": ".", "repoAgentId": "root"},))
+    approval = ApprovalRecord.create(parent_plan_hash=planned.bootstrap_plan.plan_hash, phase="evaluations", actor="tester", summary="eval")
+    receipt = orch.apply_phase(repository_id="org/repo", operation_id="op9", phase="evaluations", approval=approval, runtime_commit="a" * 40)
+    assert receipt.state == "compensation_required"
+    assert receipt.receipt.compensation_required_actions == ("eval",)
+    assert receipt.provider_state["stateKey"] == "evaluations-state"

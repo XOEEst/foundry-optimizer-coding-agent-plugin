@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from foundry_opt.bootstrap.contracts import BootstrapLock, BootstrapPlan, BootstrapReceipt, BootstrapSidecar, RootRegistry
+from foundry_opt.bootstrap.input_contracts import BootstrapPlanInput
 
 ROOT = Path(__file__).resolve().parent
 SCHEMAS = ROOT / 'schemas'
@@ -14,6 +15,7 @@ for filename, model in {
     'sidecar.schema.json': BootstrapSidecar,
     'managed-lock.schema.json': BootstrapLock,
     'plan.schema.json': BootstrapPlan,
+    'plan-input.schema.json': BootstrapPlanInput,
     'receipt.schema.json': BootstrapReceipt,
 }.items():
     schema = model.model_json_schema()
