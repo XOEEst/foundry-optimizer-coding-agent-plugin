@@ -967,7 +967,7 @@ def _invoke(arguments: list[str], env: dict[str, str]) -> Any:
         "FOUNDRY_OPT_PULL_REQUEST_BASE_BRANCH",
     ):
         if key not in env:
-            invocation_environment.pop(key, None)
+            invocation_environment[key] = ""
     return runner.invoke(app, arguments, env=invocation_environment)
 
 
