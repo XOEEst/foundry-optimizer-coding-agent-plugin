@@ -45,7 +45,7 @@ def main() -> None:
     violations: list[str] = []
     for path in _tracked_paths():
         relative = path.relative_to(REPOSITORY_ROOT).as_posix()
-        if relative.startswith("tests/"):
+        if relative.startswith("tests/") or relative == "tools/check_public_tree.py":
             continue
         if path.suffix.casefold() not in TEXT_SUFFIXES:
             continue
