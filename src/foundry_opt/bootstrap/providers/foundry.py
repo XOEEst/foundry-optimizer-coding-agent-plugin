@@ -31,13 +31,13 @@ from azure.ai.projects.models import (
     TracesEvaluatorGenerationJobSource,
 )
 from azure.core.credentials import TokenCredential
-from azure.core.exceptions import ClientAuthenticationError, HttpResponseError, ServiceRequestError
+from azure.core.exceptions import ClientAuthenticationError, HttpResponseError, ResourceNotFoundError, ServiceRequestError
 
-from foundry_opt.bootstrap.contracts import BootstrapAction, BootstrapPlan, BootstrapReceipt, FingerprintRecord
+from foundry_opt.bootstrap.contracts import BootstrapAction, BootstrapPlan, BootstrapReceipt, FingerprintRecord, RedactedStatusInfo
 from foundry_opt.bootstrap.errors import BootstrapProviderError
 from foundry_opt.models import FrozenModel
 
-_CONTENT_SAFETY_ID = 'azureai://built-in/evaluators/content-safety'
+_CONTENT_SAFETY_ID = 'azureai://built-in/evaluators/content_safety'
 _IMMUTABLE_DATASET_URI_PREFIX = 'azureai://accounts/'
 
 
@@ -146,6 +146,10 @@ class FoundryOperationDeadlineError(FoundryAdapterError):
     pass
 
 
+class FoundryRollbackError(FoundryAdapterError):
+    pass
+
+
 class FoundryRejectedGenerationError(FoundryAdapterError):
     pass
 
@@ -176,6 +180,7 @@ class FoundryAdapter:
         self._time = time_source or time.monotonic
         self._sleep = sleep or time.sleep
         self._default_poll_interval = default_poll_interval
+        self._receipt_resources: dict[str, tuple[str, ...]] = {}
 
     def _beta(self, attr: str) -> object:
         beta = getattr(self._client, 'beta', None)
@@ -301,7 +306,7 @@ class FoundryAdapter:
         if callable(getter):
             try:
                 return self._normalize_dataset(getter(dataset_name, dataset_version))
-            except KeyError:
+            except ResourceNotFoundError:
                 return None
             except Exception as exc:
                 raise self._classify_error(exc) from exc
@@ -324,14 +329,24 @@ class FoundryAdapter:
         if existing is not None:
             if existing.get('type') != dataset_type or existing.get('data_uri') != dataset_content_uri:
                 raise FoundryPrerequisiteError('existing dataset version does not match requested content', kind='prerequisite')
-            return {'created': False, 'adopted': True, 'replayed': False, 'dataset': {**existing, 'content_fingerprint': expected_fingerprint}}
+            return {'created': False, 'adopted': True, 'replayed': False, 'dataset': {**existing, 'content_fingerprint': expected_fingerprint}, 'resource_id': str(existing['id'])}
         payload_cls = FileDatasetVersion if dataset_type == 'uri_file' else FolderDatasetVersion
-        payload = payload_cls({'dataUri': dataset_content_uri, 'type': dataset_type, 'connectionName': connection_name, 'description': description, 'tags': dict(tags or {})})
+        payload = payload_cls(data_uri=dataset_content_uri, type=dataset_type, connection_name=connection_name, description=description, tags=dict(tags or {}))
         try:
             created = self._client.datasets.create_or_update(dataset_name, dataset_version, payload)
         except Exception as exc:
             raise self._classify_error(exc) from exc
-        return {'created': True, 'adopted': False, 'replayed': False, 'dataset': self._normalize_dataset(created, fingerprint=expected_fingerprint)}
+        normalized = self._normalize_dataset(
+            created,
+            fingerprint=expected_fingerprint,
+        )
+        return {
+            'created': True,
+            'adopted': False,
+            'replayed': False,
+            'dataset': normalized,
+            'resource_id': str(normalized['id']),
+        }
 
     def resolve_builtin_content_safety(self) -> Mapping[str, object]:
         for item in self.inventory_evaluators(include_builtin=True):
@@ -348,7 +363,7 @@ class FoundryAdapter:
             inputs = request['inputs']
             if not isinstance(inputs, Mapping):
                 raise FoundryPrerequisiteError('data generation inputs must be a mapping', kind='prerequisite')
-            return DataGenerationJob({'inputs': inputs})
+            return DataGenerationJob(inputs=DataGenerationJobInputs(**inputs))
         sources_payload = request.get('sources')
         options_payload = request.get('options')
         if not isinstance(sources_payload, Sequence) or isinstance(sources_payload, (str, bytes, bytearray)) or not isinstance(options_payload, Mapping):
@@ -359,26 +374,30 @@ class FoundryAdapter:
                 raise FoundryPrerequisiteError('data generation source must be a mapping', kind='prerequisite')
             source_type = source.get('type')
             if source_type == 'agent':
-                sources.append(AgentDataGenerationJobSource(source))
+                sources.append(AgentDataGenerationJobSource(**source))
             elif source_type == 'prompt':
-                sources.append(PromptDataGenerationJobSource(source))
+                sources.append(PromptDataGenerationJobSource(**source))
             elif source_type == 'traces':
-                sources.append(TracesDataGenerationJobSource(source))
+                sources.append(TracesDataGenerationJobSource(**source))
             elif source_type == 'file':
-                sources.append(FileDataGenerationJobSource(source))
+                sources.append(FileDataGenerationJobSource(**source))
             else:
                 raise FoundryUnsupportedCapabilityError('unsupported data generation source type', kind='unsupported_preview')
+        options_payload = dict(options_payload)
+        if 'model_options' in options_payload and isinstance(options_payload['model_options'], Mapping):
+            options_payload['model_options'] = DataGenerationModelOptions(**options_payload['model_options'])
         option_type = options_payload.get('type')
         if option_type == 'simple_qna':
-            options = SimpleQnADataGenerationJobOptions(options_payload)
+            options = SimpleQnADataGenerationJobOptions(**options_payload)
         elif option_type == 'traces':
-            options = TracesDataGenerationJobOptions(options_payload)
+            options = TracesDataGenerationJobOptions(**options_payload)
         elif option_type == 'task_generation':
-            options = TaskGenerationDataGenerationJobOptions(options_payload)
+            options = TaskGenerationDataGenerationJobOptions(**options_payload)
         else:
             raise FoundryUnsupportedCapabilityError('unsupported data generation options type', kind='unsupported_preview')
-        inputs = DataGenerationJobInputs({'name': request.get('name') or request.get('job_name') or 'foundry-opt-data-generation', 'sources': sources, 'options': options, 'scenario': request.get('scenario', 'evaluation'), 'outputOptions': DataGenerationJobOutputOptions({'name': request.get('output_name'), 'description': request.get('output_description'), 'tags': request.get('output_tags') or {}}) if request.get('output_name') else None})
-        return DataGenerationJob({'inputs': inputs})
+        output_options = DataGenerationJobOutputOptions(name=request.get('output_name'), description=request.get('output_description'), tags=request.get('output_tags') or {}) if request.get('output_name') else None
+        inputs = DataGenerationJobInputs(name=str(request.get('name') or request.get('job_name') or 'foundry-opt-data-generation'), sources=sources, options=options, scenario=str(request.get('scenario', 'evaluation')), output_options=output_options)
+        return DataGenerationJob(inputs=inputs)
 
     def _build_evaluator_generation_job(self, request: Mapping[str, object]) -> EvaluatorGenerationJob:
         if 'inputs' in request:
@@ -398,23 +417,23 @@ class FoundryAdapter:
             source_type = source.get('type')
             if source_type == 'agent':
                 companion = True
-                built_sources.append(AgentEvaluatorGenerationJobSource(source))
+                built_sources.append(AgentEvaluatorGenerationJobSource(**source))
             elif source_type == 'prompt':
                 companion = True
-                built_sources.append(PromptEvaluatorGenerationJobSource(source))
+                built_sources.append(PromptEvaluatorGenerationJobSource(**source))
             elif source_type == 'dataset':
                 companion = True
-                built_sources.append(DatasetEvaluatorGenerationJobSource(source))
+                built_sources.append(DatasetEvaluatorGenerationJobSource(**source))
             elif source_type == 'traces':
-                built_sources.append(TracesEvaluatorGenerationJobSource(source))
+                built_sources.append(TracesEvaluatorGenerationJobSource(**source))
             else:
                 raise FoundryUnsupportedCapabilityError('unsupported evaluator generation source type', kind='unsupported_preview')
         if any(isinstance(source, TracesEvaluatorGenerationJobSource) for source in built_sources) and not companion:
             raise FoundryPrerequisiteError('traces require companion agent, prompt, or dataset source', kind='prerequisite')
         if 'inputs' in request:
-            return EvaluatorGenerationJob({'inputs': dict(request['inputs'])})
-        inputs = EvaluatorGenerationInputs({'sources': built_sources, 'model': request.get('model'), 'evaluatorName': request.get('evaluator_name'), 'evaluatorDisplayName': request.get('evaluator_display_name'), 'evaluatorDescription': request.get('evaluator_description')})
-        return EvaluatorGenerationJob({'inputs': inputs})
+            return EvaluatorGenerationJob(inputs=EvaluatorGenerationInputs(**dict(request['inputs'])))
+        inputs = EvaluatorGenerationInputs(sources=built_sources, model=str(request.get('model')), evaluator_name=str(request.get('evaluator_name')), evaluator_display_name=request.get('evaluator_display_name'), evaluator_description=request.get('evaluator_description'))
+        return EvaluatorGenerationJob(inputs=inputs)
 
     def _poller_seam(self, poller: object) -> tuple[str | None, str | None]:
         token = None
@@ -431,6 +450,9 @@ class FoundryAdapter:
         return token, url
 
     def create_dataset_generation_job(self, request: Mapping[str, object]) -> FoundryOperationHandle:
+        request = dict(request)
+        request.setdefault('scenario', 'evaluation')
+        request.setdefault('name', request.get('job_name') or 'foundry-opt-data-generation')
         operation_id = str(request.get('operation_id') or self._operation_id('dataset-generation', request))
         try:
             poller = self._beta('datasets').begin_create_generation_job(self._build_dataset_generation_job(request), operation_id=operation_id)
@@ -440,6 +462,9 @@ class FoundryAdapter:
         return FoundryOperationHandle(operation_id=operation_id, job_kind='dataset_generation', continuation_token=token, polling_url=url, created=True)
 
     def create_evaluator_generation_job(self, request: Mapping[str, object]) -> FoundryOperationHandle:
+        request = dict(request)
+        request.setdefault('scenario', 'evaluation')
+        request.setdefault('name', request.get('job_name') or 'foundry-opt-data-generation')
         operation_id = str(request.get('operation_id') or self._operation_id('evaluator-generation', request))
         try:
             poller = self._beta('evaluators').begin_create_generation_job(self._build_evaluator_generation_job(request), operation_id=operation_id)
@@ -453,42 +478,37 @@ class FoundryAdapter:
             persist_before_poll(handle)
         poll_interval = self._default_poll_interval if poll_interval is None else poll_interval
         beta_group = self._beta('datasets') if handle.job_kind == 'dataset_generation' else self._beta('evaluators')
+        if not handle.continuation_token:
+            raise FoundryPrerequisiteError('continuation token required to resume generation job', kind='prerequisite')
+        try:
+            poller = beta_group.begin_create_generation_job(None, continuation_token=handle.continuation_token, operation_id=handle.operation_id)
+        except Exception as exc:
+            raise self._classify_error(exc) from None
         while True:
-            try:
-                if handle.continuation_token:
-                    poller = beta_group.begin_create_generation_job(None, continuation_token=handle.continuation_token, operation_id=handle.operation_id)
-                    job = poller.result(timeout=0)
-                else:
-                    raise FoundryPrerequisiteError('continuation token required to resume generation job', kind='prerequisite')
-            except TimeoutError:
-                if deadline_monotonic is not None and self._time() >= deadline_monotonic:
-                    raise FoundryOperationDeadlineError('polling deadline exceeded', kind='deadline', retryable=True)
-                self._sleep(poll_interval)
-                continue
-            except Exception as exc:
-                raise self._classify_error(exc) from exc
-            result = self._normalize_job_result(handle.job_kind, _as_mapping(job))
-            if result.get('status') in {'queued', 'in_progress'}:
-                if deadline_monotonic is not None and self._time() >= deadline_monotonic:
-                    raise FoundryOperationDeadlineError('polling deadline exceeded', kind='deadline', retryable=True)
-                self._sleep(poll_interval)
-                continue
-            return result
+            if poller.done():
+                try:
+                    job = poller.result()
+                except Exception as exc:
+                    raise self._classify_error(exc) from None
+                return self._normalize_job_result(handle.job_kind, _as_mapping(job))
+            if deadline_monotonic is not None and self._time() >= deadline_monotonic:
+                raise FoundryOperationDeadlineError('polling deadline exceeded', kind='deadline', retryable=True)
+            self._sleep(poll_interval)
 
     def resume_generation_job(self, handle: FoundryOperationHandle, *, persist_before_poll: Callable[[FoundryOperationHandle], None] | None = None, deadline_monotonic: float | None = None, poll_interval: float | None = None) -> Mapping[str, object]:
         return self.poll_generation_job(handle, persist_before_poll=persist_before_poll, deadline_monotonic=deadline_monotonic, poll_interval=poll_interval)
 
     def _normalize_job_result(self, job_kind: str, job: Mapping[str, object]) -> Mapping[str, object]:
         result = job.get('result')
-        normalized: MutableMapping[str, object] = {'job_id': job.get('id'), 'status': job.get('status'), 'created_at': _plain(job.get('created_at')), 'finished_at': _plain(job.get('finished_at')), 'error': _plain(job.get('error')), 'result': _plain(result) if result is not None else None}
-        if job_kind == 'dataset_generation' and isinstance(result, Mapping):
-            generated = result.get('generated_samples')
+        normalized: MutableMapping[str, object] = {'job_id': job.get('id'), 'status': job.get('status'), 'created_at': _plain(job.get('created_at')), 'finished_at': _plain(job.get('finished_at')), 'error': _plain(job.get('error')), 'result': _plain(job)}
+        if job_kind == 'dataset_generation':
+            generated = job.get('generated_samples')
             normalized['generated_samples'] = generated
             if isinstance(generated, int) and generated < 15:
                 normalized['outcome'] = 'rejected'
                 normalized['output_datasets'] = ()
                 return normalized
-            outputs = result.get('outputs')
+            outputs = job.get('outputs')
             accepted: list[Mapping[str, object]] = []
             if isinstance(outputs, Sequence) and not isinstance(outputs, (str, bytes, bytearray)):
                 for item in outputs:
@@ -501,8 +521,8 @@ class FoundryAdapter:
                                 accepted.append(dataset)
             normalized['outcome'] = 'accepted'
             normalized['output_datasets'] = tuple(accepted)
-        elif job_kind == 'evaluator_generation' and isinstance(result, Mapping):
-            normalized['saved_evaluator'] = {'id': result.get('id'), 'name': result.get('name'), 'version': result.get('version'), 'display_name': result.get('display_name')}
+        else:
+            normalized['saved_evaluator'] = {'id': job.get('id'), 'name': job.get('name'), 'version': job.get('version'), 'display_name': job.get('display_name')}
         return normalized
 
     def plan_resources(self, plan: BootstrapPlan) -> tuple[BootstrapAction, ...]:
@@ -524,10 +544,10 @@ class FoundryAdapter:
         adopted: list[str] = []
         changed: list[str] = []
         skipped: list[str] = []
-        compensation: list[str] = []
+        created_resource_ids: list[str] = []
+        all_resource_ids: list[str] = []
         before_fingerprints: list[FingerprintRecord] = []
         after_fingerprints: list[FingerprintRecord] = []
-        created_resource_ids: list[str] = []
         try:
             for action in self.plan_resources(plan):
                 if action.kind != 'dataset':
@@ -539,23 +559,33 @@ class FoundryAdapter:
                 before_fp, after_fp = self._fingerprints_for_dataset(action.action_id, dataset)
                 before_fingerprints.append(before_fp)
                 after_fingerprints.append(after_fp)
+                resource_id = str(result['resource_id'])
+                all_resource_ids.append(resource_id)
                 if result['created']:
                     created.append(action.action_id)
-                    created_resource_ids.append(str(dataset['id']))
+                    created_resource_ids.append(resource_id)
                 elif result['adopted']:
                     adopted.append(action.action_id)
                 elif result.get('replayed'):
                     changed.append(action.action_id)
                 else:
                     skipped.append(action.action_id)
-            receipt = BootstrapReceipt.create(operation_id=plan.operation_id, runtime_repository=plan.runtime_repository, runtime_commit=plan.runtime_commit, repository_identity=plan.repository_identity, plan_hash=plan.plan_hash, before_fingerprints=tuple(before_fingerprints), after_fingerprints=tuple(after_fingerprints), created_actions=tuple(created_resource_ids if created_resource_ids else created), adopted_actions=tuple(adopted), changed_actions=tuple(changed), skipped_actions=tuple(skipped), compensation_required_actions=tuple(compensation))
-        except Exception:
-            compensation.extend(created)
-            raise
+            receipt = BootstrapReceipt.create(operation_id=plan.operation_id, runtime_repository=plan.runtime_repository, runtime_commit=plan.runtime_commit, repository_identity=plan.repository_identity, plan_hash=plan.plan_hash, before_fingerprints=tuple(before_fingerprints), after_fingerprints=tuple(after_fingerprints), created_actions=tuple(created), adopted_actions=tuple(adopted), changed_actions=tuple(changed), skipped_actions=tuple(skipped), compensation_required_actions=tuple(created_resource_ids))
+        except Exception as exc:
+            compensation_receipt = BootstrapReceipt.create(operation_id=plan.operation_id, runtime_repository=plan.runtime_repository, runtime_commit=plan.runtime_commit, repository_identity=plan.repository_identity, plan_hash=plan.plan_hash, before_fingerprints=tuple(before_fingerprints), after_fingerprints=tuple(after_fingerprints), created_actions=tuple(created), adopted_actions=tuple(adopted), changed_actions=tuple(changed), skipped_actions=tuple(skipped), compensation_required_actions=tuple(created_resource_ids), error_info=RedactedStatusInfo(code='apply_failed', summary='resource apply failed'))
+            try:
+                self.rollback_resources(compensation_receipt)
+            except FoundryRollbackError as rollback_exc:
+                raise rollback_exc from None
+            raise self._classify_error(exc) from None
+        self._receipt_resources[receipt.receipt_hash] = tuple(all_resource_ids)
         return receipt
 
     def verify_resources(self, receipt: BootstrapReceipt) -> bool:
-        for resource_id in receipt.created_actions:
+        resources = self._receipt_resources.get(receipt.receipt_hash)
+        if resources is None:
+            return False
+        for resource_id in resources:
             if not isinstance(resource_id, str) or not resource_id.startswith(_IMMUTABLE_DATASET_URI_PREFIX):
                 continue
             marker = '/data/'
@@ -569,10 +599,11 @@ class FoundryAdapter:
         return True
 
     def rollback_resources(self, receipt: BootstrapReceipt) -> None:
-        deleter = getattr(self._client.datasets, 'delete_version', None)
+        deleter = getattr(self._client.datasets, 'delete', None)
         if not callable(deleter):
             return
-        for resource_id in receipt.created_actions:
+        failures: list[str] = []
+        for resource_id in receipt.compensation_required_actions:
             if not isinstance(resource_id, str) or not resource_id.startswith(_IMMUTABLE_DATASET_URI_PREFIX):
                 continue
             marker = '/data/'
@@ -584,7 +615,9 @@ class FoundryAdapter:
             try:
                 deleter(name, version)
             except Exception:
-                continue
+                failures.append(resource_id)
+        if failures:
+            raise FoundryRollbackError('rollback failed', kind='platform', retryable=False)
 
 
 __all__ = [name for name in globals() if name.startswith('Foundry') or name == 'FoundryAdapter']
