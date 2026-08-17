@@ -68,6 +68,11 @@
     "AzureIdentityInput": {
       "additionalProperties": false,
       "properties": {
+        "create_if_missing": {
+          "default": false,
+          "title": "Create If Missing",
+          "type": "boolean"
+        },
         "existing_client_id": {
           "anyOf": [
             {

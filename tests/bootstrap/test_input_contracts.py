@@ -214,6 +214,19 @@ def test_strict_json_rejects_duplicate_keys(tmp_path: Path) -> None:
         load_bootstrap_plan_input(path)
 
 
+def test_plan_input_allows_new_uami_with_desired_resource_id() -> None:
+    document = _sample_payload()
+    identity = document['azure_phase']['identity']
+    identity['create_if_missing'] = True
+    identity.pop('existing_client_id', None)
+    identity.pop('existing_object_id', None)
+
+    plan_input = BootstrapPlanInput.model_validate(document)
+
+    assert plan_input.azure_phase is not None
+    assert plan_input.azure_phase.identity.create_if_missing is True
+
+
 def test_schema_matches_generated_artifact() -> None:
     current = json.loads(SCHEMA_PATH.read_text(encoding='utf-8'))
     generated = BootstrapPlanInput.model_json_schema()
