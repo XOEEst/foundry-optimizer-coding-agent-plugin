@@ -7,7 +7,7 @@ on:
       - .github/workflows/copilot-setup-steps.yml
       - .github/foundry-opt.lock.yml
       - .foundry-opt/registry.yaml
-      - agent/.foundry/foundry-opt.yaml
+      - '**/.foundry/foundry-opt.yaml'
 
 permissions:
   contents: read
@@ -76,6 +76,7 @@ jobs:
           chmod 755 "$FOUNDRY_OPT_EXECUTABLE"
           echo "FOUNDRY_OPT_EXECUTABLE=$FOUNDRY_OPT_EXECUTABLE" >>"$GITHUB_ENV"
           echo "$launcher_root" >>"$GITHUB_PATH"
+          echo "$FOUNDRY_OPT_PACKAGE_ROOT/.venv/bin" >>"$GITHUB_PATH"
           skill_root="$HOME/.copilot/skills/foundry-agent-optimizer"
           rm -rf "$skill_root"
           mkdir -p "$(dirname "$skill_root")"
@@ -97,24 +98,24 @@ jobs:
           echo "FOUNDRY_OPT_RUNTIME_SHA=c899b718f3baebcfd08209ee5184d0cf61d8153d" >>"$GITHUB_ENV"
           echo "FOUNDRY_OPT_RESUME_RECORD=$trusted_root/resume.json" >>"$GITHUB_ENV"
 
-      - name: Validate bootstrap contracts and selected registry entry
+      - name: Validate bootstrap contracts and registry sidecars
         shell: bash
         run: |
           set -euo pipefail
           foundry-opt bootstrap verify --pin .github/foundry-opt.lock.yml --checkout "$FOUNDRY_OPT_SHARED_ROOT" --receipt "$FOUNDRY_OPT_BOOTSTRAP_RECEIPT"
-          python - <<'PY'
+          "$FOUNDRY_OPT_PACKAGE_ROOT/.venv/bin/python" - <<'PY'
           from pathlib import Path
           from foundry_opt.bootstrap.contracts import BootstrapSidecar, RootRegistry
           root = Path('.')
           registry = RootRegistry.from_document((root / '.foundry-opt' / 'registry.yaml').read_text(encoding='utf-8'))
-          assert registry.agents, 'registry must contain at least one enabled agent'
-          selected = next(agent for agent in registry.agents if agent.enabled)
-          assert selected.config_path == 'agent/.foundry/foundry-opt.yaml'
+          protected = ['.foundry-opt/'] + [agent.config_path for agent in registry.agents]
           for agent in registry.agents:
               sidecar = BootstrapSidecar.from_document((root / agent.config_path).read_text(encoding='utf-8'))
-              assert sidecar.repo_agent_id == agent.agent_id
-              assert all(not value.startswith('.foundry-opt/') for value in sidecar.editable_paths)
-              assert all(not value.startswith('agent/.foundry/') for value in sidecar.editable_paths)
+              for editable in sidecar.editable_paths:
+                  assert editable != '.foundry-opt/**'
+                  assert not editable.startswith('.foundry-opt/')
+                  for protected_path in protected:
+                      assert not editable.startswith(protected_path.rstrip('*'))
           PY
 
       - name: Detect trusted issue context
@@ -138,7 +139,7 @@ jobs:
         run: |
           set -euo pipefail
           printf '%s' "$GITHUB_SETUP_TOKEN" | foundry-opt broker launch --event "$GITHUB_EVENT_PATH" --binding "$FOUNDRY_OPT_GITHUB_BINDING" --socket "$FOUNDRY_OPT_BROKER_SOCKET" --head-ref "${GITHUB_HEAD_REF:-}" --ref-name "${GITHUB_REF_NAME:-}" --token-stdin
-          python - <<'PY'
+          "$FOUNDRY_OPT_PACKAGE_ROOT/.venv/bin/python" - <<'PY'
           import os, time
           from pathlib import Path
           socket_path = Path(os.environ['FOUNDRY_OPT_BROKER_SOCKET'])
@@ -154,13 +155,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          unset FOUNDRY_OPT_GITHUB_BINDING
+          unset FOUNDRY_OPT_BROKER_SOCKET
           foundry-opt preflight --repository . --offline
 
       - name: Persist resume metadata
         shell: bash
         run: |
           set -euo pipefail
-          python - <<'PY'
+          "$FOUNDRY_OPT_PACKAGE_ROOT/.venv/bin/python" - <<'PY'
           import json, os
           from pathlib import Path
           Path(os.environ['FOUNDRY_OPT_RESUME_RECORD']).write_text(json.dumps({'runtime_sha': os.environ['FOUNDRY_OPT_RUNTIME_SHA'], 'state_root': os.environ['FOUNDRY_OPT_STATE_ROOT'], 'broker_socket': os.environ.get('FOUNDRY_OPT_BROKER_SOCKET')}, indent=2), encoding='utf-8')

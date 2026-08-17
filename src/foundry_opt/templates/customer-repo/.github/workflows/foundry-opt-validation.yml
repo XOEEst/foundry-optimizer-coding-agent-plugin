@@ -63,7 +63,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python - <<'PY'
+          "$FOUNDRY_OPT_PACKAGE_ROOT/.venv/bin/python" - <<'PY'
           from pathlib import Path
           from foundry_opt.bootstrap.contracts import BootstrapSidecar, RootRegistry
           root = Path('.')
