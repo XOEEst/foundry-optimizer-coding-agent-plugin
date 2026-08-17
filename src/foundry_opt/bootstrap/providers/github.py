@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 
 from foundry_opt.bootstrap.canonical import canonical_sha256, safe_persisted_document
-from foundry_opt.bootstrap.contracts import BootstrapAction, BootstrapPlan, BootstrapReceipt, FingerprintRecord
+from foundry_opt.bootstrap.contracts import BootstrapAction, BootstrapPlan, BootstrapReceipt, FingerprintRecord, RedactedStatusInfo
 from foundry_opt.bootstrap.errors import BootstrapApplyError, BootstrapProviderError
 
 _OWNER_REPO_PATTERN = re.compile(r"^(?P<owner>[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}[A-Za-z0-9])?)/(?P<repo>[A-Za-z0-9_.-]{1,100})$")
@@ -30,6 +30,33 @@ class GitHubProviderApplyError(BootstrapApplyError):
 
 class GitHubProviderTransportError(GitHubProviderError):
     pass
+
+
+class GitHubProviderRollbackError(GitHubProviderApplyError):
+    """Raised when apply-time compensation itself fails.
+
+    Carries the durable compensation receipt and exportable provider state that
+    were journaled before the rollback attempt, so a caller can persist them and
+    retry compensation later without losing track of components this operation
+    created or changed.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        compensation_receipt: BootstrapReceipt | None = None,
+        provider_state: Mapping[str, object] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.compensation_receipt = compensation_receipt
+        self.provider_state = dict(provider_state or {})
+
+
+def rollback_failure_details(exc: BaseException) -> tuple[BootstrapReceipt | None, Mapping[str, object]]:
+    if isinstance(exc, GitHubProviderRollbackError):
+        return exc.compensation_receipt, dict(exc.provider_state)
+    return None, {}
 
 
 @dataclass(frozen=True)
@@ -66,6 +93,7 @@ class _ActionSnapshot:
     expected_after: object
     ownership: str
     rollback: tuple[tuple[str, str, object], ...]
+    branch_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -119,6 +147,10 @@ def _fingerprint(label: str, value: object) -> FingerprintRecord:
     return FingerprintRecord(label=label, sha256=canonical_sha256(value))
 
 
+def _is_pending_snapshot(snapshot: _ActionSnapshot) -> bool:
+    return isinstance(snapshot.expected_after, Mapping) and snapshot.expected_after.get("pending") is True
+
+
 def _json_safe(value: object) -> object:
     if isinstance(value, Mapping):
         return {str(key): _json_safe(child) for key, child in value.items()}
@@ -157,7 +189,14 @@ def _encode_snapshot(snapshot: _ActionSnapshot) -> Mapping[str, object]:
         "expected_after": _canonicalized_document(snapshot.expected_after),
         "ownership": snapshot.ownership,
         "rollback": [_canonicalized_document([operation, environment, payload]) for operation, environment, payload in snapshot.rollback],
+        "branch_name": snapshot.branch_name,
     }
+
+
+def _decode_branch_name(value: object) -> str | None:
+    if value is None:
+        return None
+    return _bounded_text(value, field="snapshot.branch_name", max_length=255, error_type=GitHubProviderApplyError)
 
 
 def _decode_snapshot(value: object) -> _ActionSnapshot:
@@ -171,6 +210,7 @@ def _decode_snapshot(value: object) -> _ActionSnapshot:
     rollback_raw = mapping.get("rollback", [])
     if not isinstance(rollback_raw, list):
         raise GitHubProviderApplyError("snapshot.rollback must be a list")
+    branch_name = _decode_branch_name(mapping.get("branch_name"))
     snapshot = _ActionSnapshot(
         action_id=action_id,
         kind=kind,
@@ -179,6 +219,7 @@ def _decode_snapshot(value: object) -> _ActionSnapshot:
         expected_after=_canonicalized_document(mapping.get("expected_after")),
         ownership=ownership,
         rollback=tuple(_decode_rollback_step(item) for item in rollback_raw),
+        branch_name=branch_name,
     )
     allowed_operations = {
         "github-environment": {"delete_environment"},
@@ -190,6 +231,8 @@ def _decode_snapshot(value: object) -> _ActionSnapshot:
     }
     if snapshot.kind not in allowed_operations:
         raise GitHubProviderApplyError("snapshot kind is invalid")
+    if snapshot.branch_name is not None and snapshot.kind != "github-branch-policy":
+        raise GitHubProviderApplyError("snapshot branch_name is only valid for github-branch-policy")
     for operation, environment, _ in snapshot.rollback:
         if operation not in allowed_operations[snapshot.kind]:
             raise GitHubProviderApplyError("snapshot rollback operation is invalid")
@@ -270,7 +313,6 @@ class GitHubBootstrapProvider:
                 continue
             result.append(action.model_copy(update={"diagnostics": action.diagnostics + (repository,)}))
         return tuple(result)
-
     def apply_changes(self, plan: BootstrapPlan) -> BootstrapReceipt:
         repository_state = self.read_repository_settings(plan.repository_identity)
         repository = _bounded_text(repository_state["repository"], field="repository")
@@ -280,6 +322,7 @@ class GitHubBootstrapProvider:
         created: list[str] = []
         adopted: list[str] = []
         changed: list[str] = []
+        final_error: GitHubProviderApplyError | None = None
         try:
             for action in self.plan_changes(plan):
                 snapshot = self._apply_action(owner, repo, default_branch, action, snapshots)
@@ -294,9 +337,55 @@ class GitHubBootstrapProvider:
                     changed.append(snapshot.action_id)
             self._verify_final_state(owner, repo, default_branch, snapshots)
         except GitHubProviderError as exc:
-            self._rollback_snapshots(owner, repo, snapshots)
-            raise _redacted_error(str(exc))
-        receipt = BootstrapReceipt.create(
+            message = str(exc)
+            compensation_receipt: BootstrapReceipt | None = None
+            provider_state: Mapping[str, object] = {}
+            if snapshots:
+                # Journal the compensation intent durably (bound to an exportable
+                # receipt) before attempting any rollback mutation whose own
+                # read-back can fail, so callers never lose track of components
+                # this operation created or changed.
+                compensation_receipt = self._build_receipt(
+                    plan,
+                    repository,
+                    snapshots,
+                    created,
+                    adopted,
+                    changed,
+                    error_info=RedactedStatusInfo(code="apply_failed", summary="github apply failed"),
+                )
+                self._last_apply_binding = _ApplyBinding(compensation_receipt.receipt_hash, compensation_receipt.operation_id, repository, tuple(snapshots))
+                provider_state = self.export_provider_state(compensation_receipt)
+            try:
+                self._rollback_snapshots(owner, repo, snapshots, default_branch=default_branch, verify_expected=True)
+            except GitHubProviderError:
+                final_error = GitHubProviderRollbackError(
+                    "github rollback failed after apply failure",
+                    compensation_receipt=compensation_receipt,
+                    provider_state=provider_state,
+                )
+            else:
+                final_error = _redacted_error(message)
+        # Raised outside the except block so the sanitized error never inherits
+        # __context__ from the original (potentially secret-bearing) exception.
+        if final_error is not None:
+            raise final_error from None
+        receipt = self._build_receipt(plan, repository, snapshots, created, adopted, changed)
+        self._last_apply_binding = _ApplyBinding(receipt.receipt_hash, receipt.operation_id, repository, tuple(snapshots))
+        return receipt
+
+    def _build_receipt(
+        self,
+        plan: BootstrapPlan,
+        repository: str,
+        snapshots: Sequence[_ActionSnapshot],
+        created: Sequence[str],
+        adopted: Sequence[str],
+        changed: Sequence[str],
+        *,
+        error_info: RedactedStatusInfo | None = None,
+    ) -> BootstrapReceipt:
+        return BootstrapReceipt.create(
             operation_id=plan.operation_id,
             runtime_repository=plan.runtime_repository,
             runtime_commit=plan.runtime_commit,
@@ -307,9 +396,9 @@ class GitHubBootstrapProvider:
             created_actions=tuple(created),
             adopted_actions=tuple(adopted),
             changed_actions=tuple(changed),
+            compensation_required_actions=tuple(snapshot.action_id for snapshot in snapshots if snapshot.rollback),
+            error_info=error_info,
         )
-        self._last_apply_binding = _ApplyBinding(receipt.receipt_hash, receipt.operation_id, repository, tuple(snapshots))
-        return receipt
 
     def export_provider_state(self, receipt: BootstrapReceipt) -> Mapping[str, object]:
         binding = self._validate_receipt_binding(receipt)
@@ -462,11 +551,11 @@ class GitHubBootstrapProvider:
                 },
             }
             if env.requested_branch_policy.exists:
-                return _ActionSnapshot(action.action_id, action.kind, env_name, before, before, "adopted", ())
+                return _ActionSnapshot(action.action_id, action.kind, env_name, before, before, "adopted", (), branch_name=branch_name)
             rollback: list[tuple[str, str, object]] = []
             if not self._policy_enabled(env.deployment_branch_policy):
                 rollback.append(("restore_environment_policy", env_name, env.deployment_branch_policy))
-            snapshots.append(_ActionSnapshot(action.action_id, action.kind, env_name, before, {"pending": True}, "changed", tuple(rollback)))
+            snapshots.append(_ActionSnapshot(action.action_id, action.kind, env_name, before, {"pending": True}, "changed", tuple(rollback), branch_name=branch_name))
             self._put(
                 f"/repos/{owner}/{repo}/environments/{env_name}",
                 {"deployment_branch_policy": self._enabled_policy_payload(env.deployment_branch_policy)},
@@ -499,6 +588,7 @@ class GitHubBootstrapProvider:
                 },
                 "adopted" if duplicate else "changed",
                 tuple(rollback),
+                branch_name=branch_name,
             )
         raise GitHubProviderError(f"unsupported github action kind: {action.kind}")
 
@@ -509,20 +599,15 @@ class GitHubBootstrapProvider:
 
     def _read_live_state(self, owner: str, repo: str, default_branch: str, snapshot: _ActionSnapshot) -> object:
         if snapshot.kind == "github-environment":
-            branch_name = default_branch
-            for state in (snapshot.expected_after, snapshot.before):
-                if not isinstance(state, Mapping):
-                    continue
-                policy = state.get("branch_policy")
-                if isinstance(policy, Mapping) and isinstance(policy.get("name"), str):
-                    branch_name = str(policy["name"])
-                    break
-            env = self._inventory_environment(owner, repo, snapshot.target, branch_name)
+            env = self._inventory_environment(owner, repo, snapshot.target, default_branch)
             return {"exists": env.exists, "deployment_branch_policy": env.deployment_branch_policy}
         if snapshot.kind == "github-variable":
             variable = self._read_environment_variable(owner, repo, snapshot.target, _VAR_NAME)
             return {"exists": variable.exists, "value": variable.value}
-        env = self._inventory_environment(owner, repo, snapshot.target, default_branch)
+        # github-branch-policy identity is exact and persisted on the snapshot; never
+        # re-derive it from the (possibly since-changed) live repository default branch.
+        branch_name = snapshot.branch_name or default_branch
+        env = self._inventory_environment(owner, repo, snapshot.target, branch_name)
         branch_policy = {
             "exists": env.requested_branch_policy.exists,
             "policy_id": env.requested_branch_policy.policy_id,
@@ -590,7 +675,7 @@ class GitHubBootstrapProvider:
                 variable = self._read_environment_variable(owner, repo, snapshot.target, _VAR_NAME)
                 current = {"exists": variable.exists, "value": variable.value}
             else:
-                env = self._inventory_environment(owner, repo, snapshot.target, default_branch)
+                env = self._inventory_environment(owner, repo, snapshot.target, snapshot.branch_name or default_branch)
                 current = {
                     "deployment_branch_policy": env.deployment_branch_policy,
                     "branch_policy": {
@@ -617,11 +702,16 @@ class GitHubBootstrapProvider:
             for snapshot in snapshots:
                 if not snapshot.rollback:
                     continue
+                if _is_pending_snapshot(snapshot):
+                    # This action's own apply failed before it could be verified, so
+                    # there is no confirmed post-state to compare against; compensate
+                    # unconditionally instead of refusing on a manufactured drift.
+                    continue
                 current = self._read_live_state(owner, repo, branch, snapshot)
                 if canonical_sha256(current) != canonical_sha256(
                     snapshot.expected_after
                 ):
-                    raise GitHubProviderApplyError(
+                    raise GitHubProviderError(
                         f"rollback refused because live state drifted: {snapshot.action_id}"
                     )
         operations: list[tuple[str, str, object]] = []
@@ -792,13 +882,26 @@ class GitHubBootstrapProvider:
         return b"".join(chunks)
 
     def _json(self, response: httpx.Response) -> Mapping[str, Any]:
+        parse_failed = False
         try:
             payload = json.loads(response.content.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
+            parse_failed = True
+        # Raised outside the except block so the sanitized error never retains a
+        # __context__ pointing at the raw (potentially secret-bearing) response
+        # body carried on UnicodeDecodeError.object / JSONDecodeError.doc.
+        if parse_failed:
             raise GitHubProviderError("GitHub response must be a JSON object")
         if not isinstance(payload, Mapping):
             raise GitHubProviderError("GitHub response must be a JSON object")
         return payload
 
 
-__all__ = ["GitHubBootstrapProvider", "GitHubProviderApplyError", "GitHubProviderError", "GitHubProviderTransportError"]
+__all__ = [
+    "GitHubBootstrapProvider",
+    "GitHubProviderApplyError",
+    "GitHubProviderError",
+    "GitHubProviderRollbackError",
+    "GitHubProviderTransportError",
+    "rollback_failure_details",
+]
