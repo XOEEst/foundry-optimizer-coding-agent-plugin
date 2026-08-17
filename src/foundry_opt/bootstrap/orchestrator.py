@@ -9,7 +9,12 @@ from foundry_opt.bootstrap.contracts import BindingAssessment, BootstrapAction, 
 from foundry_opt.bootstrap.discovery import DiscoveryResult, discover_repository_agents
 from foundry_opt.bootstrap.errors import BootstrapApplyError
 from foundry_opt.bootstrap.operation_state import OperationStateEnvelope, SelectionPlan, next_generation, read_operation_state, status_from_state, write_operation_state
-from foundry_opt.bootstrap.providers.foundry import rollback_failure_details
+from foundry_opt.bootstrap.providers.foundry import (
+    rollback_failure_details as foundry_rollback_failure_details,
+)
+from foundry_opt.bootstrap.providers.github import (
+    rollback_failure_details as github_rollback_failure_details,
+)
 from foundry_opt.bootstrap.receipts import ApplyPhaseName, ApprovalRecord, EvaluationReplacementRecord, PhaseReceipt, failure_receipt, summarize_receipt
 
 _PHASES: tuple[ApplyPhaseName, ...] = ("repository", "github", "azure", "evaluations")
@@ -141,7 +146,7 @@ class BootstrapOrchestrator:
                 pass
             elif isinstance(exc, BaseException) and hasattr(exc, "args"):
                 pass
-            rollback_receipt, rollback_state = rollback_failure_details(exc)
+            rollback_receipt, rollback_state = _rollback_failure_details(exc)
             if rollback_receipt is not None:
                 original_receipt = rollback_receipt
                 compensation_actions = rollback_receipt.compensation_required_actions
@@ -229,3 +234,16 @@ class BootstrapOrchestrator:
             if isinstance(exc, error_type):
                 return code, type(exc).__name__[:64]
         return "provider-failed", "Exception"
+
+
+def _rollback_failure_details(
+    exc: BaseException,
+) -> tuple[BootstrapReceipt | None, Mapping[str, object]]:
+    for resolver in (
+        foundry_rollback_failure_details,
+        github_rollback_failure_details,
+    ):
+        receipt, state = resolver(exc)
+        if receipt is not None:
+            return receipt, state
+    return None, {}
