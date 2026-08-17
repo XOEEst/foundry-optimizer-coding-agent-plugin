@@ -39,4 +39,4 @@ uv sync --frozen --project "$extract_root" >/dev/null
 export FOUNDRY_OPT_RUNTIME_REPOSITORY="$repo"
 export FOUNDRY_OPT_RUNTIME_COMMIT="$sha"
 export FOUNDRY_OPT_RUNTIME_LOCK_SHA256="$lock_hash"
-exec "$extract_root/.venv/bin/foundry-opt" "$@"
+exec uv run --no-sync --project "$extract_root" foundry-opt "$@"

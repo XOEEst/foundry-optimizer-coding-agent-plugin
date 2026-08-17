@@ -42,6 +42,8 @@ def load_trusted_manifest(plan_input: BootstrapPlanInput) -> tuple[TemplatePaylo
     payloads: list[TemplatePayloadSpec] = []
     base = Path(__file__).resolve().parents[3]
     for payload in manifest.managed_payloads:
+        if payload.template_id == "bootstrap-lock":
+            continue
         if payload.template_id == "sidecar":
             if plan_input.evaluations_phase is None:
                 continue

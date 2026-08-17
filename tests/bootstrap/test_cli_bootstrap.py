@@ -119,6 +119,7 @@ def test_bootstrap_apply_requires_hash_and_matches_active_plan(tmp_path: Path) -
     ok = runner.invoke(app, ["bootstrap", "apply", "--repository-id", "org/repo", "--operation-id", "op-2", "--phase", "repository", "--approval-file", str(good), "--plan-input", str(plan_input), "--repo-root", str(repo), "--state-root", str(state_root)])
     assert ok.exit_code == 0, ok.stdout
     assert not (repo / "app" / ".foundry" / "foundry-opt.yaml").exists()
+    assert not (repo / ".github" / "foundry-opt.lock.yml").exists()
     registry = yaml.safe_load(
         (repo / ".foundry-opt" / "registry.yaml").read_text(encoding="utf-8")
     )

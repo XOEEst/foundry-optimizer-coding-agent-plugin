@@ -329,6 +329,7 @@ def register_bootstrap_commands(app: typer.Typer) -> None:
     @evaluation_app.command("inventory")
     def evaluation_inventory(
         plan_input: Path = typer.Option(..., "--plan-input"),
+        repo_root: Path = typer.Option(Path("."), "--repo-root"),
     ) -> None:
         try:
             loaded = load_bootstrap_plan_input(plan_input)
@@ -337,6 +338,7 @@ def register_bootstrap_commands(app: typer.Typer) -> None:
                 {
                     "status": "ok",
                     "command": "evaluation inventory",
+                    "repo_root": str(repo_root.resolve()),
                     "runtime_commit": loaded.runtime_provenance.runtime_commit,
                     "inventory": inventory,
                 }
@@ -347,6 +349,7 @@ def register_bootstrap_commands(app: typer.Typer) -> None:
     @evaluation_app.command("plan")
     def evaluation_plan(
         plan_input: Path = typer.Option(..., "--plan-input"),
+        repo_root: Path = typer.Option(Path("."), "--repo-root"),
     ) -> None:
         try:
             loaded = load_bootstrap_plan_input(plan_input)
@@ -359,6 +362,8 @@ def register_bootstrap_commands(app: typer.Typer) -> None:
                 {
                     "status": "ok",
                     "command": "evaluation plan",
+                    "repo_root": str(repo_root.resolve()),
+                    "runtime_commit": loaded.runtime_provenance.runtime_commit,
                     "plan_input_hash": loaded.plan_input_hash,
                     "actions": actions,
                 }
@@ -377,9 +382,14 @@ def register_bootstrap_commands(app: typer.Typer) -> None:
     ) -> None:
         try:
             loaded = load_bootstrap_plan_input(plan_input)
-            approval = ApprovalRecord.model_validate(
-                load_json_file(approval_file, subject="approval")
-            )
+            approval_payload = load_json_file(approval_file, subject="approval")
+            if _APPROVAL_HASH_FIELD not in approval_payload:
+                raise BootstrapCliError(
+                    "approval-hash-required",
+                    "approval record hash is required",
+                    exit_code=BootstrapExitCode.CONFIG,
+                )
+            approval = ApprovalRecord.model_validate(approval_payload)
             receipt = _build_orchestrator(
                 repo_root=repo_root,
                 plan_input=loaded,
@@ -395,6 +405,8 @@ def register_bootstrap_commands(app: typer.Typer) -> None:
                 {
                     "status": "ok" if receipt.state == "applied" else "error",
                     "command": "evaluation apply",
+                    "repo_root": str(repo_root.resolve()),
+                    "runtime_commit": loaded.runtime_provenance.runtime_commit,
                     "receipt": receipt.model_dump(mode="json"),
                 }
             )
@@ -407,11 +419,15 @@ def register_bootstrap_commands(app: typer.Typer) -> None:
     def evaluation_status(
         repository_id: str = typer.Option(..., "--repository-id"),
         operation_id: str = typer.Option(..., "--operation-id"),
+        repo_root: Path = typer.Option(Path("."), "--repo-root"),
         state_root: Path = typer.Option(default_state_root(), "--state-root"),
+        runtime_commit: str | None = typer.Option(None, "--runtime-commit"),
     ) -> None:
         try:
             current = read_operation_state(repository_id, operation_id, state_root=state_root)
-            emit_json({"status": "ok", "command": "evaluation status", "operation_id": operation_id, "replacement": current.evaluator_replacement.model_dump(mode="json") if current.evaluator_replacement else None})
+            resolved_commit = runtime_commit or current.runtime_commit
+            _require_exact_runtime(current.runtime_commit, resolved_commit)
+            emit_json({"status": "ok", "command": "evaluation status", "operation_id": operation_id, "repo_root": str(repo_root.resolve()), "runtime_commit": resolved_commit, "replacement": current.evaluator_replacement.model_dump(mode="json") if current.evaluator_replacement else None})
         except Exception as exc:
             _handle_error(exc)
 
@@ -419,11 +435,15 @@ def register_bootstrap_commands(app: typer.Typer) -> None:
     def evaluation_inspect(
         repository_id: str = typer.Option(..., "--repository-id"),
         operation_id: str = typer.Option(..., "--operation-id"),
+        repo_root: Path = typer.Option(Path("."), "--repo-root"),
         state_root: Path = typer.Option(default_state_root(), "--state-root"),
+        runtime_commit: str | None = typer.Option(None, "--runtime-commit"),
     ) -> None:
         try:
             state = read_operation_state(repository_id, operation_id, state_root=state_root)
-            emit_json({"status": "ok", "command": "evaluation inspect", "operation_id": operation_id, "bundle": state.evaluator_replacement.model_dump(mode="json") if state.evaluator_replacement else None, "lineage": state.evaluator_replacement.lineage_hash if state.evaluator_replacement else None, "provenance": "default/issue/pinned evaluators"})
+            resolved_commit = runtime_commit or state.runtime_commit
+            _require_exact_runtime(state.runtime_commit, resolved_commit)
+            emit_json({"status": "ok", "command": "evaluation inspect", "operation_id": operation_id, "repo_root": str(repo_root.resolve()), "runtime_commit": resolved_commit, "bundle": state.evaluator_replacement.model_dump(mode="json") if state.evaluator_replacement else None, "lineage": state.evaluator_replacement.lineage_hash if state.evaluator_replacement else None, "provenance": "default/issue/pinned evaluators"})
         except Exception as exc:
             _handle_error(exc)
 
@@ -431,11 +451,12 @@ def register_bootstrap_commands(app: typer.Typer) -> None:
     def evaluation_replace(
         replacement_file: Path = typer.Option(..., "--replacement-file"),
         plan_input: Path = typer.Option(..., "--plan-input"),
+        repo_root: Path = typer.Option(Path("."), "--repo-root"),
     ) -> None:
         try:
             loaded = load_bootstrap_plan_input(plan_input)
             replacement = EvaluationReplacementRecord.model_validate(load_json_file(replacement_file, subject="replacement"))
-            emit_json({"status": "ok", "command": "evaluation replace", "replacement": replacement.model_dump(mode="json"), "plan_input_hash": loaded.plan_input_hash, "explicit_replace": True, "human_rubric_editor": False, "next_action": "run bootstrap plan and approve the evaluations phase"})
+            emit_json({"status": "ok", "command": "evaluation replace", "repo_root": str(repo_root.resolve()), "runtime_commit": loaded.runtime_provenance.runtime_commit, "replacement": replacement.model_dump(mode="json"), "plan_input_hash": loaded.plan_input_hash, "explicit_replace": True, "human_rubric_editor": False, "next_action": "run bootstrap plan and approve the evaluations phase"})
         except Exception as exc:
             _handle_error(exc)
 

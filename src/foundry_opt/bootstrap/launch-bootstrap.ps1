@@ -1,3 +1,4 @@
+[CmdletBinding(PositionalBinding=$false)]
 param(
   [Parameter(Mandatory=$true)][string]$Repository,
   [string]$ExpectedLockSha256,
@@ -37,5 +38,5 @@ if ($ExpectedLockSha256 -and $ExpectedLockSha256.ToLowerInvariant() -ne $lockHas
 $env:FOUNDRY_OPT_RUNTIME_REPOSITORY = $Repository
 $env:FOUNDRY_OPT_RUNTIME_COMMIT = $sha
 $env:FOUNDRY_OPT_RUNTIME_LOCK_SHA256 = $lockHash
-& (Join-Path $checkout ".venv\Scripts\foundry-opt.exe") @ForwardedArgs
+& uv run --no-sync --project $checkout foundry-opt @ForwardedArgs
 exit $LASTEXITCODE
