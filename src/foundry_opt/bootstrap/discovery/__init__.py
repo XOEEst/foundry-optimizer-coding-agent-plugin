@@ -30,6 +30,7 @@ _MAX_HASH_BYTES = 2 * 1024 * 1024
 _MAX_METADATA_BYTES = 16 * 1024
 _MAX_DEPTH = 8
 _MAX_ENTRIES = 5000
+_MAX_FILES = 2000
 _MAX_AGGREGATE_BYTES = 16 * 1024 * 1024
 _SHA256_LEN = 64
 
@@ -142,14 +143,24 @@ class _ScanCache:
         self.files_by_root: dict[str, tuple[_ScannedFile, ...]] = {}
         self.fingerprint_by_root: dict[str, str] = {}
         self.runtime_by_root: dict[str, RuntimeFacts] = {}
+        self.budget = _Budget()
+        self.casefold_paths: dict[tuple[str, ...], str] = {}
 
     def scan_root(self, root: str) -> tuple[_ScannedFile, ...]:
         normalized = _normalize_root(root, field="scan root")
         cached = self.files_by_root.get(normalized)
         if cached is not None:
             return cached
+        if normalized != "." and "." in self.files_by_root:
+            prefix = f"{normalized}/"
+            derived = tuple(
+                item
+                for item in self.files_by_root["."]
+                if item.relative.startswith(prefix)
+            )
+            self.files_by_root[normalized] = derived
+            return derived
         base = self.repository_root if normalized == "." else _assert_no_links_in_path(self.repository_root, normalized)
-        budget = _Budget()
         out: list[_ScannedFile] = []
         pending: list[tuple[Path, int]] = [(base, 0)]
         while pending:
@@ -157,12 +168,20 @@ class _ScanCache:
             if depth > _MAX_DEPTH:
                 raise BootstrapConfigError(f"repository scan exceeded max depth under {normalized!r}")
             for child in sorted(current.iterdir(), key=lambda item: (item.name.casefold(), item.name), reverse=True):
-                budget.entries += 1
-                if budget.entries > _MAX_ENTRIES:
+                self.budget.entries += 1
+                if self.budget.entries > _MAX_ENTRIES:
                     raise BootstrapConfigError("repository scan exceeded max entry count")
                 relative = PurePosixPath(_repo_rel(child, self.repository_root))
                 if not _is_allowed_relative(relative):
                     continue
+                collision_key = tuple(part.casefold() for part in relative.parts)
+                previous = self.casefold_paths.get(collision_key)
+                if previous is not None and previous != relative.as_posix():
+                    raise BootstrapConfigError(
+                        "case-fold-colliding repository paths: "
+                        f"{previous!r} and {relative.as_posix()!r}"
+                    )
+                self.casefold_paths[collision_key] = relative.as_posix()
                 lst = _safe_lstat(child)
                 if stat.S_ISLNK(lst.st_mode) or child.is_junction():
                     raise BootstrapConfigError(f"repository contains symlinked path: {relative.as_posix()}")
@@ -171,9 +190,11 @@ class _ScanCache:
                     continue
                 if not stat.S_ISREG(lst.st_mode):
                     raise BootstrapConfigError(f"repository contains unsupported special file: {relative.as_posix()}")
-                budget.files += 1
-                budget.bytes += lst.st_size
-                if budget.bytes > _MAX_AGGREGATE_BYTES:
+                self.budget.files += 1
+                self.budget.bytes += lst.st_size
+                if self.budget.files > _MAX_FILES:
+                    raise BootstrapConfigError("repository scan exceeded max file count")
+                if self.budget.bytes > _MAX_AGGREGATE_BYTES:
                     raise BootstrapConfigError("repository scan exceeded aggregate byte budget")
                 sha256 = None
                 if lst.st_size <= _MAX_HASH_BYTES:
