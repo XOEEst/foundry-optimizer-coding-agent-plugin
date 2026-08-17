@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Mapping, Sequence
-from typing import Annotated, Any, ClassVar, Literal, Protocol, Self
+from typing import Annotated, Literal, Self
 
 from pydantic import Field, StringConstraints, ValidationError, field_validator, model_validator
 
@@ -11,17 +12,33 @@ from foundry_opt.bootstrap.errors import BootstrapConfigError, BootstrapPlanErro
 from foundry_opt.models import FrozenModel
 from foundry_opt.poc.config import (
     POCConfigurationError,
+    _validate_resource_id,
     load_strict_yaml_mapping,
     validate_repository_relative_path,
+    validate_repository_relative_paths,
 )
 
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
-SemVer = Annotated[str, StringConstraints(pattern=r"^v[0-9]+(?:\.[0-9]+){0,2}$")]
-VersionedId = Annotated[str, StringConstraints(pattern=r"^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?@[A-Za-z0-9._-]+$")]
 AgentId = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")]
-PhaseName = Literal["discovery", "repository", "providers", "evaluation", "apply", "verify", "rollback"]
-BindingStateName = Literal["unbound", "planned", "applied", "verified", "failed", "rolled_back"]
+AzureAIResourceUri = Annotated[
+    str,
+    StringConstraints(
+        pattern=(
+            r"^azureai://accounts/[^/]+/projects/[^/]+/"
+            r"(?:evaluators|data|evaluationDefinitions)/[^/]+/versions/[^/]+$"
+        )
+    ),
+]
+ApplyPhase = Literal["repository", "github", "azure", "evaluations"]
+OperationStage = Literal["planned", "applying", "verifying", "completed", "failed", "compensation_required"]
+BindingClassification = Literal["bound-aligned", "bound-diverged", "bound-unknown", "ready-unbound", "not-ready"]
+ResourceApplyState = Literal["planned", "created", "adopted", "updated", "verified", "failed", "skipped"]
 EvaluatorProvenance = Literal["reused_existing", "auto_generated_unreviewed", "issue_supplied_existing"]
+RuntimeKind = Literal["hosted"]
+DeploymentEligibility = Literal["eligible", "ineligible", "unknown"]
+IdentityKind = Literal["azure_subscription"]
+OwnershipMode = Literal["owned", "shared-template", "adopted"]
+ActivationOutcome = Literal["succeeded", "failed", "compensation_required", "unknown"]
 SemanticPatchOperation = Literal["replace", "insert_before", "insert_after", "delete"]
 
 PROHIBITED_CONTENT_KEYS: frozenset[str] = frozenset({
@@ -29,13 +46,18 @@ PROHIBITED_CONTENT_KEYS: frozenset[str] = frozenset({
     "token", "tokens", "raw_prompt", "raw_response", "transcript", "content",
 })
 MAX_ISSUE_EVALUATORS = 8
+_PROJECT_ENDPOINT_RE = re.compile(r"^https://[^\s]+/api/projects/[^\s/]+/?$")
 
 
-def _ensure_mapping(value: object, *, field: str) -> Mapping[str, object]:
-    if not isinstance(value, Mapping):
-        raise BootstrapConfigError(f"{field} must be a mapping")
-    if not all(isinstance(key, str) for key in value):
-        raise BootstrapConfigError(f"{field} keys must be strings")
+def _jsonable(value: object) -> object:
+    if isinstance(value, FrozenModel):
+        return value.model_dump(mode="json")
+    if isinstance(value, tuple):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, list):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, Mapping):
+        return {key: _jsonable(item) for key, item in value.items()}
     return value
 
 
@@ -56,18 +78,10 @@ def _validate_safe_path(value: str, *, field: str) -> str:
     return validate_repository_relative_path(value, field=field)
 
 
-def _normalize_weight_inputs(entries: Sequence["IssueEvaluatorRequestEntry"]) -> tuple[float, ...]:
-    explicit = [entry.weight is not None for entry in entries]
-    if not entries:
-        return ()
-    if any(explicit) and not all(explicit):
-        raw = [entry.weight if entry.weight is not None else 1.0 for entry in entries]
-    elif all(explicit):
-        raw = [entry.weight if entry.weight is not None else 1.0 for entry in entries]
-    else:
-        raw = [1.0 for _entry in entries]
-    total = sum(raw)
-    return tuple(weight / total for weight in raw)
+def _validate_project_endpoint(value: str, *, field: str) -> str:
+    if _PROJECT_ENDPOINT_RE.fullmatch(value) is None:
+        raise BootstrapConfigError(f"{field} must be an HTTPS Foundry project endpoint")
+    return value
 
 
 def _validate_weight(value: float | None, *, field: str) -> float | None:
@@ -85,16 +99,13 @@ def _reject_prohibited_mapping(value: Mapping[str, object], *, field: str) -> No
         raise BootstrapPlanError(f"{field} includes prohibited persisted content: {sorted(overlap)!r}")
 
 
-def _jsonable(value: object) -> object:
-    if isinstance(value, FrozenModel):
-        return value.model_dump(mode='json')
-    if isinstance(value, tuple):
-        return [_jsonable(item) for item in value]
-    if isinstance(value, list):
-        return [_jsonable(item) for item in value]
-    if isinstance(value, Mapping):
-        return {key: _jsonable(item) for key, item in value.items()}
-    return value
+def _normalize_weight_inputs(entries: Sequence["IssueEvaluatorRequestEntry"]) -> tuple[float, ...]:
+    explicit = [entry.weight is not None for entry in entries]
+    if not entries:
+        return ()
+    raw = [entry.weight if entry.weight is not None else 1.0 for entry in entries] if any(explicit) else [1.0 for _ in entries]
+    total = sum(raw)
+    return tuple(weight / total for weight in raw)
 
 
 class BootstrapDocument(FrozenModel):
@@ -109,110 +120,103 @@ class BootstrapDocument(FrozenModel):
             raise BootstrapConfigError(str(exc)) from exc
         except ValidationError as exc:
             raise BootstrapConfigError(str(exc)) from exc
-        except Exception as exc:
-            if isinstance(exc, BootstrapConfigError):
-                raise
-            raise BootstrapConfigError(str(exc)) from exc
 
 
-class GitHubSettings(BootstrapDocument):
+class DistributionSettings(BootstrapDocument):
     repository: str
-    default_branch: str
-    issue_label: str
+    channel: str
+    pin: str | None = None
+    optimizer_environment: str
+    deployment_environment: str
+    optimizer_client_id_variable: str
+    deployment_client_id_variable: str
 
 
-class SharedIdentity(BootstrapDocument):
-    tenant_id: str
-    subscription_id: str
-    project_id: str
-
-
-class ManagedFileLockEntry(BootstrapDocument):
-    path: str
-    sha256: Sha256
-    owner_agent_id: AgentId
-
-    @field_validator("path")
-    @classmethod
-    def validate_path(cls, value: str) -> str:
-        return _validate_safe_path(value, field="path")
-
-
-class CloudResourceOwnership(BootstrapDocument):
-    resource_kind: str
+class IdentitySettings(BootstrapDocument):
+    kind: IdentityKind
     resource_id: str
-    owner_agent_id: AgentId
-    binding_state: BindingStateName
 
-
-class BindingState(BootstrapDocument):
-    agent_id: AgentId
-    state: BindingStateName
-    resource_ids: tuple[str, ...] = ()
-
-
-class AgentSidecarGroup(BootstrapDocument):
-    roots: tuple[str, ...]
-    shared_source_with: tuple[AgentId, ...] = ()
-    managed_files: tuple[ManagedFileLockEntry, ...] = ()
-    bindings: tuple[BindingState, ...] = ()
-    cloud_resources: tuple[CloudResourceOwnership, ...] = ()
-
-    @field_validator("roots")
+    @field_validator("resource_id")
     @classmethod
-    def validate_roots(cls, value: Sequence[str]) -> tuple[str, ...]:
-        roots = tuple(_validate_safe_path(root, field="roots") for root in value)
-        if not roots:
-            raise BootstrapConfigError("roots must not be empty")
-        return _casefold_unique(roots, field="roots")
-
-    @model_validator(mode="after")
-    def validate_overlaps(self) -> Self:
-        for left in self.roots:
-            for right in self.roots:
-                if left == right:
-                    continue
-                if left.startswith(right + "/") or right.startswith(left + "/"):
-                    if not self.shared_source_with:
-                        raise BootstrapConfigError("overlapping roots require shared_source_with")
-        return self
+    def validate_resource_id(cls, value: str) -> str:
+        return _validate_resource_id(value, "resource_id")
 
 
 class ExplicitAgentEntry(BootstrapDocument):
     agent_id: AgentId
-    role: str
-    provider: str
-    sidecar: AgentSidecarGroup
+    root: str
+    config_path: str
+    enabled: bool = True
 
-
-class DistributionSettings(BootstrapDocument):
-    mode: Literal["frozen_v1"] = "frozen_v1"
-    repository_defaults_ref: str
-    github: GitHubSettings
-    identity: SharedIdentity
-    agents: tuple[ExplicitAgentEntry, ...]
-
-    @model_validator(mode="after")
-    def validate_agent_ids(self) -> Self:
-        _casefold_unique([entry.agent_id for entry in self.agents], field="agents")
-        return self
+    @field_validator("root", "config_path")
+    @classmethod
+    def validate_paths(cls, value: str, info) -> str:
+        return _validate_safe_path(value, field=info.field_name)
 
 
 class RootRegistry(BootstrapDocument):
     distribution: DistributionSettings
+    identity: IdentitySettings
+    agents: tuple[ExplicitAgentEntry, ...]
+
+    @model_validator(mode="after")
+    def validate_agents(self) -> Self:
+        _casefold_unique([agent.agent_id for agent in self.agents], field="agents")
+        _casefold_unique([agent.root for agent in self.agents], field="agent roots")
+        return self
+
+
+class SharedSourceRelation(BootstrapDocument):
+    agent_id: AgentId
+    relation: Literal["shared-source"]
+
+
+class RuntimeProtocolSettings(BootstrapDocument):
+    kind: RuntimeKind
+    entrypoint: tuple[str, ...]
+    protocol_name: str
+    protocol_version: str
+
+
+class FoundryProjectSettings(BootstrapDocument):
+    project_endpoint: str
+    account_resource_id: str
+    agent_name: str
+    expected_version: str
+
+    @field_validator("project_endpoint")
+    @classmethod
+    def validate_project_endpoint_field(cls, value: str) -> str:
+        return _validate_project_endpoint(value, field="project_endpoint")
+
+    @field_validator("account_resource_id")
+    @classmethod
+    def validate_account_resource_id(cls, value: str) -> str:
+        return _validate_resource_id(value, "account_resource_id")
+
+
+class DecisionPolicy(BootstrapDocument):
+    minimum_aggregate_delta: float
+    focused_cases_required: bool
+    max_regressions: int
 
 
 class ImmutableDatasetReference(BootstrapDocument):
-    dataset_id: VersionedId
+    dataset_id: AzureAIResourceUri
 
 
 class ImmutableDefinitionReference(BootstrapDocument):
-    definition_id: VersionedId
+    definition_id: AzureAIResourceUri
 
 
 class EvaluatorReference(BootstrapDocument):
-    evaluator_id: VersionedId
+    evaluator_id: AzureAIResourceUri
     provenance: EvaluatorProvenance
+
+
+class EvaluatorLineageEntry(BootstrapDocument):
+    evaluator: EvaluatorReference
+    source: Literal["default_bundle", "issue_request", "legacy_metadata"]
 
 
 class ScoreNormalizationContract(BootstrapDocument):
@@ -264,11 +268,7 @@ class ResolvedWeightedObjective(BootstrapDocument):
             "normalized_weights": list(normalized),
             "score_normalization": ScoreNormalizationContract().model_dump(mode="json"),
         }
-        return cls(
-            evaluators=tuple(entries),
-            normalized_weights=normalized,
-            objective_hash=canonical_sha256(payload),
-        )
+        return cls(evaluators=tuple(entries), normalized_weights=normalized, objective_hash=canonical_sha256(payload))
 
     @model_validator(mode="after")
     def validate_hash(self) -> Self:
@@ -284,8 +284,114 @@ class ResolvedWeightedObjective(BootstrapDocument):
 
 class DefaultEvaluatorBundle(BootstrapDocument):
     objective: ResolvedWeightedObjective
-    datasets: tuple[ImmutableDatasetReference, ...] = ()
-    definitions: tuple[ImmutableDefinitionReference, ...] = ()
+    datasets: tuple[ImmutableDatasetReference, ...]
+    definitions: tuple[ImmutableDefinitionReference, ...]
+    evaluator_lineage: tuple[EvaluatorLineageEntry, ...] = ()
+
+
+class HardGuardrail(BootstrapDocument):
+    evaluator_name: str
+    required_pass_rate: float
+    required: bool = True
+
+
+class DeploymentSettings(BootstrapDocument):
+    environment: str
+    enabled: bool
+    eligibility: DeploymentEligibility
+
+
+class BootstrapSidecar(BootstrapDocument):
+    repo_agent_id: AgentId
+    source_root: str
+    package_root: str
+    editable_paths: tuple[str, ...]
+    shared_source_relations: tuple[SharedSourceRelation, ...] = ()
+    runtime: RuntimeProtocolSettings
+    foundry_project: FoundryProjectSettings
+    baseline_model: str
+    allowed_models: tuple[str, ...]
+    max_candidates: int
+    decision_policy: DecisionPolicy
+    development_dataset: ImmutableDatasetReference
+    validating_dataset: ImmutableDatasetReference
+    default_evaluator_bundle: DefaultEvaluatorBundle
+    max_issue_evaluators: int = MAX_ISSUE_EVALUATORS
+    hard_guardrails: tuple[HardGuardrail, ...]
+    deployment: DeploymentSettings
+
+    @field_validator("source_root", "package_root")
+    @classmethod
+    def validate_root_paths(cls, value: str, info) -> str:
+        if info.field_name == 'package_root' and value == '.':
+            return value
+        return _validate_safe_path(value, field=info.field_name)
+
+    @field_validator("editable_paths")
+    @classmethod
+    def validate_editable_paths(cls, value: Sequence[str]) -> tuple[str, ...]:
+        return validate_repository_relative_paths(value, field="editable_paths", allow_glob=True)
+
+    @model_validator(mode="after")
+    def validate_source_relationships(self) -> Self:
+        editable_roots = tuple(path.split('/')[0] for path in self.editable_paths)
+        _casefold_unique(editable_roots, field="editable path roots")
+        if self.max_issue_evaluators > MAX_ISSUE_EVALUATORS:
+            raise BootstrapConfigError("max_issue_evaluators cannot exceed default ceiling of 8")
+        return self
+
+
+class ManagedFileEntry(BootstrapDocument):
+    path: str
+    ownership_mode: OwnershipMode
+    template_base_sha256: Sha256
+    applied_sha256: Sha256
+    semantic_patch_id: str | None = None
+
+    @field_validator("path")
+    @classmethod
+    def validate_path(cls, value: str) -> str:
+        return _validate_safe_path(value, field="path")
+
+
+class GitHubEnvironmentLedgerEntry(BootstrapDocument):
+    environment: str
+    variable_names: tuple[str, ...]
+
+
+class IdentityOwnershipLedgerEntry(BootstrapDocument):
+    fic_resource_id: str | None = None
+    rbac_resource_id: str | None = None
+    foundry_resource_id: str | None = None
+
+    @field_validator("fic_resource_id", "rbac_resource_id", "foundry_resource_id")
+    @classmethod
+    def validate_optional_resource_id(cls, value: str | None, info) -> str | None:
+        if value is None:
+            return None
+        return _validate_resource_id(value, info.field_name)
+
+
+class ActivationOutcomeRecord(BootstrapDocument):
+    outcome: ActivationOutcome
+    detail: str | None = None
+
+
+class BootstrapLock(BootstrapDocument):
+    engine: str
+    runtime_repository: str
+    channel: str
+    exact_revision: str
+    managed_files: tuple[ManagedFileEntry, ...]
+    github_environments: tuple[GitHubEnvironmentLedgerEntry, ...]
+    identity_ownership: tuple[IdentityOwnershipLedgerEntry, ...]
+    sidecar_paths: tuple[str, ...]
+    last_activation: ActivationOutcomeRecord
+
+    @field_validator("sidecar_paths")
+    @classmethod
+    def validate_sidecar_paths(cls, value: Sequence[str]) -> tuple[str, ...]:
+        return tuple(_validate_safe_path(item, field="sidecar_paths") for item in value)
 
 
 class SemanticPatchSpec(BootstrapDocument):
@@ -301,7 +407,7 @@ class SemanticPatchSpec(BootstrapDocument):
 
 
 class TemplatePayloadSpec(BootstrapDocument):
-    template_id: VersionedId
+    template_id: str
     destination_path: str
     payload: Mapping[str, object]
     semantic_patches: tuple[SemanticPatchSpec, ...] = ()
@@ -320,59 +426,88 @@ class TemplatePayloadSpec(BootstrapDocument):
 
 class BootstrapAction(BootstrapDocument):
     action_id: str
-    phase: PhaseName
+    phase: ApplyPhase
+    stage: OperationStage
     kind: str
+    target_agent_id: AgentId | None = None
     template_payload: TemplatePayloadSpec | None = None
 
 
+class FingerprintRecord(BootstrapDocument):
+    label: str
+    sha256: Sha256
+
+
+class RedactedStatusInfo(BootstrapDocument):
+    code: str
+    summary: str
+
+
 class BootstrapPlan(BootstrapDocument):
-    plan_id: str
-    phases: tuple[PhaseName, ...]
+    operation_id: str
+    runtime_sha256: Sha256
+    repository_identity: str
     actions: tuple[BootstrapAction, ...]
-    managed_files: tuple[ManagedFileLockEntry, ...] = ()
     plan_hash: Sha256
 
     @model_validator(mode="after")
     def validate_hash(self) -> Self:
         payload = self._hash_payload()
-        expected = canonical_sha256(payload)
-        if self.plan_hash != expected:
+        if self.plan_hash != canonical_sha256(payload):
             raise BootstrapPlanError("plan_hash does not match canonical plan payload")
         return self
 
     def _hash_payload(self) -> dict[str, object]:
-        payload = _jsonable(self.model_dump(mode="json", exclude={"schema_version", "plan_hash"}))
+        payload = _jsonable(self.model_dump(mode="json", exclude={"plan_hash"}))
         _reject_prohibited_mapping(payload, field="plan")
         return payload
 
     @classmethod
     def create(cls, **values: object) -> "BootstrapPlan":
         payload = _jsonable(dict(values))
-        _reject_prohibited_mapping(payload, field="plan")
-        materialized = cls.model_construct(schema_version=1, plan_hash="0" * 64, **payload)
-        hash_payload = materialized._hash_payload()
-        payload["plan_hash"] = canonical_sha256(hash_payload)
-        return cls.model_validate(payload)
+        _reject_prohibited_mapping(payload, field='plan')
+        candidate = cls.model_construct(schema_version=1, plan_hash='0' * 64, **payload)
+        hashed = canonical_sha256(candidate._hash_payload())
+        return cls.model_validate({**payload, 'plan_hash': hashed})
 
 
 class BootstrapReceipt(BootstrapDocument):
-    plan_hash: Sha256 = '0' * 64
-    applied_actions: tuple[str, ...]
+    operation_id: str
+    runtime_sha256: Sha256
+    repository_identity: str
+    plan_hash: Sha256
+    before_fingerprints: tuple[FingerprintRecord, ...] = ()
+    after_fingerprints: tuple[FingerprintRecord, ...] = ()
+    created_actions: tuple[str, ...] = ()
+    adopted_actions: tuple[str, ...] = ()
+    changed_actions: tuple[str, ...] = ()
+    skipped_actions: tuple[str, ...] = ()
+    compensation_required_actions: tuple[str, ...] = ()
+    error_info: RedactedStatusInfo | None = None
+    resume_info: RedactedStatusInfo | None = None
     receipt_hash: Sha256
 
     @model_validator(mode="after")
     def validate_hash(self) -> Self:
-        payload = _jsonable(self.model_dump(mode="json", exclude={"schema_version", "receipt_hash"}))
+        payload = _jsonable(self.model_dump(mode="json", exclude={"receipt_hash"}))
         _reject_prohibited_mapping(payload, field="receipt")
         if self.receipt_hash != canonical_sha256(payload):
             raise BootstrapPlanError("receipt_hash does not match canonical receipt payload")
         return self
 
     @classmethod
-    def create(cls, *, plan_hash: str, applied_actions: Sequence[str]) -> "BootstrapReceipt":
-        payload = _jsonable({"plan_hash": plan_hash, "applied_actions": list(applied_actions)})
-        payload["receipt_hash"] = canonical_sha256(payload)
-        return cls.model_validate(payload)
+    def create(cls, **values: object) -> "BootstrapReceipt":
+        payload = _jsonable(dict(values))
+        _reject_prohibited_mapping(payload, field='receipt')
+        candidate = cls.model_construct(schema_version=1, receipt_hash='0' * 64, **payload)
+        hash_payload = _jsonable(candidate.model_dump(mode='json', exclude={'receipt_hash'}))
+        return cls.model_validate({**payload, 'receipt_hash': canonical_sha256(hash_payload)})
+
+
+class LegacyMigrationProposal(BootstrapDocument):
+    registry: RootRegistry
+    sidecars: tuple[BootstrapSidecar, ...]
+    actions: tuple[BootstrapAction, ...] = ()
 
 
 __all__ = [name for name in globals() if not name.startswith("_")]

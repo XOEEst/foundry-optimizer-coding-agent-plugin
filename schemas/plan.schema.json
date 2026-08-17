@@ -13,13 +13,10 @@
         },
         "phase": {
           "enum": [
-            "discovery",
             "repository",
-            "providers",
-            "evaluation",
-            "apply",
-            "verify",
-            "rollback"
+            "github",
+            "azure",
+            "evaluations"
           ],
           "title": "Phase",
           "type": "string"
@@ -29,6 +26,31 @@
           "default": 1,
           "title": "Schema Version",
           "type": "integer"
+        },
+        "stage": {
+          "enum": [
+            "planned",
+            "applying",
+            "verifying",
+            "completed",
+            "failed",
+            "compensation_required"
+          ],
+          "title": "Stage",
+          "type": "string"
+        },
+        "target_agent_id": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target Agent Id"
         },
         "template_payload": {
           "anyOf": [
@@ -45,41 +67,10 @@
       "required": [
         "action_id",
         "phase",
+        "stage",
         "kind"
       ],
       "title": "BootstrapAction",
-      "type": "object"
-    },
-    "ManagedFileLockEntry": {
-      "additionalProperties": false,
-      "properties": {
-        "owner_agent_id": {
-          "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$",
-          "title": "Owner Agent Id",
-          "type": "string"
-        },
-        "path": {
-          "title": "Path",
-          "type": "string"
-        },
-        "schema_version": {
-          "const": 1,
-          "default": 1,
-          "title": "Schema Version",
-          "type": "integer"
-        },
-        "sha256": {
-          "pattern": "^[0-9a-f]{64}$",
-          "title": "Sha256",
-          "type": "string"
-        }
-      },
-      "required": [
-        "path",
-        "sha256",
-        "owner_agent_id"
-      ],
-      "title": "ManagedFileLockEntry",
       "type": "object"
     },
     "SemanticPatchSpec": {
@@ -157,7 +148,6 @@
           "type": "array"
         },
         "template_id": {
-          "pattern": "^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?@[A-Za-z0-9._-]+$",
           "title": "Template Id",
           "type": "string"
         }
@@ -180,37 +170,22 @@
       "title": "Actions",
       "type": "array"
     },
-    "managed_files": {
-      "default": [],
-      "items": {
-        "$ref": "#/$defs/ManagedFileLockEntry"
-      },
-      "title": "Managed Files",
-      "type": "array"
-    },
-    "phases": {
-      "items": {
-        "enum": [
-          "discovery",
-          "repository",
-          "providers",
-          "evaluation",
-          "apply",
-          "verify",
-          "rollback"
-        ],
-        "type": "string"
-      },
-      "title": "Phases",
-      "type": "array"
+    "operation_id": {
+      "title": "Operation Id",
+      "type": "string"
     },
     "plan_hash": {
       "pattern": "^[0-9a-f]{64}$",
       "title": "Plan Hash",
       "type": "string"
     },
-    "plan_id": {
-      "title": "Plan Id",
+    "repository_identity": {
+      "title": "Repository Identity",
+      "type": "string"
+    },
+    "runtime_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Runtime Sha256",
       "type": "string"
     },
     "schema_version": {
@@ -221,8 +196,9 @@
     }
   },
   "required": [
-    "plan_id",
-    "phases",
+    "operation_id",
+    "runtime_sha256",
+    "repository_identity",
     "actions",
     "plan_hash"
   ],

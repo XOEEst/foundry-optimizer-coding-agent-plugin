@@ -1,13 +1,215 @@
 {
+  "$defs": {
+    "ActivationOutcomeRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "outcome": {
+          "enum": [
+            "succeeded",
+            "failed",
+            "compensation_required",
+            "unknown"
+          ],
+          "title": "Outcome",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "title": "ActivationOutcomeRecord",
+      "type": "object"
+    },
+    "GitHubEnvironmentLedgerEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "environment": {
+          "title": "Environment",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "variable_names": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Variable Names",
+          "type": "array"
+        }
+      },
+      "required": [
+        "environment",
+        "variable_names"
+      ],
+      "title": "GitHubEnvironmentLedgerEntry",
+      "type": "object"
+    },
+    "IdentityOwnershipLedgerEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "fic_resource_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Fic Resource Id"
+        },
+        "foundry_resource_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Foundry Resource Id"
+        },
+        "rbac_resource_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rbac Resource Id"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "title": "IdentityOwnershipLedgerEntry",
+      "type": "object"
+    },
+    "ManagedFileEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "applied_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Applied Sha256",
+          "type": "string"
+        },
+        "ownership_mode": {
+          "enum": [
+            "owned",
+            "shared-template",
+            "adopted"
+          ],
+          "title": "Ownership Mode",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "semantic_patch_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Semantic Patch Id"
+        },
+        "template_base_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Template Base Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "ownership_mode",
+        "template_base_sha256",
+        "applied_sha256"
+      ],
+      "title": "ManagedFileEntry",
+      "type": "object"
+    }
+  },
   "additionalProperties": false,
   "properties": {
-    "owner_agent_id": {
-      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$",
-      "title": "Owner Agent Id",
+    "channel": {
+      "title": "Channel",
       "type": "string"
     },
-    "path": {
-      "title": "Path",
+    "engine": {
+      "title": "Engine",
+      "type": "string"
+    },
+    "exact_revision": {
+      "title": "Exact Revision",
+      "type": "string"
+    },
+    "github_environments": {
+      "items": {
+        "$ref": "#/$defs/GitHubEnvironmentLedgerEntry"
+      },
+      "title": "Github Environments",
+      "type": "array"
+    },
+    "identity_ownership": {
+      "items": {
+        "$ref": "#/$defs/IdentityOwnershipLedgerEntry"
+      },
+      "title": "Identity Ownership",
+      "type": "array"
+    },
+    "last_activation": {
+      "$ref": "#/$defs/ActivationOutcomeRecord"
+    },
+    "managed_files": {
+      "items": {
+        "$ref": "#/$defs/ManagedFileEntry"
+      },
+      "title": "Managed Files",
+      "type": "array"
+    },
+    "runtime_repository": {
+      "title": "Runtime Repository",
       "type": "string"
     },
     "schema_version": {
@@ -16,17 +218,25 @@
       "title": "Schema Version",
       "type": "integer"
     },
-    "sha256": {
-      "pattern": "^[0-9a-f]{64}$",
-      "title": "Sha256",
-      "type": "string"
+    "sidecar_paths": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Sidecar Paths",
+      "type": "array"
     }
   },
   "required": [
-    "path",
-    "sha256",
-    "owner_agent_id"
+    "engine",
+    "runtime_repository",
+    "channel",
+    "exact_revision",
+    "managed_files",
+    "github_environments",
+    "identity_ownership",
+    "sidecar_paths",
+    "last_activation"
   ],
-  "title": "ManagedFileLockEntry",
+  "title": "BootstrapLock",
   "type": "object"
 }

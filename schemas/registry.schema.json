@@ -1,234 +1,39 @@
 {
   "$defs": {
-    "AgentSidecarGroup": {
-      "additionalProperties": false,
-      "properties": {
-        "bindings": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/BindingState"
-          },
-          "title": "Bindings",
-          "type": "array"
-        },
-        "cloud_resources": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/CloudResourceOwnership"
-          },
-          "title": "Cloud Resources",
-          "type": "array"
-        },
-        "managed_files": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/ManagedFileLockEntry"
-          },
-          "title": "Managed Files",
-          "type": "array"
-        },
-        "roots": {
-          "items": {
-            "type": "string"
-          },
-          "title": "Roots",
-          "type": "array"
-        },
-        "schema_version": {
-          "const": 1,
-          "default": 1,
-          "title": "Schema Version",
-          "type": "integer"
-        },
-        "shared_source_with": {
-          "default": [],
-          "items": {
-            "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$",
-            "type": "string"
-          },
-          "title": "Shared Source With",
-          "type": "array"
-        }
-      },
-      "required": [
-        "roots"
-      ],
-      "title": "AgentSidecarGroup",
-      "type": "object"
-    },
-    "BindingState": {
-      "additionalProperties": false,
-      "properties": {
-        "agent_id": {
-          "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$",
-          "title": "Agent Id",
-          "type": "string"
-        },
-        "resource_ids": {
-          "default": [],
-          "items": {
-            "type": "string"
-          },
-          "title": "Resource Ids",
-          "type": "array"
-        },
-        "schema_version": {
-          "const": 1,
-          "default": 1,
-          "title": "Schema Version",
-          "type": "integer"
-        },
-        "state": {
-          "enum": [
-            "unbound",
-            "planned",
-            "applied",
-            "verified",
-            "failed",
-            "rolled_back"
-          ],
-          "title": "State",
-          "type": "string"
-        }
-      },
-      "required": [
-        "agent_id",
-        "state"
-      ],
-      "title": "BindingState",
-      "type": "object"
-    },
-    "CloudResourceOwnership": {
-      "additionalProperties": false,
-      "properties": {
-        "binding_state": {
-          "enum": [
-            "unbound",
-            "planned",
-            "applied",
-            "verified",
-            "failed",
-            "rolled_back"
-          ],
-          "title": "Binding State",
-          "type": "string"
-        },
-        "owner_agent_id": {
-          "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$",
-          "title": "Owner Agent Id",
-          "type": "string"
-        },
-        "resource_id": {
-          "title": "Resource Id",
-          "type": "string"
-        },
-        "resource_kind": {
-          "title": "Resource Kind",
-          "type": "string"
-        },
-        "schema_version": {
-          "const": 1,
-          "default": 1,
-          "title": "Schema Version",
-          "type": "integer"
-        }
-      },
-      "required": [
-        "resource_kind",
-        "resource_id",
-        "owner_agent_id",
-        "binding_state"
-      ],
-      "title": "CloudResourceOwnership",
-      "type": "object"
-    },
     "DistributionSettings": {
       "additionalProperties": false,
       "properties": {
-        "agents": {
-          "items": {
-            "$ref": "#/$defs/ExplicitAgentEntry"
-          },
-          "title": "Agents",
-          "type": "array"
-        },
-        "github": {
-          "$ref": "#/$defs/GitHubSettings"
-        },
-        "identity": {
-          "$ref": "#/$defs/SharedIdentity"
-        },
-        "mode": {
-          "const": "frozen_v1",
-          "default": "frozen_v1",
-          "title": "Mode",
+        "channel": {
+          "title": "Channel",
           "type": "string"
         },
-        "repository_defaults_ref": {
-          "title": "Repository Defaults Ref",
+        "deployment_client_id_variable": {
+          "title": "Deployment Client Id Variable",
           "type": "string"
         },
-        "schema_version": {
-          "const": 1,
-          "default": 1,
-          "title": "Schema Version",
-          "type": "integer"
-        }
-      },
-      "required": [
-        "repository_defaults_ref",
-        "github",
-        "identity",
-        "agents"
-      ],
-      "title": "DistributionSettings",
-      "type": "object"
-    },
-    "ExplicitAgentEntry": {
-      "additionalProperties": false,
-      "properties": {
-        "agent_id": {
-          "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$",
-          "title": "Agent Id",
+        "deployment_environment": {
+          "title": "Deployment Environment",
           "type": "string"
         },
-        "provider": {
-          "title": "Provider",
+        "optimizer_client_id_variable": {
+          "title": "Optimizer Client Id Variable",
           "type": "string"
         },
-        "role": {
-          "title": "Role",
+        "optimizer_environment": {
+          "title": "Optimizer Environment",
           "type": "string"
         },
-        "schema_version": {
-          "const": 1,
-          "default": 1,
-          "title": "Schema Version",
-          "type": "integer"
-        },
-        "sidecar": {
-          "$ref": "#/$defs/AgentSidecarGroup"
-        }
-      },
-      "required": [
-        "agent_id",
-        "role",
-        "provider",
-        "sidecar"
-      ],
-      "title": "ExplicitAgentEntry",
-      "type": "object"
-    },
-    "GitHubSettings": {
-      "additionalProperties": false,
-      "properties": {
-        "default_branch": {
-          "title": "Default Branch",
-          "type": "string"
-        },
-        "issue_label": {
-          "title": "Issue Label",
-          "type": "string"
+        "pin": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pin"
         },
         "repository": {
           "title": "Repository",
@@ -243,22 +48,34 @@
       },
       "required": [
         "repository",
-        "default_branch",
-        "issue_label"
+        "channel",
+        "optimizer_environment",
+        "deployment_environment",
+        "optimizer_client_id_variable",
+        "deployment_client_id_variable"
       ],
-      "title": "GitHubSettings",
+      "title": "DistributionSettings",
       "type": "object"
     },
-    "ManagedFileLockEntry": {
+    "ExplicitAgentEntry": {
       "additionalProperties": false,
       "properties": {
-        "owner_agent_id": {
+        "agent_id": {
           "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$",
-          "title": "Owner Agent Id",
+          "title": "Agent Id",
           "type": "string"
         },
-        "path": {
-          "title": "Path",
+        "config_path": {
+          "title": "Config Path",
+          "type": "string"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "root": {
+          "title": "Root",
           "type": "string"
         },
         "schema_version": {
@@ -266,26 +83,26 @@
           "default": 1,
           "title": "Schema Version",
           "type": "integer"
-        },
-        "sha256": {
-          "pattern": "^[0-9a-f]{64}$",
-          "title": "Sha256",
-          "type": "string"
         }
       },
       "required": [
-        "path",
-        "sha256",
-        "owner_agent_id"
+        "agent_id",
+        "root",
+        "config_path"
       ],
-      "title": "ManagedFileLockEntry",
+      "title": "ExplicitAgentEntry",
       "type": "object"
     },
-    "SharedIdentity": {
+    "IdentitySettings": {
       "additionalProperties": false,
       "properties": {
-        "project_id": {
-          "title": "Project Id",
+        "kind": {
+          "const": "azure_subscription",
+          "title": "Kind",
+          "type": "string"
+        },
+        "resource_id": {
+          "title": "Resource Id",
           "type": "string"
         },
         "schema_version": {
@@ -293,29 +110,30 @@
           "default": 1,
           "title": "Schema Version",
           "type": "integer"
-        },
-        "subscription_id": {
-          "title": "Subscription Id",
-          "type": "string"
-        },
-        "tenant_id": {
-          "title": "Tenant Id",
-          "type": "string"
         }
       },
       "required": [
-        "tenant_id",
-        "subscription_id",
-        "project_id"
+        "kind",
+        "resource_id"
       ],
-      "title": "SharedIdentity",
+      "title": "IdentitySettings",
       "type": "object"
     }
   },
   "additionalProperties": false,
   "properties": {
+    "agents": {
+      "items": {
+        "$ref": "#/$defs/ExplicitAgentEntry"
+      },
+      "title": "Agents",
+      "type": "array"
+    },
     "distribution": {
       "$ref": "#/$defs/DistributionSettings"
+    },
+    "identity": {
+      "$ref": "#/$defs/IdentitySettings"
     },
     "schema_version": {
       "const": 1,
@@ -325,7 +143,9 @@
     }
   },
   "required": [
-    "distribution"
+    "distribution",
+    "identity",
+    "agents"
   ],
   "title": "RootRegistry",
   "type": "object"

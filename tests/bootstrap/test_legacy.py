@@ -3,8 +3,8 @@ from __future__ import annotations
 from foundry_opt.bootstrap.legacy import import_legacy_single_agent_documents
 
 
-def test_legacy_import_builds_read_only_registry() -> None:
-    registry = import_legacy_single_agent_documents(
+def test_legacy_import_builds_migration_proposal() -> None:
+    proposal = import_legacy_single_agent_documents(
         lock_document="""schema_version: 1
 repository_url: https://example.invalid/repo.git
 commit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -47,9 +47,6 @@ hosted_runtime:
   dependency_resolution: remote_build
   protocol_name: responses
   protocol_version: '2.0.0'
-  cpu: '0.5'
-  memory: 1Gi
-  model_environment_variable: MODEL
 oidc:
   issuer: https://token.actions.githubusercontent.com
   audience: api://AzureADTokenExchange
@@ -62,17 +59,19 @@ model_deployments: []
 development_evaluation:
   name: development
   split: development
-  resolved_evaluation_id: eval
-  dataset_id: dataset@1
-  custom_evaluator_ids: []
+  resolved_evaluation_id: azureai://accounts/a/projects/p/evaluationDefinitions/dev/versions/1
+  dataset_id: azureai://accounts/a/projects/p/data/dev/versions/1
+  custom_evaluator_ids:
+    - azureai://accounts/a/projects/p/evaluators/quality/versions/1
 validating_evaluation:
   name: validating
   split: validating
-  resolved_evaluation_id: eval2
-  dataset_id: dataset@2
-  custom_evaluator_ids: []
+  resolved_evaluation_id: azureai://accounts/a/projects/p/evaluationDefinitions/val/versions/1
+  dataset_id: azureai://accounts/a/projects/p/data/val/versions/1
+  custom_evaluator_ids:
+    - azureai://accounts/a/projects/p/evaluators/quality/versions/1
 """,
     )
-    assert registry.distribution.github.repository == 'org/repo'
-    assert registry.distribution.agents[0].agent_id == 'example-agent'
-    assert registry.distribution.agents[0].sidecar.managed_files[0].path == '.github/foundry-opt.lock.yml'
+    assert proposal.registry.agents[0].agent_id == 'example-agent'
+    assert proposal.sidecars[0].development_dataset.dataset_id.endswith('/data/dev/versions/1')
+    assert proposal.actions[0].kind == 'review-migration'

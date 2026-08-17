@@ -1,19 +1,419 @@
 {
   "$defs": {
-    "BindingState": {
+    "DecisionPolicy": {
       "additionalProperties": false,
       "properties": {
-        "agent_id": {
-          "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$",
-          "title": "Agent Id",
+        "focused_cases_required": {
+          "title": "Focused Cases Required",
+          "type": "boolean"
+        },
+        "max_regressions": {
+          "title": "Max Regressions",
+          "type": "integer"
+        },
+        "minimum_aggregate_delta": {
+          "title": "Minimum Aggregate Delta",
+          "type": "number"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "minimum_aggregate_delta",
+        "focused_cases_required",
+        "max_regressions"
+      ],
+      "title": "DecisionPolicy",
+      "type": "object"
+    },
+    "DefaultEvaluatorBundle": {
+      "additionalProperties": false,
+      "properties": {
+        "datasets": {
+          "items": {
+            "$ref": "#/$defs/ImmutableDatasetReference"
+          },
+          "title": "Datasets",
+          "type": "array"
+        },
+        "definitions": {
+          "items": {
+            "$ref": "#/$defs/ImmutableDefinitionReference"
+          },
+          "title": "Definitions",
+          "type": "array"
+        },
+        "evaluator_lineage": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/EvaluatorLineageEntry"
+          },
+          "title": "Evaluator Lineage",
+          "type": "array"
+        },
+        "objective": {
+          "$ref": "#/$defs/ResolvedWeightedObjective"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "objective",
+        "datasets",
+        "definitions"
+      ],
+      "title": "DefaultEvaluatorBundle",
+      "type": "object"
+    },
+    "DeploymentSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "eligibility": {
+          "enum": [
+            "eligible",
+            "ineligible",
+            "unknown"
+          ],
+          "title": "Eligibility",
           "type": "string"
         },
-        "resource_ids": {
-          "default": [],
+        "enabled": {
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "environment": {
+          "title": "Environment",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "environment",
+        "enabled",
+        "eligibility"
+      ],
+      "title": "DeploymentSettings",
+      "type": "object"
+    },
+    "EvaluatorLineageEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "evaluator": {
+          "$ref": "#/$defs/EvaluatorReference"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "source": {
+          "enum": [
+            "default_bundle",
+            "issue_request",
+            "legacy_metadata"
+          ],
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "evaluator",
+        "source"
+      ],
+      "title": "EvaluatorLineageEntry",
+      "type": "object"
+    },
+    "EvaluatorReference": {
+      "additionalProperties": false,
+      "properties": {
+        "evaluator_id": {
+          "pattern": "^azureai://accounts/[^/]+/projects/[^/]+/(?:evaluators|data|evaluationDefinitions)/[^/]+/versions/[^/]+$",
+          "title": "Evaluator Id",
+          "type": "string"
+        },
+        "provenance": {
+          "enum": [
+            "reused_existing",
+            "auto_generated_unreviewed",
+            "issue_supplied_existing"
+          ],
+          "title": "Provenance",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "evaluator_id",
+        "provenance"
+      ],
+      "title": "EvaluatorReference",
+      "type": "object"
+    },
+    "FoundryProjectSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "account_resource_id": {
+          "title": "Account Resource Id",
+          "type": "string"
+        },
+        "agent_name": {
+          "title": "Agent Name",
+          "type": "string"
+        },
+        "expected_version": {
+          "title": "Expected Version",
+          "type": "string"
+        },
+        "project_endpoint": {
+          "title": "Project Endpoint",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "project_endpoint",
+        "account_resource_id",
+        "agent_name",
+        "expected_version"
+      ],
+      "title": "FoundryProjectSettings",
+      "type": "object"
+    },
+    "HardGuardrail": {
+      "additionalProperties": false,
+      "properties": {
+        "evaluator_name": {
+          "title": "Evaluator Name",
+          "type": "string"
+        },
+        "required": {
+          "default": true,
+          "title": "Required",
+          "type": "boolean"
+        },
+        "required_pass_rate": {
+          "title": "Required Pass Rate",
+          "type": "number"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "evaluator_name",
+        "required_pass_rate"
+      ],
+      "title": "HardGuardrail",
+      "type": "object"
+    },
+    "ImmutableDatasetReference": {
+      "additionalProperties": false,
+      "properties": {
+        "dataset_id": {
+          "pattern": "^azureai://accounts/[^/]+/projects/[^/]+/(?:evaluators|data|evaluationDefinitions)/[^/]+/versions/[^/]+$",
+          "title": "Dataset Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "dataset_id"
+      ],
+      "title": "ImmutableDatasetReference",
+      "type": "object"
+    },
+    "ImmutableDefinitionReference": {
+      "additionalProperties": false,
+      "properties": {
+        "definition_id": {
+          "pattern": "^azureai://accounts/[^/]+/projects/[^/]+/(?:evaluators|data|evaluationDefinitions)/[^/]+/versions/[^/]+$",
+          "title": "Definition Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "definition_id"
+      ],
+      "title": "ImmutableDefinitionReference",
+      "type": "object"
+    },
+    "IssueEvaluatorRequestEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "evaluator": {
+          "$ref": "#/$defs/EvaluatorReference"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "weight": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Weight"
+        }
+      },
+      "required": [
+        "evaluator"
+      ],
+      "title": "IssueEvaluatorRequestEntry",
+      "type": "object"
+    },
+    "ResolvedWeightedObjective": {
+      "additionalProperties": false,
+      "properties": {
+        "evaluators": {
+          "items": {
+            "$ref": "#/$defs/IssueEvaluatorRequestEntry"
+          },
+          "title": "Evaluators",
+          "type": "array"
+        },
+        "normalized_weights": {
+          "items": {
+            "type": "number"
+          },
+          "title": "Normalized Weights",
+          "type": "array"
+        },
+        "objective_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Objective Hash",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "score_normalization": {
+          "$ref": "#/$defs/ScoreNormalizationContract"
+        }
+      },
+      "required": [
+        "evaluators",
+        "normalized_weights",
+        "objective_hash"
+      ],
+      "title": "ResolvedWeightedObjective",
+      "type": "object"
+    },
+    "RuntimeProtocolSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "entrypoint": {
           "items": {
             "type": "string"
           },
-          "title": "Resource Ids",
+          "title": "Entrypoint",
+          "type": "array"
+        },
+        "kind": {
+          "const": "hosted",
+          "title": "Kind",
+          "type": "string"
+        },
+        "protocol_name": {
+          "title": "Protocol Name",
+          "type": "string"
+        },
+        "protocol_version": {
+          "title": "Protocol Version",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "entrypoint",
+        "protocol_name",
+        "protocol_version"
+      ],
+      "title": "RuntimeProtocolSettings",
+      "type": "object"
+    },
+    "ScoreNormalizationContract": {
+      "additionalProperties": false,
+      "properties": {
+        "maximum": {
+          "default": 1.0,
+          "title": "Maximum",
+          "type": "number"
+        },
+        "minimum": {
+          "default": 0.0,
+          "title": "Minimum",
+          "type": "number"
+        },
+        "normalized_range": {
+          "default": [
+            0.0,
+            1.0
+          ],
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "title": "Normalized Range",
           "type": "array"
         },
         "schema_version": {
@@ -21,136 +421,101 @@
           "default": 1,
           "title": "Schema Version",
           "type": "integer"
-        },
-        "state": {
-          "enum": [
-            "unbound",
-            "planned",
-            "applied",
-            "verified",
-            "failed",
-            "rolled_back"
-          ],
-          "title": "State",
+        }
+      },
+      "title": "ScoreNormalizationContract",
+      "type": "object"
+    },
+    "SharedSourceRelation": {
+      "additionalProperties": false,
+      "properties": {
+        "agent_id": {
+          "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$",
+          "title": "Agent Id",
           "type": "string"
+        },
+        "relation": {
+          "const": "shared-source",
+          "title": "Relation",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
         }
       },
       "required": [
         "agent_id",
-        "state"
+        "relation"
       ],
-      "title": "BindingState",
-      "type": "object"
-    },
-    "CloudResourceOwnership": {
-      "additionalProperties": false,
-      "properties": {
-        "binding_state": {
-          "enum": [
-            "unbound",
-            "planned",
-            "applied",
-            "verified",
-            "failed",
-            "rolled_back"
-          ],
-          "title": "Binding State",
-          "type": "string"
-        },
-        "owner_agent_id": {
-          "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$",
-          "title": "Owner Agent Id",
-          "type": "string"
-        },
-        "resource_id": {
-          "title": "Resource Id",
-          "type": "string"
-        },
-        "resource_kind": {
-          "title": "Resource Kind",
-          "type": "string"
-        },
-        "schema_version": {
-          "const": 1,
-          "default": 1,
-          "title": "Schema Version",
-          "type": "integer"
-        }
-      },
-      "required": [
-        "resource_kind",
-        "resource_id",
-        "owner_agent_id",
-        "binding_state"
-      ],
-      "title": "CloudResourceOwnership",
-      "type": "object"
-    },
-    "ManagedFileLockEntry": {
-      "additionalProperties": false,
-      "properties": {
-        "owner_agent_id": {
-          "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$",
-          "title": "Owner Agent Id",
-          "type": "string"
-        },
-        "path": {
-          "title": "Path",
-          "type": "string"
-        },
-        "schema_version": {
-          "const": 1,
-          "default": 1,
-          "title": "Schema Version",
-          "type": "integer"
-        },
-        "sha256": {
-          "pattern": "^[0-9a-f]{64}$",
-          "title": "Sha256",
-          "type": "string"
-        }
-      },
-      "required": [
-        "path",
-        "sha256",
-        "owner_agent_id"
-      ],
-      "title": "ManagedFileLockEntry",
+      "title": "SharedSourceRelation",
       "type": "object"
     }
   },
   "additionalProperties": false,
   "properties": {
-    "bindings": {
-      "default": [],
-      "items": {
-        "$ref": "#/$defs/BindingState"
-      },
-      "title": "Bindings",
-      "type": "array"
-    },
-    "cloud_resources": {
-      "default": [],
-      "items": {
-        "$ref": "#/$defs/CloudResourceOwnership"
-      },
-      "title": "Cloud Resources",
-      "type": "array"
-    },
-    "managed_files": {
-      "default": [],
-      "items": {
-        "$ref": "#/$defs/ManagedFileLockEntry"
-      },
-      "title": "Managed Files",
-      "type": "array"
-    },
-    "roots": {
+    "allowed_models": {
       "items": {
         "type": "string"
       },
-      "title": "Roots",
+      "title": "Allowed Models",
       "type": "array"
+    },
+    "baseline_model": {
+      "title": "Baseline Model",
+      "type": "string"
+    },
+    "decision_policy": {
+      "$ref": "#/$defs/DecisionPolicy"
+    },
+    "default_evaluator_bundle": {
+      "$ref": "#/$defs/DefaultEvaluatorBundle"
+    },
+    "deployment": {
+      "$ref": "#/$defs/DeploymentSettings"
+    },
+    "development_dataset": {
+      "$ref": "#/$defs/ImmutableDatasetReference"
+    },
+    "editable_paths": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Editable Paths",
+      "type": "array"
+    },
+    "foundry_project": {
+      "$ref": "#/$defs/FoundryProjectSettings"
+    },
+    "hard_guardrails": {
+      "items": {
+        "$ref": "#/$defs/HardGuardrail"
+      },
+      "title": "Hard Guardrails",
+      "type": "array"
+    },
+    "max_candidates": {
+      "title": "Max Candidates",
+      "type": "integer"
+    },
+    "max_issue_evaluators": {
+      "default": 8,
+      "title": "Max Issue Evaluators",
+      "type": "integer"
+    },
+    "package_root": {
+      "title": "Package Root",
+      "type": "string"
+    },
+    "repo_agent_id": {
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$",
+      "title": "Repo Agent Id",
+      "type": "string"
+    },
+    "runtime": {
+      "$ref": "#/$defs/RuntimeProtocolSettings"
     },
     "schema_version": {
       "const": 1,
@@ -158,19 +523,39 @@
       "title": "Schema Version",
       "type": "integer"
     },
-    "shared_source_with": {
+    "shared_source_relations": {
       "default": [],
       "items": {
-        "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$",
-        "type": "string"
+        "$ref": "#/$defs/SharedSourceRelation"
       },
-      "title": "Shared Source With",
+      "title": "Shared Source Relations",
       "type": "array"
+    },
+    "source_root": {
+      "title": "Source Root",
+      "type": "string"
+    },
+    "validating_dataset": {
+      "$ref": "#/$defs/ImmutableDatasetReference"
     }
   },
   "required": [
-    "roots"
+    "repo_agent_id",
+    "source_root",
+    "package_root",
+    "editable_paths",
+    "runtime",
+    "foundry_project",
+    "baseline_model",
+    "allowed_models",
+    "max_candidates",
+    "decision_policy",
+    "development_dataset",
+    "validating_dataset",
+    "default_evaluator_bundle",
+    "hard_guardrails",
+    "deployment"
   ],
-  "title": "AgentSidecarGroup",
+  "title": "BootstrapSidecar",
   "type": "object"
 }
