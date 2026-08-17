@@ -1,0 +1,17 @@
+0a632a0def870d072805691904d404d14ed01393cff9e307528e6dabb5146933  .github/skills/foundry-agent-optimizer/references/tenzing/.github/ISSUE_TEMPLATE/JitAccess.yml
+0079899ff6b60ee592a7158b08a7555496f8530445876485f9f4e1305ead4336  .github/skills/foundry-agent-optimizer/references/tenzing/.github/acl/access.yml
+4dc3154ee94a76c05697c265c661fb24c72144b77560381a62b36bbafc9fcdc5  .github/skills/foundry-agent-optimizer/references/tenzing/.github/compliance/inventory.yml
+b94660dd8145d49e370005b2cdfb45ca4c109e5f3bcf9d8edc80f38de5dea062  .github/skills/foundry-agent-optimizer/references/tenzing/.github/policies/jit.yml
+2cc617ffa05f0f59f377efa31598a309a325ccb6566ac123218deac9daafcd38  .github/skills/foundry-agent-optimizer/references/tenzing/.gitignore
+bc3f9ba89a86a36dfcf6b53f803d0b3cfc0463980dba20ccc5b520e60e5a9b2f  .github/skills/foundry-agent-optimizer/references/tenzing/INIT.md
+f777fa00f69db5573977833b2f8eef7aa979759a8e56e1e7395efd957cff4194  .github/skills/foundry-agent-optimizer/references/tenzing/LICENSE
+e2e48933642412f2f9d9971e7b1b9a688ad5d2a1a6480379ee6c14731dbcde4d  .github/skills/foundry-agent-optimizer/references/tenzing/README.md
+ce792cc51108d17a716c2531601eed0d1605d0e97d612f1764eecefba6cf81d0  .github/skills/foundry-agent-optimizer/references/tenzing/assets/logo.svg
+8651530161f62650b3f587584301f41deae087f87b66ce83e893ae99f26a6aac  .github/skills/foundry-agent-optimizer/references/tenzing/climb.md
+34b9e4e6690b6702a2f8818363cd9daa53c07f50eaa7aeb60f9d76edfa2c6df1  .github/skills/foundry-agent-optimizer/references/tenzing/climb_config/background.md
+1832cd788d0955f2dab736104b90013d1c3ef811becbb66a61ebb1ec64f7b37a  .github/skills/foundry-agent-optimizer/references/tenzing/climb_config/data.md
+1d67f8ef15675d4f6328b1dcb5ae94847029821d312921a4dae554da252e2ebd  .github/skills/foundry-agent-optimizer/references/tenzing/climb_config/dos-and-donts.md
+10ccfe18b50c36e50a95b8d9bba3b0518f0db7824506331cf48a7beae8db0874  .github/skills/foundry-agent-optimizer/references/tenzing/climb_config/environment.md
+3cd2960da29561428b638b5c9966d4445d3d3d0059d043b839bab062a43584ed  .github/skills/foundry-agent-optimizer/references/tenzing/climb_config/evaluation.md
+a55df79b5c783008452d75a83eb96d5eded84aff45f5cb4075f8cbf6ad1bf957  .github/skills/foundry-agent-optimizer/references/tenzing/climb_config/objective.md
+e5c5ea2520ec851066661cdd8a3a6693aa398f29b2d988c395e10fcd5c1e2906  .github/skills/foundry-agent-optimizer/references/tenzing/climb_config/tracking-experiments.md
