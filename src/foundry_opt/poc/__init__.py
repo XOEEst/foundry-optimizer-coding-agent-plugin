@@ -7,8 +7,6 @@ from typing import Any
 
 from foundry_opt import __version__
 
-runtime = import_module("foundry_opt.poc.runtime")
-
 __all__ = ["__version__", "app", "main", "runtime"]
 
 
@@ -23,4 +21,6 @@ def __getattr__(name: str) -> Any:
         from foundry_opt import app
 
         return app
+    if name == "runtime":
+        return import_module("foundry_opt.poc.runtime")
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
