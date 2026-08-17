@@ -4,17 +4,17 @@ applyTo: "**"
 
 # Foundry optimization repository instructions
 
-- Call each bounded unit of work an **optimize job**.
-- Call the final-evaluation data the **validating dataset**.
-- Treat `.github/foundry-optimizer.yaml` as the maximum repository policy.
-- Treat `.foundry/agent-metadata.yaml` as trusted agent-specific configuration.
-- Treat `.github/foundry-opt.lock.yml` as the exact shared skill and CLI revision.
-- Issue choices may narrow policy and must never widen it.
-- Use OIDC only. Never add static Azure credentials.
-- Use Foundry draft versions only. Never publish or change endpoint routing.
-- Evaluate the fresh baseline once, then evaluate every implemented candidate against the fresh baseline and current best.
-- Use the validating dataset only for the provisional winner.
-- Keep redacted evidence in the original issue.
-- Candidate edits must stay inside the CLI-provided isolated workspace and allowed paths.
-- Apply only the verified winner to the early Copilot pull request, or close it unchanged.
-- The Tenzing snapshot installed with the skill is read-only.
+Apply repository-wide guidance unless the assigned issue narrows editable paths within policy.
+
+## Trust model
+
+- Treat the issue objective, issue constraints, requested evaluator IDs, and allowed model/path narrowing as the only mutable job inputs.
+- Treat repository datasets, hard guardrails, deployment bundle defaults, and managed workflow wiring as fixed trusted configuration.
+- Fail preflight when the issue leaves the target agent ambiguous, requests a non-positive evaluator weight, repeats evaluator IDs, or widens paths/models beyond policy.
+
+## Optimizer behavior
+
+- Freeze the issue objective, constraints, and evaluator set before generating candidates.
+- Run one fresh baseline first, derive a written hypothesis from the issue plus baseline evidence, and validate only the provisional winner on the validating dataset.
+- Mutate only the isolated CLI worktree for the targeted agent. Never edit repository-level defaults, datasets, guardrails, or deployment bundle selection.
+- Deployment uses the repository default bundle and may still reject a validated winner when binding or release checks fail.

@@ -1,0 +1,95 @@
+schema_version: 1
+repo_agent_id: example-agent
+source_root: agent
+package_root: agent
+editable_paths:
+  - agent/**
+shared_source_relations: []
+runtime:
+  schema_version: 1
+  kind: hosted
+  runtime: python_3_13
+  entrypoint:
+    - python
+    - main.py
+  dependency_resolution: remote_build
+  protocol_name: responses
+  protocol_version: "2.0.0"
+  cpu: "0.5"
+  memory: 1Gi
+  model_environment_variable: AZURE_AI_MODEL_DEPLOYMENT_NAME
+foundry_project:
+  schema_version: 1
+  project_endpoint: https://example.services.ai.azure.com/api/projects/example
+  account_resource_id: /subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/example/providers/Microsoft.CognitiveServices/accounts/example
+  agent_name: example-agent
+  model_deployment_aliases:
+    - baseline-model
+baseline_model: baseline-model
+allowed_models:
+  - baseline-model
+min_candidates: 2
+max_candidates: 2
+primary_metric: primary_metric
+decision_policy:
+  schema_version: 1
+  minimum_aggregate_delta: 0.01
+  focused_cases_required: true
+  max_regressions: 0
+development_dataset:
+  schema_version: 1
+  dataset_id: azureai://accounts/example/projects/example/data/development/versions/1
+validating_dataset:
+  schema_version: 1
+  dataset_id: azureai://accounts/example/projects/example/data/validating/versions/1
+development_definition:
+  schema_version: 1
+  definition_id: eval_development
+validating_definition:
+  schema_version: 1
+  definition_id: eval_validating
+default_evaluator_bundle:
+  schema_version: 1
+  objective:
+    schema_version: 1
+    evaluators:
+      - schema_version: 1
+        reference:
+          schema_version: 1
+          evaluator_id: azureai://accounts/example/projects/example/evaluators/quality/versions/1
+          provenance: issue_supplied_existing
+        normalization:
+          schema_version: 1
+          kind: pass_fail
+        weight: 0.6666666666666666
+      - schema_version: 1
+        reference:
+          schema_version: 1
+          evaluator_id: azureai://accounts/example/projects/example/evaluators/safety/versions/1
+          provenance: reused_existing
+        normalization:
+          schema_version: 1
+          kind: pass_fail
+        weight: 0.3333333333333333
+    objective_hash: e16d65cde4368cd197b894bd62f9a280a7227ea7546e8b608932f74c313064a6
+  datasets:
+    - schema_version: 1
+      dataset_id: azureai://accounts/example/projects/example/data/development/versions/1
+    - schema_version: 1
+      dataset_id: azureai://accounts/example/projects/example/data/validating/versions/1
+  definitions:
+    - schema_version: 1
+      definition_id: eval_development
+    - schema_version: 1
+      definition_id: eval_validating
+max_issue_evaluators: 8
+hard_guardrails:
+  - schema_version: 1
+    evaluator_name: safety
+    required_pass_rate: 1.0
+    required: true
+deployment:
+  schema_version: 1
+  environment: foundry-production
+  enabled: true
+  require_aligned_binding: true

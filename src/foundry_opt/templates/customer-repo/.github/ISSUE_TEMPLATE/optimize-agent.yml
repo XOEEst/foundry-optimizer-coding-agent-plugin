@@ -6,13 +6,19 @@ body:
     attributes:
       value: |
         Assign the completed issue to Copilot to start the optimize job.
-        GitHub will create one early draft pull request. Only a verified winner
-        is applied to it; otherwise it is closed unchanged.
+        Provide either a stable repoAgentId from `.foundry-opt/registry.yaml` or an
+        explicit Foundry target when the repository has not applied the managed
+        contract yet. Blank optional sections keep repository defaults; unclear
+        targets or invalid evaluator weights fail preflight before any job starts.
 
-        This form can only narrow `.github/foundry-optimizer.yaml`. The
-        optimize job uses OIDC-backed draft versions only, keeps redacted
-        evidence on this original issue, and reserves the validating dataset
-        for the provisional winner.
+  - type: input
+    id: repo_agent_id
+    attributes:
+      label: Repository agent ID or explicit Foundry target
+      description: Enter one stable repoAgentId from `.foundry-opt/registry.yaml`, or an explicit Foundry target identifier for migration cases.
+      placeholder: example-agent
+    validations:
+      required: true
 
   - type: textarea
     id: optimization_goal
@@ -63,4 +69,14 @@ body:
     attributes:
       label: Optional narrower model set
       description: One policy-approved deployment name per line. Leave blank to use the policy default.
+      render: text
+
+  - type: textarea
+    id: issue_evaluators
+    attributes:
+      label: Optional exact evaluator IDs
+      description: One exact evaluator ID per line. Append `weight=<positive>` to override equal weighting. Blank uses the repository default evaluator bundle. Invalid or unclear entries fail preflight.
+      placeholder: |
+        azureai://accounts/example/projects/example/evaluators/quality/versions/1
+        azureai://built-in/evaluators/safety weight=2
       render: text
