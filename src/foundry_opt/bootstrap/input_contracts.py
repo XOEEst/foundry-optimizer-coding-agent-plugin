@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Literal, Self
 from urllib.parse import urlparse
@@ -19,6 +21,7 @@ from foundry_opt.bootstrap.contracts import (
     VersionedEvaluatorUri,
 )
 from foundry_opt.bootstrap.errors import BootstrapConfigError
+from foundry_opt.bootstrap.evaluation.execution import EvaluationOnboardingRequest
 from foundry_opt.optimize_job.safety import UnsafeCheckpointContentError, assert_safe_persisted_string
 from foundry_opt.poc.config import POCConfigurationError, _validate_resource_id, load_strict_yaml_mapping, validate_repository_relative_path, validate_repository_relative_paths
 
@@ -35,6 +38,7 @@ RepoRelativePath = Annotated[str, StringConstraints(min_length=1, max_length=240
 AgentId = Annotated[str, StringConstraints(pattern=r'^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$')]
 ProjectEndpoint = Annotated[str, StringConstraints(max_length=300, pattern=r'^https://[^\s]+/api/projects/[^\s/]+/?$')]
 GenerationMode = Literal['reuse_reviewed_sources', 'replace_reviewed_sources']
+BindingEvidenceProvenance = Literal['foundry_agent_code_download', 'reviewed_operator_attestation']
 GenerationSourceKind = Literal['reviewed_file']
 SemanticPatchMode = Literal['none', 'apply']
 OwnershipMode = Literal['owned', 'shared-template', 'adopted']
@@ -47,11 +51,79 @@ EvaluationIdentifier = VersionedEvaluatorUri | BuiltInEvaluatorId
 _MAX_FREEFORM_BYTES = 4096
 _MAX_ITEMS = 32
 _PROHIBITED_PATH_PARTS = ('env', 'credential', 'credentials', 'trace', 'traces', 'dataset', 'datasets', 'secret', 'secrets', 'token', 'tokens')
-_ALLOWED_ROLE_DEFINITION_IDS = frozenset({
-    '00000000-0000-0000-0000-000000000001',
-    '00000000-0000-0000-0000-000000000002',
-    '00000000-0000-0000-0000-000000000003',
-})
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovedRoleDefinition:
+    """One reviewed Azure built-in role that bootstrap may assign."""
+
+    slug: str
+    display_name: str
+    role_definition_guid: str
+    scope_kind: Literal['foundry', 'telemetry']
+    purpose: str
+
+
+# Least-privilege matrix. Every entry is a real Azure built-in role definition GUID; the
+# bootstrap contract refuses any role outside this list, and refuses the privileged
+# fallbacks below outright. The retained pilot assigns only project-scoped `Foundry User`.
+# Documented in docs/identity-rbac.md, which is verified against this table by tests.
+APPROVED_ROLE_DEFINITIONS: tuple[ApprovedRoleDefinition, ...] = (
+    ApprovedRoleDefinition(
+        slug='foundry-user',
+        display_name='Foundry User',
+        role_definition_guid='53ca6127-db72-4b80-b1b0-d745d6d5456d',
+        scope_kind='foundry',
+        purpose='project read plus Cognitive Services data actions for draft agent, dataset, evaluator, definition, and run operations',
+    ),
+    ApprovedRoleDefinition(
+        slug='foundry-project-runtime-user',
+        display_name='Foundry Project Runtime User',
+        role_definition_guid='142bfaed-a13f-4c2d-bed2-6db62c4a1009',
+        scope_kind='foundry',
+        purpose='project runtime data-plane access used by hosted agent execution during evaluation and deployment verification',
+    ),
+    ApprovedRoleDefinition(
+        slug='foundry-agent-consumer',
+        display_name='Foundry Agent Consumer',
+        role_definition_guid='eed3b665-ab3a-47b6-8f48-c9382fb1dad6',
+        scope_kind='foundry',
+        purpose='invoke an existing agent version without publication or routing authority',
+    ),
+    ApprovedRoleDefinition(
+        slug='monitoring-reader',
+        display_name='Monitoring Reader',
+        role_definition_guid='43d0d8ad-25c7-4714-9337-8ba259a9fe05',
+        scope_kind='telemetry',
+        purpose='read Application Insights telemetry when trace-derived dataset generation is modeled',
+    ),
+    ApprovedRoleDefinition(
+        slug='log-analytics-reader',
+        display_name='Log Analytics Reader',
+        role_definition_guid='73c42c96-874c-492b-b04d-ab87d138a893',
+        scope_kind='telemetry',
+        purpose='query the Log Analytics workspace backing Application Insights trace availability probes',
+    ),
+)
+
+# Privileged fallbacks that must never be planned, even if a reviewer supplies them.
+FORBIDDEN_ROLE_DEFINITION_IDS: Mapping[str, str] = {
+    '8e3af657-a8ff-443c-a75c-2fe8c4bcb635': 'Owner',
+    'b24988ac-6180-42a0-ab88-20f7382dd24c': 'Contributor',
+    'eadc314b-1a2d-4efa-be10-5d325db5065e': 'Azure AI Project Manager',
+}
+
+_ALLOWED_ROLE_DEFINITION_IDS = frozenset(item.role_definition_guid for item in APPROVED_ROLE_DEFINITIONS)
+_ROLE_DEFINITIONS_BY_GUID: Mapping[str, ApprovedRoleDefinition] = {
+    item.role_definition_guid: item for item in APPROVED_ROLE_DEFINITIONS
+}
+
+
+def approved_role_definition(role_definition_guid: str) -> ApprovedRoleDefinition | None:
+    """Return the reviewed role definition for a GUID, or None when it is not approved."""
+
+    return _ROLE_DEFINITIONS_BY_GUID.get(role_definition_guid.casefold())
+
 _REQUIRED_MANAGED_PAYLOADS = (
     ('registry', '.foundry-opt/registry.yaml'),
     ('sidecar', '{selected.root}/.foundry/foundry-opt.yaml'),
@@ -61,8 +133,21 @@ _REQUIRED_MANAGED_PAYLOADS = (
     ('setup-semantic-patch', '.github/workflows/copilot-setup-steps.yml'),
     ('validation-workflow', '.github/workflows/foundry-opt-validation.yml'),
     ('deploy-workflow', '.github/workflows/foundry-opt-deploy.yml'),
-    ('bootstrap-lock', '.github/foundry-opt.lock.yml'),
 )
+# The committed managed lock is `.foundry-opt/bootstrap.lock.json`, produced by repository
+# apply from the applied plan; it is never a rendered template payload. The legacy
+# `.github/foundry-opt.lock.yml` shared pin remains readable for migration only.
+MANAGED_LOCK_PATH = '.foundry-opt/bootstrap.lock.json'
+LEGACY_LOCK_PATH = '.github/foundry-opt.lock.yml'
+_REFUSED_MANAGED_PAYLOADS = {
+    'bootstrap-lock': LEGACY_LOCK_PATH,
+}
+_UAMI_RESOURCE_ID_RE = re.compile(
+    r'^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\.ManagedIdentity'
+    r'/userAssignedIdentities/(?P<name>[^/]+)$',
+    re.IGNORECASE,
+)
+_IDENTITY_NAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$')
 _MANIFEST_PATH = Path(__file__).resolve().parents[1] / 'templates' / 'customer-repo' / '.foundry-opt' / 'managed-payloads.manifest.yaml'
 
 
@@ -278,6 +363,15 @@ class TrustedManifestPayload(BootstrapDocument):
     def _validate_payload(self) -> Self:
         if 'legacy' in self.template_id or 'legacy' in self.destination_path:
             raise BootstrapConfigError('legacy payloads are migration-only and not trusted manifest entries')
+        if self.template_id in _REFUSED_MANAGED_PAYLOADS or self.destination_path in _REFUSED_MANAGED_PAYLOADS.values():
+            raise BootstrapConfigError(
+                f'{self.destination_path} is not a managed payload; the committed lock is '
+                f'{MANAGED_LOCK_PATH}, generated by repository apply'
+            )
+        if self.destination_path == MANAGED_LOCK_PATH:
+            raise BootstrapConfigError(
+                f'{MANAGED_LOCK_PATH} is generated by repository apply and must not be a rendered template'
+            )
         if (self.semantic_patch_mode == 'apply') != (self.semantic_patch_id is not None):
             raise BootstrapConfigError('semantic patch metadata must be paired')
         return self
@@ -378,6 +472,14 @@ class AzureIdentityInput(BootstrapDocument):
         if self.identity_kind == 'user_assigned_managed_identity':
             if self.existing_resource_id is None:
                 raise BootstrapConfigError('user_assigned_managed_identity requires existing_resource_id')
+            match = _UAMI_RESOURCE_ID_RE.fullmatch(self.existing_resource_id)
+            if match is None:
+                raise BootstrapConfigError(
+                    'user_assigned_managed_identity existing_resource_id must target '
+                    'Microsoft.ManagedIdentity/userAssignedIdentities/<name>'
+                )
+            if _IDENTITY_NAME_RE.fullmatch(match.group('name')) is None:
+                raise BootstrapConfigError('managed identity name is not a valid Azure identity name')
             if self.create_if_missing and (
                 self.existing_client_id is not None
                 or self.existing_object_id is not None
@@ -397,10 +499,53 @@ class AzureIdentityInput(BootstrapDocument):
                 raise BootstrapConfigError('unresolved_migration cannot set existing identity ids')
         return self
 
+    @property
+    def identity_name(self) -> str:
+        """The exact identity this operation targets, adopted or created.
+
+        For a user-assigned managed identity the name is always the final segment of
+        `existing_resource_id` -- including when `create_if_missing` is true, where that id is
+        the reviewed creation target -- so plans, receipts, and provider state name the real
+        resource instead of a placeholder. Adopted Entra applications have no ARM resource id,
+        so their exact client id is used as the identity label.
+        """
+
+        if self.existing_resource_id is not None:
+            match = _UAMI_RESOURCE_ID_RE.fullmatch(self.existing_resource_id)
+            if match is None:
+                raise BootstrapConfigError('existing_resource_id does not name a user-assigned managed identity')
+            return match.group('name')
+        if self.identity_kind == 'entra_application' and self.existing_client_id is not None:
+            return self.existing_client_id
+        raise BootstrapConfigError(
+            'azure identity planning requires a resolved identity resource id or client id'
+        )
+
 
 class ApprovedRoleAssignment(BootstrapDocument):
     alias: Annotated[str, StringConstraints(min_length=1, max_length=64, pattern=r'^[a-z0-9][a-z0-9._-]*$')]
-    role_definition_id: RoleDefinitionId
+    role_definition_id: RoleDefinitionId = Field(
+        description=(
+            'Azure built-in role definition id. Only the reviewed least-privilege matrix in '
+            'docs/identity-rbac.md is accepted; Owner, Contributor, and Azure AI Project '
+            'Manager are refused outright.'
+        ),
+        json_schema_extra={
+            'x-approved-role-definitions': [
+                {
+                    'slug': item.slug,
+                    'display_name': item.display_name,
+                    'role_definition_guid': item.role_definition_guid,
+                    'scope_kind': item.scope_kind,
+                }
+                for item in APPROVED_ROLE_DEFINITIONS
+            ],
+            'x-refused-role-definitions': [
+                {'display_name': name, 'role_definition_guid': guid}
+                for guid, name in sorted(FORBIDDEN_ROLE_DEFINITION_IDS.items())
+            ],
+        },
+    )
     scope: Annotated[str, StringConstraints(min_length=1, max_length=512)]
 
     @field_validator('alias')
@@ -419,8 +564,18 @@ class ApprovedRoleAssignment(BootstrapDocument):
     @model_validator(mode='after')
     def _validate_role(self) -> Self:
         role_guid = self.role_definition_id.rsplit('/', 1)[-1].lower()
-        if role_guid not in _ALLOWED_ROLE_DEFINITION_IDS:
+        forbidden = FORBIDDEN_ROLE_DEFINITION_IDS.get(role_guid)
+        if forbidden is not None:
+            raise BootstrapConfigError(
+                f'{forbidden} is a privileged fallback role and is never planned by bootstrap'
+            )
+        definition = approved_role_definition(role_guid)
+        if definition is None:
             raise BootstrapConfigError('role_definition_id is not in the approved allow-list')
+        if not self.alias.casefold().startswith(definition.slug):
+            raise BootstrapConfigError(
+                f'role alias must identify its role: expected an alias starting with {definition.slug!r}'
+            )
         return self
 
 
@@ -484,6 +639,7 @@ class EvaluationAgentInput(BootstrapDocument):
     connection_name: Annotated[str, StringConstraints(min_length=1, max_length=128)]
     target_sample_count: Annotated[StrictInt, Field(ge=1, le=100000)]
     replacement_intent: StrictBool
+    onboarding_contract: EvaluationOnboardingRequest | None = None
 
     @field_validator('sidecar_path')
     @classmethod
@@ -518,6 +674,43 @@ class EvaluationAgentInput(BootstrapDocument):
         if not self.generation_sources:
             raise BootstrapConfigError('generation_sources must not be empty')
         _casefold_unique([source.path for source in self.generation_sources], field=f'{self.repo_agent_id} generation_sources')
+        return self._validate_resolved_execution()
+
+    def _validate_resolved_execution(self) -> Self:
+        contract = self.onboarding_contract
+        if contract is None:
+            return self
+        if contract.repo_agent_id.casefold() != self.repo_agent_id.casefold():
+            raise BootstrapConfigError('onboarding_contract must describe the same repo_agent_id')
+        if (contract.replacement is not None) != self.replacement_intent:
+            raise BootstrapConfigError('replacement_intent must match the reviewed replacement lineage')
+        if contract.stopped:
+            return self
+        assert contract.dataset_plan is not None and contract.definition_plan is not None
+        assert contract.activation_plan is not None and contract.sidecar_policy is not None
+        assert contract.telemetry_probe is not None
+        if contract.sidecar_policy.path != self.sidecar_path:
+            raise BootstrapConfigError('onboarding sidecar path must match the evaluation sidecar_path')
+        if contract.activation_plan.model_deployment != self.model_deployment:
+            raise BootstrapConfigError('onboarding activation must use the reviewed model deployment')
+        if contract.definition_plan.model_deployment != self.model_deployment:
+            raise BootstrapConfigError('onboarding definitions must use the reviewed model deployment')
+        if contract.telemetry_probe.telemetry_window != self.trace_window:
+            raise BootstrapConfigError('onboarding telemetry probe must use the reviewed trace window')
+        if contract.bounds.target_sample_count != self.target_sample_count:
+            raise BootstrapConfigError('onboarding bounds must request the reviewed target sample count')
+        if contract.dataset_plan.agent_name != self.agent_name or contract.dataset_plan.agent_version != self.agent_version:
+            raise BootstrapConfigError('onboarding generation must target the reviewed agent version')
+        if contract.dataset_plan.connection_name != self.connection_name:
+            raise BootstrapConfigError('onboarding generation must use the reviewed connection')
+        known_datasets = {item.casefold() for item in self.existing_dataset_ids}
+        for candidate in (contract.dataset_plan.reuse_development_dataset_id, contract.dataset_plan.reuse_validating_dataset_id):
+            if candidate is not None and candidate.casefold() not in known_datasets:
+                raise BootstrapConfigError('dataset reuse candidates must come from the reviewed existing dataset inventory')
+        if contract.evaluator_plan is not None and contract.evaluator_plan.reuse_evaluator_id is not None:
+            known_evaluators = {item.casefold() for item in self.existing_evaluator_ids}
+            if contract.evaluator_plan.reuse_evaluator_id.casefold() not in known_evaluators:
+                raise BootstrapConfigError('evaluator reuse candidates must come from the reviewed existing evaluator inventory')
         return self
 
 
@@ -533,6 +726,87 @@ class EvaluationsPhaseInput(BootstrapDocument):
         return self
 
 
+class ObservedAgentBinding(BootstrapDocument):
+    """One reviewed, non-secret observation of a deployed immutable agent version.
+
+    Both content fingerprints are required: metadata alone (endpoint/name/version) can never
+    prove that the deployed version runs the repository's current source, so an evidence
+    record without content digests is refused rather than silently downgraded.
+    """
+
+    root: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    repo_agent_id: AgentId
+    project_endpoint: ProjectEndpoint
+    agent_name: Annotated[str, StringConstraints(min_length=1, max_length=128)]
+    agent_version: Annotated[str, StringConstraints(min_length=1, max_length=64)]
+    source_fingerprint: Sha256
+    package_fingerprint: Sha256
+    evidence_provenance: BindingEvidenceProvenance
+    code_content_hash: Sha256 | None = None
+    code_content_hash_verified: StrictBool = False
+    observed_at: Annotated[str, StringConstraints(min_length=20, max_length=32, pattern=r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$')] | None = None
+
+    @field_validator('root')
+    @classmethod
+    def _validate_root(cls, value: str) -> str:
+        return _validate_repo_path(value, field='binding_evidence.root', allow_dot=True)
+
+    @model_validator(mode='after')
+    def _validate_provenance(self) -> Self:
+        if self.evidence_provenance == 'foundry_agent_code_download':
+            if self.code_content_hash is None:
+                raise BootstrapConfigError('downloaded binding evidence must record the immutable code content hash')
+            if not self.code_content_hash_verified:
+                raise BootstrapConfigError('downloaded binding evidence must confirm the code content hash against the observed bytes')
+        elif self.code_content_hash_verified:
+            raise BootstrapConfigError('only downloaded binding evidence can claim a verified code content hash')
+        return self
+
+    def to_discovery_payload(self) -> dict[str, str]:
+        return {
+            'project_endpoint': self.project_endpoint,
+            'agent_name': self.agent_name,
+            'agent_version': self.agent_version,
+            'source_fingerprint': self.source_fingerprint,
+            'package_fingerprint': self.package_fingerprint,
+        }
+
+
+class BindingEvidenceInput(BootstrapDocument):
+    """Strict, non-secret binding evidence document consumed by discovery."""
+
+    evidence_version: Literal[1] = 1
+    repository_id: RepositoryIdentity
+    agents: tuple[ObservedAgentBinding, ...]
+
+    @model_validator(mode='after')
+    def _validate_agents(self) -> Self:
+        if not self.agents:
+            raise BootstrapConfigError('binding_evidence.agents must not be empty')
+        if len(self.agents) > _MAX_ITEMS:
+            raise BootstrapConfigError('binding_evidence.agents exceeds the supported item count')
+        object.__setattr__(self, 'agents', tuple(sorted(self.agents, key=lambda item: (item.repo_agent_id.casefold(), item.repo_agent_id))))
+        _casefold_unique([agent.repo_agent_id for agent in self.agents], field='binding_evidence.agents.repo_agent_id')
+        _casefold_unique([agent.root for agent in self.agents], field='binding_evidence.agents.root')
+        return self
+
+    @property
+    def evidence_hash(self) -> str:
+        return canonical_sha256(self.model_dump(mode='json', exclude_none=True))
+
+    def by_root(self) -> dict[str, dict[str, str]]:
+        return {agent.root: agent.to_discovery_payload() for agent in self.agents}
+
+    @classmethod
+    def from_document(cls, document: str | bytes | Mapping[str, object]) -> Self:
+        try:
+            return cls.model_validate(load_strict_yaml_mapping(document, subject='BindingEvidenceInput'))
+        except POCConfigurationError as exc:
+            raise BootstrapConfigError(str(exc)) from exc
+        except ValidationError as exc:
+            raise BootstrapConfigError(str(exc)) from exc
+
+
 class BootstrapPlanInput(BootstrapDocument):
     repository: RepositoryIdentityInput
     runtime_provenance: RuntimeProvenanceInput
@@ -542,6 +816,7 @@ class BootstrapPlanInput(BootstrapDocument):
     github_phase: GitHubPhaseInput | None = None
     azure_phase: AzurePhaseInput | None = None
     evaluations_phase: EvaluationsPhaseInput | None = None
+    binding_evidence: BindingEvidenceInput | None = None
 
     @field_validator('required_phases')
     @classmethod
@@ -582,6 +857,14 @@ class BootstrapPlanInput(BootstrapDocument):
                 raise BootstrapConfigError('evaluations_phase contains repo_agent_id outside selected_agents')
             for agent in self.evaluations_phase.agents:
                 selected = selected_by_id[agent.repo_agent_id.casefold()]
+                if 'evaluations' in self.required_phases and agent.onboarding_contract is None:
+                    raise BootstrapConfigError(
+                        'the evaluations phase requires an approved onboarding contract for every evaluation agent'
+                    )
+                if agent.onboarding_contract is not None:
+                    policy = agent.onboarding_contract.sidecar_policy
+                    if policy is not None and policy.source_root != selected.root:
+                        raise BootstrapConfigError('onboarding sidecar source_root must match the selected agent root')
                 if agent.sidecar_path != selected.config_path:
                     raise BootstrapConfigError('evaluation sidecar_path must match selected agent config_path')
                 if not _path_is_within(selected.root, agent.sidecar_path):
@@ -595,6 +878,24 @@ class BootstrapPlanInput(BootstrapDocument):
                 endpoint_account = urlparse(agent.project_endpoint).hostname.split('.')[0] if urlparse(agent.project_endpoint).hostname else ''
                 if endpoint_account and f'/accounts/{endpoint_account}'.casefold() not in account_lower:
                     raise BootstrapConfigError('project_endpoint account and account_resource_id must match')
+        if self.binding_evidence is not None:
+            if self.binding_evidence.repository_id.casefold() != self.repository.repository_id.casefold():
+                raise BootstrapConfigError('binding_evidence repository_id must match repository_id')
+            selected_by_root = {agent.root.casefold(): agent for agent in self.repository.selected_agents}
+            evaluation_by_id = {agent.repo_agent_id.casefold(): agent for agent in (self.evaluations_phase.agents if self.evaluations_phase is not None else ())}
+            for observation in self.binding_evidence.agents:
+                selected = selected_by_root.get(observation.root.casefold())
+                if selected is None:
+                    raise BootstrapConfigError('binding_evidence root must match a selected agent root')
+                if selected.repo_agent_id.casefold() != observation.repo_agent_id.casefold():
+                    raise BootstrapConfigError('binding_evidence repo_agent_id must match the selected agent for that root')
+                evaluation = evaluation_by_id.get(observation.repo_agent_id.casefold())
+                if evaluation is None:
+                    continue
+                if evaluation.project_endpoint != observation.project_endpoint:
+                    raise BootstrapConfigError('binding_evidence project_endpoint must match the reviewed evaluation project')
+                if evaluation.agent_name != observation.agent_name or evaluation.agent_version != observation.agent_version:
+                    raise BootstrapConfigError('binding_evidence must observe the reviewed agent name and version')
         return self
 
     @property
@@ -631,19 +932,52 @@ def load_bootstrap_plan_input(path: Path | str) -> BootstrapPlanInput:
     return BootstrapPlanInput.from_document(data)
 
 
+def load_binding_evidence_input(path: Path | str) -> BindingEvidenceInput:
+    target = Path(path)
+    try:
+        data = target.read_bytes()
+    except OSError as exc:
+        raise BootstrapConfigError(f'BindingEvidenceInput could not be read: {target}') from exc
+    if len(data) > _MAX_FREEFORM_BYTES * _MAX_ITEMS:
+        raise BootstrapConfigError('BindingEvidenceInput exceeds the supported document size')
+    if target.suffix.casefold() == '.json':
+        try:
+            payload = json.loads(data.decode('utf-8'), object_pairs_hook=_strict_json_object)
+        except UnicodeDecodeError as exc:
+            raise BootstrapConfigError('BindingEvidenceInput is not UTF-8 JSON') from exc
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise BootstrapConfigError('BindingEvidenceInput is not valid strict JSON') from exc
+        if not isinstance(payload, Mapping):
+            raise BootstrapConfigError('BindingEvidenceInput JSON must be a mapping')
+        try:
+            return BindingEvidenceInput.model_validate(dict(payload))
+        except ValidationError as exc:
+            raise BootstrapConfigError(str(exc)) from exc
+    return BindingEvidenceInput.from_document(data)
+
+
 __all__ = [
+    'APPROVED_ROLE_DEFINITIONS',
     'AgentRenderContext',
+    'ApprovedRoleAssignment',
+    'ApprovedRoleDefinition',
     'AzureIdentityInput',
     'AzurePhaseInput',
+    'BindingEvidenceInput',
     'BootstrapPlanInput',
     'EvaluationAgentInput',
+    'EvaluationOnboardingRequest',
     'EvaluationsPhaseInput',
+    'FORBIDDEN_ROLE_DEFINITION_IDS',
     'GitHubPhaseInput',
+    'ObservedAgentBinding',
     'RepositoryIdentityInput',
     'RepositoryPhaseInput',
     'RuntimeProvenanceInput',
     'SelectedAgent',
     'TemplateRenderValue',
     'TrustedTemplateManifest',
+    'approved_role_definition',
+    'load_binding_evidence_input',
     'load_bootstrap_plan_input',
 ]

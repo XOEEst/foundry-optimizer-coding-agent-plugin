@@ -9,8 +9,11 @@ from typer.testing import CliRunner
 import yaml
 
 from foundry_opt.cli import app
+from foundry_opt.bootstrap import drivers
 from foundry_opt.bootstrap.input_contracts import TrustedTemplateManifest
 from foundry_opt.bootstrap.receipts import ApprovalRecord
+from tests.bootstrap.fakes.evaluation_contract import build_contract, evaluation_agent_payload
+from tests.bootstrap.fakes.foundry_env import build_fake_adapter, fake_credential
 
 runner = CliRunner()
 
@@ -79,6 +82,22 @@ def _offline_plan_input(tmp_path: Path, sha: str) -> Path:
     return path
 
 
+def _evaluation_plan_input(tmp_path: Path, sha: str) -> Path:
+    """Reviewed plan input carrying an executable resolved evaluation execution contract."""
+
+    path = _offline_plan_input(tmp_path, sha)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["offline_plan"] = False
+    payload["required_phases"] = ["repository", "evaluations"]
+    payload["evaluations_phase"] = {
+        "schema_version": 1,
+        "agents": [evaluation_agent_payload(build_contract())],
+    }
+    evaluation_path = tmp_path / "plan-input-evaluations.json"
+    evaluation_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    return evaluation_path
+
+
 def test_bootstrap_discover_plan_status_and_runtime_sha(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     state_root = tmp_path / "state"
@@ -126,92 +145,114 @@ def test_bootstrap_apply_requires_hash_and_matches_active_plan(tmp_path: Path) -
     assert registry["agents"][0]["enabled"] is False
 
 
-def test_evaluation_plan_fails_closed_without_executable_action_contract(
-    tmp_path: Path,
-) -> None:
+def test_evaluation_cli_flow_plans_applies_activates_and_reports(tmp_path: Path, monkeypatch) -> None:
     repo = _repo(tmp_path)
     state_root = tmp_path / "state"
-    path = _offline_plan_input(tmp_path, "a" * 40)
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    payload["offline_plan"] = False
-    payload["required_phases"] = ["repository", "evaluations"]
-    payload["evaluations_phase"] = {
-        "schema_version": 1,
-        "agents": [
-            {
-                "schema_version": 1,
-                "repo_agent_id": "app",
-                "sidecar_path": "app/.foundry/foundry-opt.yaml",
-                "project_endpoint": "https://example.services.ai.azure.com/api/projects/example",
-                "account_resource_id": "/subscriptions/33333333-3333-3333-3333-333333333333/resourceGroups/example/providers/Microsoft.CognitiveServices/accounts/example",
-                "agent_name": "example-agent",
-                "agent_version": "1",
-                "existing_dataset_ids": [
-                    "azureai://accounts/example/projects/example/data/development/versions/1",
-                    "azureai://accounts/example/projects/example/data/validating/versions/1",
-                ],
-                "existing_evaluator_ids": [
-                    "azureai://accounts/example/projects/example/evaluators/quality/versions/1"
-                ],
-                "existing_definition_ids": [
-                    "eval-development",
-                    "eval-validating",
-                ],
-                "generation_mode": "reuse_reviewed_sources",
-                "generation_sources": [
-                    {
-                        "schema_version": 1,
-                        "kind": "reviewed_file",
-                        "path": "app/main.py",
-                    }
-                ],
-                "model_deployment": "baseline-model",
-                "trace_window": "P14D",
-                "connection_name": "foundry-default",
-                "target_sample_count": 30,
-                "replacement_intent": False,
-            }
-        ],
-    }
-    path.write_text(json.dumps(payload), encoding="utf-8")
-    runner.invoke(
-        app,
-        [
-            "bootstrap",
-            "discover",
-            "--repo-root",
-            str(repo),
-            "--repository-id",
-            "org/repo",
-            "--operation-id",
-            "op-eval",
-            "--state-root",
-            str(state_root),
-            "--plan-input",
-            str(path),
-        ],
-    )
+    sha = "a" * 40
+    plan_input = _evaluation_plan_input(tmp_path, sha)
+    adapter, fakes = build_fake_adapter()
+    monkeypatch.setattr(drivers, "DefaultAzureCredential", lambda **kwargs: fake_credential())
+    monkeypatch.setattr(drivers, "FoundryAdapter", lambda endpoint, credential: adapter)
 
-    planned = runner.invoke(
+    inventory = runner.invoke(
         app,
-        [
-            "bootstrap",
-            "plan",
-            "--plan-input",
-            str(path),
-            "--repository-id",
-            "org/repo",
-            "--repo-root",
-            str(repo),
-            "--operation-id",
-            "op-eval",
-            "--state-root",
-            str(state_root),
-        ],
+        ["bootstrap", "evaluation", "inventory", "--plan-input", str(plan_input), "--repo-root", str(repo)],
     )
+    assert inventory.exit_code == 0, inventory.stdout
+    assessment = json.loads(inventory.stdout)["assessments"][0]
+    assert assessment["dataset_strategy"] == "synthetic_only"
+    assert (assessment["planned_development_cases"], assessment["planned_validating_cases"]) == (20, 10)
 
-    assert planned.exit_code == 20
-    assert "resolved sidecar/action contract" in planned.stdout
+    evaluation_plan = runner.invoke(
+        app,
+        ["bootstrap", "evaluation", "plan", "--plan-input", str(plan_input), "--repo-root", str(repo)],
+    )
+    assert evaluation_plan.exit_code == 0, evaluation_plan.stdout
+    planned = json.loads(evaluation_plan.stdout)
+    # One approval-bound composite onboarding action per agent.
+    assert [action["kind"] for action in planned["actions"]] == ["evaluation_onboarding"]
+    assert planned["stopped_agents"] == []
+    assert planned["execution_contracts"][0]["contract_version"] == 3
+
+    assert runner.invoke(app, ["bootstrap", "discover", "--repo-root", str(repo), "--repository-id", "org/repo", "--operation-id", "op-eval", "--state-root", str(state_root), "--plan-input", str(plan_input)]).exit_code == 0
+    planned_operation = runner.invoke(app, ["bootstrap", "plan", "--plan-input", str(plan_input), "--repository-id", "org/repo", "--repo-root", str(repo), "--operation-id", "op-eval", "--state-root", str(state_root)])
+    assert planned_operation.exit_code == 0, planned_operation.stdout
+    plan_hash = json.loads(planned_operation.stdout)["plan_hash"]
+
+    for phase in ("repository", "evaluations"):
+        approval = ApprovalRecord.create(parent_plan_hash=plan_hash, phase=phase, actor="tester", summary="ok")
+        approval_file = tmp_path / f"approval-{phase}.json"
+        approval_file.write_text(json.dumps(approval.model_dump(mode="json")), encoding="utf-8")
+        if phase == "repository":
+            applied = runner.invoke(app, ["bootstrap", "apply", "--repository-id", "org/repo", "--operation-id", "op-eval", "--phase", phase, "--approval-file", str(approval_file), "--plan-input", str(plan_input), "--repo-root", str(repo), "--state-root", str(state_root)])
+        else:
+            applied = runner.invoke(app, ["bootstrap", "evaluation", "apply", "--repository-id", "org/repo", "--operation-id", "op-eval", "--approval-file", str(approval_file), "--plan-input", str(plan_input), "--repo-root", str(repo), "--state-root", str(state_root)])
+        assert applied.exit_code == 0, applied.stdout
+
+    applied_payload = json.loads(applied.stdout)
+    assert applied_payload["sidecar_written"] is False
+    sidecar = repo / "app" / ".foundry" / "foundry-opt.yaml"
+    assert not sidecar.exists()
+
+    pending = runner.invoke(app, ["bootstrap", "evaluation", "status", "--repository-id", "org/repo", "--operation-id", "op-eval", "--repo-root", str(repo), "--state-root", str(state_root)])
+    assert pending.exit_code == 0
+    pending_payload = json.loads(pending.stdout)
+    assert pending_payload["phase_state"] == "applied"
+    assert pending_payload["sidecar_activation_state"] == "not_started"
+    assert pending_payload["activated"] is False
+    assert pending_payload["next_action"] == "run bootstrap evaluation activate"
+
+    activated = runner.invoke(app, ["bootstrap", "evaluation", "activate", "--repository-id", "org/repo", "--operation-id", "op-eval", "--plan-input", str(plan_input), "--repo-root", str(repo), "--state-root", str(state_root)])
+    assert activated.exit_code == 0, activated.stdout
+    assert sidecar.exists()
+    registry = yaml.safe_load((repo / ".foundry-opt" / "registry.yaml").read_text(encoding="utf-8"))
+    assert registry["agents"][0]["enabled"] is True
+    assert fakes["agents"].delete_version_calls == [("draft-agent", "1")]
+
+    final_status = json.loads(runner.invoke(app, ["bootstrap", "evaluation", "status", "--repository-id", "org/repo", "--operation-id", "op-eval", "--repo-root", str(repo), "--state-root", str(state_root)]).stdout)
+    assert final_status["activated"] is True
+    assert final_status["replacement"]["status"] == "activated"
+
+    inspected = runner.invoke(app, ["bootstrap", "evaluation", "inspect", "--repository-id", "org/repo", "--operation-id", "op-eval", "--repo-root", str(repo), "--plan-input", str(plan_input), "--state-root", str(state_root)])
+    assert inspected.exit_code == 0
+    inspected_payload = json.loads(inspected.stdout)
+    assert inspected_payload["human_rubric_editor"] is False
+    contract = inspected_payload["contracts"][0]
+    assert contract["persisted_sidecar"]["evaluation_lineage"]["activation_binding"]["runtime_commit"] == sha
+    assert contract["bounds"]["required_safety_pass_rate"] == 1.0
+    finalization = contract["finalization"]
+    assert {item["provenance"] for item in finalization["evaluators"]} == {"auto_generated_unreviewed", "reused_existing"}
+    assert finalization["split"]["development_case_count"] == 20
+
+
+def test_evaluation_cli_failures_exit_nonzero(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    state_root = tmp_path / "state"
+    sha = "a" * 40
+    plan_input = _evaluation_plan_input(tmp_path, sha)
+
+    runner.invoke(app, ["bootstrap", "discover", "--repo-root", str(repo), "--repository-id", "org/repo", "--operation-id", "op-fail", "--state-root", str(state_root), "--plan-input", str(plan_input)])
+    unapplied = runner.invoke(app, ["bootstrap", "evaluation", "activate", "--repository-id", "org/repo", "--operation-id", "op-fail", "--plan-input", str(plan_input), "--repo-root", str(repo), "--state-root", str(state_root)])
+    assert unapplied.exit_code == 25
+    assert "applied evaluations phase receipt" in unapplied.stdout
+    assert not (repo / "app" / ".foundry" / "foundry-opt.yaml").exists()
+
+    stale = runner.invoke(app, ["bootstrap", "evaluation", "activate", "--repository-id", "org/repo", "--operation-id", "op-fail", "--plan-input", str(plan_input), "--repo-root", str(repo), "--state-root", str(state_root), "--runtime-commit", "b" * 40])
+    assert stale.exit_code == 24
+
+    replacement = tmp_path / "replace.json"
+    replacement.write_text(json.dumps({"active_bundle_id": "old", "candidate_bundle_id": "new", "preserved_bundle_id": "old", "lineage_hash": "a" * 64, "status": "planned"}), encoding="utf-8")
+    refused = runner.invoke(app, ["bootstrap", "evaluation", "replace", "--replacement-file", str(replacement), "--plan-input", str(plan_input), "--repo-root", str(repo)])
+    assert refused.exit_code == 20
+    assert "replacement-intent-required" in refused.stdout
+
+    missing_contract = json.loads(plan_input.read_text(encoding="utf-8"))
+    missing_contract["evaluations_phase"]["agents"][0].pop("onboarding_contract")
+    missing_path = tmp_path / "plan-input-missing.json"
+    missing_path.write_text(json.dumps(missing_contract), encoding="utf-8")
+    blocked = runner.invoke(app, ["bootstrap", "evaluation", "plan", "--plan-input", str(missing_path), "--repo-root", str(repo)])
+    assert blocked.exit_code == 20
+    assert "approved onboarding contract" in blocked.stdout
 
 
 def test_evaluation_subcommands_json(tmp_path: Path) -> None:
@@ -220,14 +261,14 @@ def test_evaluation_subcommands_json(tmp_path: Path) -> None:
     sha = "a" * 40
     plan_input = _offline_plan_input(tmp_path, sha)
     runner.invoke(app, ["bootstrap", "discover", "--repo-root", str(repo), "--repository-id", "org/repo", "--operation-id", "op-3", "--state-root", str(state_root), "--plan-input", str(plan_input)])
+    result = runner.invoke(app, ["bootstrap", "evaluation", "plan", "--plan-input", str(plan_input)])
+    assert result.exit_code == 0, result.stdout
+    assert json.loads(result.stdout)["actions"] == []
+
     replacement = tmp_path / "replace.json"
     replacement.write_text(json.dumps({"active_bundle_id": "old", "candidate_bundle_id": "new", "preserved_bundle_id": "old", "lineage_hash": "a" * 64, "status": "planned"}), encoding="utf-8")
-    for args in (
-        ["bootstrap", "evaluation", "plan", "--plan-input", str(plan_input)],
-        ["bootstrap", "evaluation", "replace", "--replacement-file", str(replacement), "--plan-input", str(plan_input)],
-    ):
-        result = runner.invoke(app, args)
-        assert result.exit_code == 0, result.stdout
+    replaced = runner.invoke(app, ["bootstrap", "evaluation", "replace", "--replacement-file", str(replacement), "--plan-input", str(plan_input)])
+    assert replaced.exit_code == 20, replaced.stdout
 
 
 def test_registered_deploy_plan_command_uses_repository_defaults(tmp_path: Path) -> None:

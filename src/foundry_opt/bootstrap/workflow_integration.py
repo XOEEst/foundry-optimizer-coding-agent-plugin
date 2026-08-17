@@ -140,9 +140,9 @@ def build_changed_path_matrix(
         sorted({validate_repository_relative_path(path, field="changed_path") for path in changed_paths}, key=lambda value: (value.casefold(), value))
     )
     shared_contract_changed = any(
-        path.startswith(".foundry-opt/")
-        or path.startswith(".github/workflows/")
-        or path == ".github/foundry-opt.lock.yml"
+        # `.foundry-opt/` already covers the authoritative committed lock
+        # (`.foundry-opt/bootstrap.lock.json`) and the registry.
+        path.startswith(".foundry-opt/") or path.startswith(".github/workflows/")
         for path in normalized
     )
     sidecars = {

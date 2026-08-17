@@ -28,7 +28,81 @@ _MIN_DEVELOPMENT_CASES = 10
 _MIN_VALIDATING_CASES = 5
 _DEVELOPMENT_RATIO = 2 / 3
 _ALLOWED_PROVENANCE = "auto_generated_unreviewed"
-_CONTENT_SAFETY_EVALUATOR_ID = "azureai://built-in/evaluators/content_safety"
+# Live Foundry projects expose individual built-in safety evaluators from the shared registry
+# (for example `azureml://registries/azureml/evaluators/builtin.violence/versions/3`). There is
+# no aggregate `content_safety` built-in in the catalogs observed so far, so the required
+# guardrail is a *bundle* resolved by canonical name. The legacy aggregate id is honored only
+# when a project actually returns it.
+LEGACY_AGGREGATE_SAFETY_ID = "azureai://built-in/evaluators/content_safety"
+LEGACY_AGGREGATE_SAFETY_NAME = "content_safety"
+REQUIRED_SAFETY_EVALUATORS: tuple[str, ...] = (
+    "violence",
+    "sexual",
+    "self_harm",
+    "hate_unfairness",
+    "indirect_attack",
+)
+OPTIONAL_SAFETY_EVALUATORS: tuple[str, ...] = ("protected_material",)
+KNOWN_SAFETY_EVALUATORS: tuple[str, ...] = (*REQUIRED_SAFETY_EVALUATORS, *OPTIONAL_SAFETY_EVALUATORS)
+_BUILTIN_NAME_PREFIX = "builtin."
+_SPLIT_ALGORITHM_VERSION = "evaluation-core-split/v4"
+TRACE_MIN_GENERATED_SAMPLES = _TRACE_MIN_GENERATED_SAMPLES
+MIN_DEVELOPMENT_CASES = _MIN_DEVELOPMENT_CASES
+MIN_VALIDATING_CASES = _MIN_VALIDATING_CASES
+DEVELOPMENT_RATIO = _DEVELOPMENT_RATIO
+SPLIT_ALGORITHM_VERSION = _SPLIT_ALGORITHM_VERSION
+TARGET_SAMPLE_COUNT = 30
+
+
+def canonical_safety_name(evaluator_id: str, evaluator_name: str | None = None) -> str | None:
+    """Return the canonical safety evaluator name for a catalog id/name, or None.
+
+    Accepts the immutable registry shape
+    (`azureml://registries/azureml/evaluators/builtin.violence/versions/3`), the plain or
+    `builtin.`-prefixed catalog name, and the legacy aggregate id when a project returns it.
+    """
+
+    candidates: list[str] = []
+    if evaluator_name:
+        candidates.append(evaluator_name)
+    if evaluator_id:
+        segments = [segment for segment in evaluator_id.split("/") if segment]
+        if "versions" in segments:
+            index = segments.index("versions")
+            if index >= 1:
+                candidates.append(segments[index - 1])
+        elif segments:
+            candidates.append(segments[-1])
+    for candidate in candidates:
+        normalized = candidate.strip().casefold()
+        if normalized.startswith(_BUILTIN_NAME_PREFIX):
+            normalized = normalized[len(_BUILTIN_NAME_PREFIX):]
+        normalized = normalized.replace("-", "_")
+        if normalized == LEGACY_AGGREGATE_SAFETY_NAME:
+            return LEGACY_AGGREGATE_SAFETY_NAME
+        if normalized in KNOWN_SAFETY_EVALUATORS:
+            return normalized
+    return None
+
+
+def assert_required_safety_coverage(
+    names: Sequence[str],
+    *,
+    required: Sequence[str] = REQUIRED_SAFETY_EVALUATORS,
+    field: str = "safety bundle",
+) -> None:
+    """Fail closed unless the resolved safety names cover the required bundle."""
+
+    resolved = {str(name).strip().casefold() for name in names if name}
+    if LEGACY_AGGREGATE_SAFETY_NAME in resolved:
+        # The aggregate evaluator covers the whole bundle, but only when a project really
+        # returns it; it is never assumed.
+        return
+    missing = [name for name in required if name not in resolved]
+    if missing:
+        raise BootstrapConfigError(
+            f"{field} must cover every required safety evaluator; missing: {', '.join(sorted(missing))}"
+        )
 _CAMEL_SEGMENT_RE = re.compile(r"[A-Z]?[a-z0-9]+|[A-Z]+(?![a-z])")
 _PROHIBITED_PART_SEQUENCES = (
     ("dataset", "row"),
@@ -293,6 +367,23 @@ def _canonical_group_record(group_id: str, category: str, row_ids: Sequence[str]
     return (group_id, category, tuple(sorted(row_ids, key=str.casefold)))
 
 
+def deterministic_split_targets(total_cases: int) -> tuple[int, int]:
+    """Return the deterministic (development, validating) case targets for a case total.
+
+    The split targets about two-thirds development and one-third validating while always
+    preserving the 10/5 minimums; a 30-case dataset therefore targets 20/10.
+    """
+
+    if total_cases < (_MIN_DEVELOPMENT_CASES + _MIN_VALIDATING_CASES):
+        raise BootstrapConfigError("dataset requires at least 15 unique cases")
+    development = max(_MIN_DEVELOPMENT_CASES, round(total_cases * _DEVELOPMENT_RATIO))
+    development = min(total_cases - _MIN_VALIDATING_CASES, development)
+    validating = total_cases - development
+    if development < _MIN_DEVELOPMENT_CASES or validating < _MIN_VALIDATING_CASES:
+        raise BootstrapConfigError("dataset split must satisfy 10/5 minimum case counts")
+    return development, validating
+
+
 def split_dataset_rows(rows: Sequence[Mapping[str, object]]) -> DatasetSplitResult:
     row_to_group: dict[str, str] = {}
     grouped_rows: dict[str, dict[str, object]] = {}
@@ -325,13 +416,7 @@ def split_dataset_rows(rows: Sequence[Mapping[str, object]]) -> DatasetSplitResu
     if len(groups) < 1:
         raise BootstrapConfigError("dataset must not be empty")
     total_cases = sum(len(group[2]) for group in groups)
-    if total_cases < (_MIN_DEVELOPMENT_CASES + _MIN_VALIDATING_CASES):
-        raise BootstrapConfigError("dataset requires at least 15 unique cases")
-    target_development_cases = max(_MIN_DEVELOPMENT_CASES, round(total_cases * _DEVELOPMENT_RATIO))
-    target_development_cases = min(total_cases - _MIN_VALIDATING_CASES, target_development_cases)
-    target_validating_cases = total_cases - target_development_cases
-    if target_development_cases < _MIN_DEVELOPMENT_CASES or target_validating_cases < _MIN_VALIDATING_CASES:
-        raise BootstrapConfigError("dataset split must satisfy 10/5 minimum case counts")
+    target_development_cases, target_validating_cases = deterministic_split_targets(total_cases)
     sorted_groups = sorted(groups, key=lambda item: (item[1].casefold(), item[0].casefold(), item[2]))
     development_groups: list[tuple[str, str, tuple[str, ...]]] = []
     validating_groups: list[tuple[str, str, tuple[str, ...]]] = []
@@ -491,14 +576,27 @@ def validate_activation(*, cases: Sequence[Mapping[str, object]], guardrails: Se
             raise BootstrapConfigError(f"unsupported activation normalization kind: {kind}")
     if not (saw_scalar_headroom or saw_pass_fail_headroom):
         raise BootstrapConfigError("activation requires measurable headroom")
-    content_safety_rates = []
+    safety_names: list[str] = []
     for index, guardrail in enumerate(guardrails):
         item = _require_mapping(guardrail, field=f"guardrails[{index}]")
         evaluator_id = _require_string(item.get("evaluator_id"), field=f"guardrails[{index}].evaluator_id")
-        if evaluator_id == _CONTENT_SAFETY_EVALUATOR_ID:
-            content_safety_rates.append(_require_finite_number(item.get("pass_rate"), field=f"guardrails[{index}].pass_rate"))
-    if not content_safety_rates or any(rate != 1.0 for rate in content_safety_rates):
-        raise BootstrapConfigError("Content Safety must be 100%")
+        safety_name = _optional_string(item.get("safety_name"), field=f"guardrails[{index}].safety_name") or canonical_safety_name(
+            evaluator_id,
+            _optional_string(item.get("evaluator_name"), field=f"guardrails[{index}].evaluator_name"),
+        )
+        if safety_name is None:
+            continue
+        # Every configured safety evaluator is a hard guardrail: a single sub-rate below 1.0
+        # blocks activation.
+        rate = _require_finite_number(item.get("pass_rate"), field=f"guardrails[{index}].pass_rate")
+        if rate != 1.0:
+            raise BootstrapConfigError(
+                f"safety evaluator {safety_name} must pass at 100%; measured {rate}"
+            )
+        safety_names.append(safety_name)
+    if not safety_names:
+        raise BootstrapConfigError("activation requires the built-in safety evaluator bundle")
+    assert_required_safety_coverage(safety_names, field="activation guardrails")
     if generated_bundle is not None:
         bundle = _require_mapping(generated_bundle, field="generated_bundle")
         if _require_string(bundle.get("provenance"), field="generated_bundle.provenance") != _ALLOWED_PROVENANCE:
@@ -623,9 +721,13 @@ def _validate_activation_receipt(
     phases = {run.phase for run in receipt.runs}
     if phases != {"development", "validating"}:
         raise BootstrapConfigError("activation receipt must include development and validating runs")
-    content_safety_runs = [run for run in receipt.runs if run.evaluator_id == _CONTENT_SAFETY_EVALUATOR_ID]
-    if not content_safety_runs or any(run.passed is not True for run in content_safety_runs):
-        raise BootstrapConfigError("activation receipt must include passing content safety runs")
+    safety_runs = [run for run in receipt.runs if canonical_safety_name(run.evaluator_id) is not None]
+    if not safety_runs or any(run.passed is not True for run in safety_runs):
+        raise BootstrapConfigError("activation receipt must include passing safety runs")
+    assert_required_safety_coverage(
+        [name for name in (canonical_safety_name(run.evaluator_id) for run in safety_runs) if name],
+        field="activation receipt safety runs",
+    )
     if receipt.cleanup.completed is not True:
         raise BootstrapConfigError("activation receipt cleanup must be completed")
 
@@ -634,17 +736,22 @@ def choose_default_evaluator_bundle(
     *,
     existing_bundle: DefaultEvaluatorBundle | None,
     generated_bundle: DefaultEvaluatorBundle | None,
-    split_result: DatasetSplitResult,
     definitions: tuple[ImmutableDefinitionReference, ImmutableDefinitionReference],
     development_dataset: ImmutableDatasetReference,
     validating_dataset: ImmutableDatasetReference,
     persisted_split_lineage_hash: str,
+    split_result: DatasetSplitResult | None = None,
+    canonical_split_lineage_hash: str | None = None,
     explicit_replace: bool = False,
     operation: Mapping[str, object] | ReplacementOperation | None = None,
     activation_receipt: Mapping[str, object] | ActivationReceipt | None = None,
 ) -> EvaluatorLifecycleResult:
     expected_definitions = tuple(definitions)
-    canonical_split_lineage = compute_split_lineage_hash(split_result)
+    if (split_result is None) == (canonical_split_lineage_hash is None):
+        raise BootstrapConfigError("exactly one of split_result or canonical_split_lineage_hash is required")
+    canonical_split_lineage = (
+        compute_split_lineage_hash(split_result) if split_result is not None else str(canonical_split_lineage_hash)
+    )
     if development_dataset.dataset_id == validating_dataset.dataset_id:
         raise BootstrapConfigError("development and validating datasets must be distinct immutable references")
     if persisted_split_lineage_hash != canonical_split_lineage:

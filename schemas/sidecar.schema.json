@@ -1,5 +1,66 @@
 {
   "$defs": {
+    "ActivationBinding": {
+      "additionalProperties": false,
+      "description": "Binds one persisted sidecar mutation to an approved plan, receipt, and runtime SHA.",
+      "properties": {
+        "approval_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Approval Hash",
+          "type": "string"
+        },
+        "finalization_hash": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Finalization Hash"
+        },
+        "operation_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Operation Id",
+          "type": "string"
+        },
+        "plan_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Plan Hash",
+          "type": "string"
+        },
+        "receipt_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Receipt Hash",
+          "type": "string"
+        },
+        "runtime_commit": {
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+          "title": "Runtime Commit",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "operation_id",
+        "plan_hash",
+        "approval_hash",
+        "receipt_hash",
+        "runtime_commit"
+      ],
+      "title": "ActivationBinding",
+      "type": "object"
+    },
     "DecisionPolicy": {
       "additionalProperties": false,
       "properties": {
@@ -95,6 +156,110 @@
       "title": "DeploymentSettings",
       "type": "object"
     },
+    "EvaluationLineage": {
+      "additionalProperties": false,
+      "description": "Non-secret evaluation lineage persisted in the sidecar after successful activation.",
+      "properties": {
+        "activation_binding": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ActivationBinding"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "bundle_objective_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Bundle Objective Hash",
+          "type": "string"
+        },
+        "dataset_strategy": {
+          "enum": [
+            "trace",
+            "synthetic_only"
+          ],
+          "title": "Dataset Strategy",
+          "type": "string"
+        },
+        "development_case_count": {
+          "minimum": 0,
+          "title": "Development Case Count",
+          "type": "integer"
+        },
+        "evaluator_generation_operation_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Evaluator Generation Operation Id"
+        },
+        "evaluator_provenance": {
+          "enum": [
+            "reused_existing",
+            "auto_generated_unreviewed",
+            "issue_supplied_existing"
+          ],
+          "title": "Evaluator Provenance",
+          "type": "string"
+        },
+        "generation_context_fingerprint": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Generation Context Fingerprint",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "split_algorithm_version": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Split Algorithm Version",
+          "type": "string"
+        },
+        "split_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Split Hash",
+          "type": "string"
+        },
+        "split_lineage_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Split Lineage Hash",
+          "type": "string"
+        },
+        "validating_case_count": {
+          "minimum": 0,
+          "title": "Validating Case Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "split_algorithm_version",
+        "split_hash",
+        "split_lineage_hash",
+        "development_case_count",
+        "validating_case_count",
+        "dataset_strategy",
+        "generation_context_fingerprint",
+        "evaluator_provenance",
+        "bundle_objective_hash"
+      ],
+      "title": "EvaluationLineage",
+      "type": "object"
+    },
     "EvaluatorNormalization": {
       "additionalProperties": false,
       "properties": {
@@ -154,6 +319,10 @@
             },
             {
               "pattern": "^azureai://built-in/evaluators/[^/]+$",
+              "type": "string"
+            },
+            {
+              "pattern": "^azureml://registries/[^/]+/evaluators/[^/]+/versions/[^/]+$",
               "type": "string"
             }
           ],
@@ -508,6 +677,17 @@
       },
       "title": "Editable Paths",
       "type": "array"
+    },
+    "evaluation_lineage": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EvaluationLineage"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     },
     "foundry_project": {
       "$ref": "#/$defs/FoundryProjectSettings"

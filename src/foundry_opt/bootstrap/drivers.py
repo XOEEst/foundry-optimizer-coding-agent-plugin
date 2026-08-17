@@ -265,6 +265,9 @@ class EvaluationPhaseDriver(PhaseDriver):
             "model_deployments": client.inventory_model_deployments(),
         }
 
+    def observe_agent_binding(self, *, agent_name: str, agent_version: str, source_root: str, package_root: str) -> Mapping[str, object]:
+        return self._client(self._plan_input).observe_agent_binding(agent_name=agent_name, agent_version=agent_version, source_root=source_root, package_root=package_root)
+
 
 def _contextual_plan_input(
     context: Mapping[str, object],

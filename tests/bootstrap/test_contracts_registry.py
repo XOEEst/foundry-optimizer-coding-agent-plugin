@@ -69,11 +69,11 @@ def test_sidecar_rejects_invalid_foundry_uri() -> None:
 
 
 def test_actual_template_legacy_import_succeeds() -> None:
-    root = Path(__file__).resolve().parents[2] / 'src' / 'foundry_opt' / 'templates' / 'customer-repo'
+    fixtures = Path(__file__).resolve().parents[1] / 'bootstrap' / 'fixtures' / 'templates'
     proposal = import_legacy_single_agent_documents(
-        lock_document=(root / '.github' / 'foundry-opt.lock.yml').read_text(encoding='utf-8'),
-        policy_document=(root / '.github' / 'foundry-optimizer.yaml').read_text(encoding='utf-8'),
-        metadata_document=(root / '.foundry' / 'agent-metadata.yaml').read_text(encoding='utf-8'),
+        lock_document=(fixtures / 'legacy-single-agent-foundry-opt.lock.yml').read_text(encoding='utf-8'),
+        policy_document=(fixtures / 'legacy-single-agent-foundry-optimizer.yaml').read_text(encoding='utf-8'),
+        metadata_document=(fixtures / 'legacy-single-agent-agent-metadata.yaml').read_text(encoding='utf-8'),
     )
     assert proposal.registry.distribution.repository.endswith('foundry-optimizer-coding-agent-plugin.git')
     assert proposal.sidecars[0].development_definition.definition_id == 'eval_development'

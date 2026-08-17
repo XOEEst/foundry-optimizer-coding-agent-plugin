@@ -59,7 +59,7 @@ default_evaluator_bundle:
         reference:
           schema_version: 1
           evaluator_id: azureai://accounts/example/projects/example/evaluators/quality/versions/1
-          provenance: issue_supplied_existing
+          provenance: reused_existing
         normalization:
           schema_version: 1
           kind: pass_fail
@@ -73,7 +73,7 @@ default_evaluator_bundle:
           schema_version: 1
           kind: pass_fail
         weight: 0.3333333333333333
-    objective_hash: e16d65cde4368cd197b894bd62f9a280a7227ea7546e8b608932f74c313064a6
+    objective_hash: 56cf765d92316a5605052bfc8ed3d7977b19e50caa3e2b859a056e579bc92a22
   datasets:
     - schema_version: 1
       dataset_id: azureai://accounts/example/projects/example/data/development/versions/1
@@ -84,10 +84,45 @@ default_evaluator_bundle:
       definition_id: eval_development
     - schema_version: 1
       definition_id: eval_validating
+evaluation_lineage:
+  schema_version: 1
+  split_algorithm_version: evaluation-core-split/v4
+  split_hash: d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0
+  split_lineage_hash: d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1
+  development_case_count: 20
+  validating_case_count: 10
+  dataset_strategy: synthetic_only
+  generation_context_fingerprint: d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2
+  evaluator_provenance: reused_existing
+  evaluator_generation_operation_id: null
+  bundle_objective_hash: 56cf765d92316a5605052bfc8ed3d7977b19e50caa3e2b859a056e579bc92a22
+  activation_binding:
+    schema_version: 1
+    operation_id: bootstrap-000000000000
+    plan_hash: d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3
+    approval_hash: d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4
+    receipt_hash: d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5
+    runtime_commit: c899b718f3baebcfd08209ee5184d0cf61d8153d
 max_issue_evaluators: 8
 hard_guardrails:
   - schema_version: 1
-    evaluator_name: safety
+    evaluator_name: violence
+    required_pass_rate: 1.0
+    required: true
+  - schema_version: 1
+    evaluator_name: sexual
+    required_pass_rate: 1.0
+    required: true
+  - schema_version: 1
+    evaluator_name: self_harm
+    required_pass_rate: 1.0
+    required: true
+  - schema_version: 1
+    evaluator_name: hate_unfairness
+    required_pass_rate: 1.0
+    required: true
+  - schema_version: 1
+    evaluator_name: indirect_attack
     required_pass_rate: 1.0
     required: true
 deployment:

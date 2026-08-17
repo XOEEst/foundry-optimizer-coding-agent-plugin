@@ -8,7 +8,7 @@ from foundry_opt.bootstrap.canonical import canonical_sha256, safe_persisted_doc
 from foundry_opt.bootstrap.contracts import BindingAssessment, BootstrapAction, BootstrapPlan, BootstrapReceipt, FingerprintRecord, RedactedStatusInfo
 from foundry_opt.bootstrap.discovery import DiscoveryResult, discover_repository_agents
 from foundry_opt.bootstrap.errors import BootstrapApplyError
-from foundry_opt.bootstrap.operation_state import OperationStateEnvelope, SelectionPlan, next_generation, read_operation_state, status_from_state, write_operation_state
+from foundry_opt.bootstrap.operation_state import DiscoveredAgentRecord, DiscoveryBlockerRecord, OperationStateEnvelope, SelectionPlan, next_generation, read_operation_state, status_from_state, write_operation_state
 from foundry_opt.bootstrap.providers.foundry import (
     rollback_failure_details as foundry_rollback_failure_details,
 )
@@ -52,7 +52,24 @@ class BootstrapOrchestrator:
         selected = tuple(item["repoAgentId"] if isinstance(item, Mapping) else "" for item in (selected_agents or ()) if isinstance(item, Mapping))
         fingerprints = tuple(FingerprintRecord(label=f"discovery:{agent.root}", sha256=canonical_sha256(agent.model_dump(mode="json"))) for agent in result.agents)
         blockers = tuple(sorted({blocker.detail for agent in result.agents for blocker in agent.blockers}))
-        selection = SelectionPlan(repository_root=result.repositoryRoot, selected_agent_ids=selected, binding_assessments=tuple(agent.bindingAssessment for agent in result.agents), discovery_fingerprints=fingerprints, blockers=blockers)
+        discovered_agents = tuple(
+            DiscoveredAgentRecord(
+                repo_agent_id=agent.repoAgentId,
+                root=agent.root,
+                config_path=agent.configPath,
+                source_root=agent.sourceRoot,
+                package_root=agent.packageRoot,
+                source_fingerprint=agent.sourceFingerprint,
+                package_fingerprint=agent.packageFingerprint,
+                classification=agent.bindingAssessment.classification,
+                detail=agent.bindingAssessment.detail,
+                confidence=agent.confidence,
+                blockers=tuple(DiscoveryBlockerRecord(code=blocker.code, detail=blocker.detail) for blocker in agent.blockers),
+                approved_shared_source_repo_agent_ids=agent.approvedSharedSourceRepoAgentIds,
+            )
+            for agent in result.agents
+        )
+        selection = SelectionPlan(repository_root=result.repositoryRoot, selected_agent_ids=selected, binding_assessments=tuple(agent.bindingAssessment for agent in result.agents), discovery_fingerprints=fingerprints, blockers=blockers, discovered_agents=discovered_agents)
         empty_plan = BootstrapPlan.create(operation_id=operation_id, runtime_repository=runtime_repository, runtime_commit=runtime_commit, repository_identity=repository_id, actions=())
         envelope = OperationStateEnvelope.create(generation=0, repository_id=repository_id, operation_id=operation_id, runtime_repository=runtime_repository, runtime_commit=runtime_commit, selection_plan=selection, bootstrap_plan=empty_plan, discovery_fingerprints=fingerprints)
         write_operation_state(envelope, state_root=self._state_root)

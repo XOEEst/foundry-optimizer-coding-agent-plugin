@@ -7,7 +7,7 @@ from typing import Literal
 from pydantic import Field, field_validator, model_validator
 
 from foundry_opt.bootstrap.canonical import canonical_json_bytes, canonical_sha256
-from foundry_opt.bootstrap.contracts import BindingAssessment, BootstrapDocument, BootstrapPlan, FingerprintRecord
+from foundry_opt.bootstrap.contracts import AgentId, BindingAssessment, BindingClassification, BootstrapDocument, BootstrapPlan, FingerprintRecord, Sha256
 from foundry_opt.bootstrap.errors import BootstrapApplyError, BootstrapConfigError
 from foundry_opt.bootstrap.receipts import ApplyPhaseName, ApprovalRecord, EvaluationReplacementRecord, PhaseReceipt, merge_phase_receipts
 
@@ -18,12 +18,57 @@ _STATE_FILE_NAME = "state.json"
 _LOCK_FILE_NAME = "state.lock"
 
 
+class DiscoveryBlockerRecord(BootstrapDocument):
+    code: str
+    detail: str
+
+
+class DiscoveredAgentRecord(BootstrapDocument):
+    """Local discovery facts the skill needs to build and review binding evidence.
+
+    Fingerprints are the repository-side digests observed evidence must reproduce, so they are
+    persisted with the operation and echoed by `bootstrap discover`.
+    """
+
+    repo_agent_id: AgentId
+    root: str
+    config_path: str | None = None
+    source_root: str
+    package_root: str
+    source_fingerprint: Sha256
+    package_fingerprint: Sha256
+    classification: BindingClassification
+    detail: str | None = None
+    confidence: float = 0.0
+    blockers: tuple[DiscoveryBlockerRecord, ...] = ()
+    approved_shared_source_repo_agent_ids: tuple[str, ...] = ()
+
+    def to_discovery_payload(self) -> dict[str, object]:
+        """Discovery-native view, matching `discovery_result_json` field names."""
+
+        return {
+            "repoAgentId": self.repo_agent_id,
+            "root": self.root,
+            "configPath": self.config_path,
+            "sourceRoot": self.source_root,
+            "packageRoot": self.package_root,
+            "sourceFingerprint": self.source_fingerprint,
+            "packageFingerprint": self.package_fingerprint,
+            "classification": self.classification,
+            "detail": self.detail,
+            "confidence": self.confidence,
+            "blockers": [{"code": item.code, "detail": item.detail} for item in self.blockers],
+            "approvedSharedSourceRepoAgentIds": list(self.approved_shared_source_repo_agent_ids),
+        }
+
+
 class SelectionPlan(BootstrapDocument):
     repository_root: str
     selected_agent_ids: tuple[str, ...]
     binding_assessments: tuple[BindingAssessment, ...]
     discovery_fingerprints: tuple[FingerprintRecord, ...]
     blockers: tuple[str, ...] = ()
+    discovered_agents: tuple[DiscoveredAgentRecord, ...] = ()
 
 
 class EvaluatorLineage(BootstrapDocument):

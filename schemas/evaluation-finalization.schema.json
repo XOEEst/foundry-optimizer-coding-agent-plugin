@@ -1,0 +1,614 @@
+{
+  "$defs": {
+    "ActivationCaseFinalization": {
+      "additionalProperties": false,
+      "description": "One structural, already-scored activation measurement. Never raw model content.",
+      "properties": {
+        "evaluator_id": {
+          "anyOf": [
+            {
+              "pattern": "^azureai://accounts/[^/]+/projects/[^/]+/evaluators/[^/]+/versions/[^/]+$",
+              "type": "string"
+            },
+            {
+              "pattern": "^azureai://built-in/evaluators/[^/]+$",
+              "type": "string"
+            },
+            {
+              "pattern": "^azureml://registries/[^/]+/evaluators/[^/]+/versions/[^/]+$",
+              "type": "string"
+            }
+          ],
+          "title": "Evaluator Id"
+        },
+        "executable": {
+          "title": "Executable",
+          "type": "boolean"
+        },
+        "normalization_kind": {
+          "enum": [
+            "scalar",
+            "pass_fail"
+          ],
+          "title": "Normalization Kind",
+          "type": "string"
+        },
+        "pass_rate": {
+          "title": "Pass Rate",
+          "type": "number"
+        },
+        "phase": {
+          "enum": [
+            "development",
+            "validating"
+          ],
+          "title": "Phase",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "score": {
+          "title": "Score",
+          "type": "number"
+        },
+        "source_max": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Max"
+        },
+        "source_min": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Min"
+        }
+      },
+      "required": [
+        "phase",
+        "evaluator_id",
+        "executable",
+        "normalization_kind",
+        "score",
+        "pass_rate"
+      ],
+      "title": "ActivationCaseFinalization",
+      "type": "object"
+    },
+    "ActivationFinalization": {
+      "additionalProperties": false,
+      "properties": {
+        "cases": {
+          "items": {
+            "$ref": "#/$defs/ActivationCaseFinalization"
+          },
+          "title": "Cases",
+          "type": "array"
+        },
+        "cleanup_completed": {
+          "title": "Cleanup Completed",
+          "type": "boolean"
+        },
+        "development_run_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Development Run Id",
+          "type": "string"
+        },
+        "draft_agent_name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "title": "Draft Agent Name",
+          "type": "string"
+        },
+        "draft_agent_version": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "title": "Draft Agent Version",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "status": {
+          "const": "succeeded",
+          "title": "Status",
+          "type": "string"
+        },
+        "validating_run_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Validating Run Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "development_run_id",
+        "validating_run_id",
+        "draft_agent_name",
+        "draft_agent_version",
+        "cases",
+        "cleanup_completed"
+      ],
+      "title": "ActivationFinalization",
+      "type": "object"
+    },
+    "DatasetFinalization": {
+      "additionalProperties": false,
+      "description": "A dynamic immutable dataset version discovered or created during apply.",
+      "properties": {
+        "case_count": {
+          "maximum": 100000,
+          "minimum": 1,
+          "title": "Case Count",
+          "type": "integer"
+        },
+        "dataset_id": {
+          "pattern": "^azureai://accounts/[^/]+/projects/[^/]+/data/[^/]+/versions/[^/]+$",
+          "title": "Dataset Id",
+          "type": "string"
+        },
+        "dataset_name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "title": "Dataset Name",
+          "type": "string"
+        },
+        "dataset_type": {
+          "enum": [
+            "uri_file",
+            "uri_folder"
+          ],
+          "title": "Dataset Type",
+          "type": "string"
+        },
+        "dataset_version": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "title": "Dataset Version",
+          "type": "string"
+        },
+        "disposition": {
+          "enum": [
+            "created",
+            "adopted"
+          ],
+          "title": "Disposition",
+          "type": "string"
+        },
+        "role": {
+          "enum": [
+            "development",
+            "validating"
+          ],
+          "title": "Role",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "role",
+        "dataset_name",
+        "dataset_version",
+        "dataset_id",
+        "dataset_type",
+        "case_count",
+        "disposition"
+      ],
+      "title": "DatasetFinalization",
+      "type": "object"
+    },
+    "DefinitionFinalization": {
+      "additionalProperties": false,
+      "properties": {
+        "definition_id": {
+          "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9._-]*|azureai://accounts/[^/]+/projects/[^/]+/evaluationDefinitions/[^/]+/versions/[^/]+)$",
+          "title": "Definition Id",
+          "type": "string"
+        },
+        "definition_name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "title": "Definition Name",
+          "type": "string"
+        },
+        "disposition": {
+          "enum": [
+            "created",
+            "adopted"
+          ],
+          "title": "Disposition",
+          "type": "string"
+        },
+        "role": {
+          "enum": [
+            "development",
+            "validating"
+          ],
+          "title": "Role",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "role",
+        "definition_name",
+        "definition_id",
+        "disposition"
+      ],
+      "title": "DefinitionFinalization",
+      "type": "object"
+    },
+    "EvaluatorFinalization": {
+      "additionalProperties": false,
+      "properties": {
+        "disposition": {
+          "enum": [
+            "created",
+            "adopted"
+          ],
+          "title": "Disposition",
+          "type": "string"
+        },
+        "evaluator_id": {
+          "anyOf": [
+            {
+              "pattern": "^azureai://accounts/[^/]+/projects/[^/]+/evaluators/[^/]+/versions/[^/]+$",
+              "type": "string"
+            },
+            {
+              "pattern": "^azureai://built-in/evaluators/[^/]+$",
+              "type": "string"
+            },
+            {
+              "pattern": "^azureml://registries/[^/]+/evaluators/[^/]+/versions/[^/]+$",
+              "type": "string"
+            }
+          ],
+          "title": "Evaluator Id"
+        },
+        "evaluator_kind": {
+          "enum": [
+            "builtin",
+            "custom"
+          ],
+          "title": "Evaluator Kind",
+          "type": "string"
+        },
+        "evaluator_name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "title": "Evaluator Name",
+          "type": "string"
+        },
+        "evaluator_version": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "title": "Evaluator Version",
+          "type": "string"
+        },
+        "generation_operation_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Generation Operation Id"
+        },
+        "normalization": {
+          "$ref": "#/$defs/EvaluatorNormalization"
+        },
+        "provenance": {
+          "enum": [
+            "reused_existing",
+            "auto_generated_unreviewed",
+            "issue_supplied_existing"
+          ],
+          "title": "Provenance",
+          "type": "string"
+        },
+        "role": {
+          "enum": [
+            "objective",
+            "guardrail"
+          ],
+          "title": "Role",
+          "type": "string"
+        },
+        "safety_name": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[a-z][a-z0-9_]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Safety Name"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "weight": {
+          "default": 1.0,
+          "title": "Weight",
+          "type": "number"
+        }
+      },
+      "required": [
+        "role",
+        "evaluator_name",
+        "evaluator_version",
+        "evaluator_id",
+        "evaluator_kind",
+        "provenance",
+        "normalization",
+        "disposition"
+      ],
+      "title": "EvaluatorFinalization",
+      "type": "object"
+    },
+    "EvaluatorNormalization": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "pass_fail",
+            "scalar"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "source_max": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Max"
+        },
+        "source_min": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Min"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "EvaluatorNormalization",
+      "type": "object"
+    },
+    "SplitFinalization": {
+      "additionalProperties": false,
+      "properties": {
+        "algorithm_version": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Algorithm Version",
+          "type": "string"
+        },
+        "development_case_count": {
+          "maximum": 100000,
+          "minimum": 10,
+          "title": "Development Case Count",
+          "type": "integer"
+        },
+        "overlap": {
+          "const": "none",
+          "default": "none",
+          "title": "Overlap",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "split_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Split Hash",
+          "type": "string"
+        },
+        "split_lineage_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Split Lineage Hash",
+          "type": "string"
+        },
+        "validating_case_count": {
+          "maximum": 100000,
+          "minimum": 5,
+          "title": "Validating Case Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "algorithm_version",
+        "split_hash",
+        "split_lineage_hash",
+        "development_case_count",
+        "validating_case_count"
+      ],
+      "title": "SplitFinalization",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Receipt-derived onboarding outcome carrying every dynamic immutable identifier.",
+  "properties": {
+    "activation": {
+      "$ref": "#/$defs/ActivationFinalization"
+    },
+    "bundle_objective_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Bundle Objective Hash",
+      "type": "string"
+    },
+    "contract_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Contract Hash",
+      "type": "string"
+    },
+    "contract_version": {
+      "const": 3,
+      "default": 3,
+      "title": "Contract Version",
+      "type": "integer"
+    },
+    "dataset_strategy": {
+      "enum": [
+        "trace",
+        "synthetic_only"
+      ],
+      "title": "Dataset Strategy",
+      "type": "string"
+    },
+    "datasets": {
+      "items": {
+        "$ref": "#/$defs/DatasetFinalization"
+      },
+      "title": "Datasets",
+      "type": "array"
+    },
+    "definitions": {
+      "items": {
+        "$ref": "#/$defs/DefinitionFinalization"
+      },
+      "title": "Definitions",
+      "type": "array"
+    },
+    "evaluators": {
+      "items": {
+        "$ref": "#/$defs/EvaluatorFinalization"
+      },
+      "title": "Evaluators",
+      "type": "array"
+    },
+    "finalization_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Finalization Hash",
+      "type": "string"
+    },
+    "generated_sample_count": {
+      "default": 0,
+      "maximum": 100000,
+      "minimum": 0,
+      "title": "Generated Sample Count",
+      "type": "integer"
+    },
+    "generation_context_fingerprint": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Generation Context Fingerprint",
+      "type": "string"
+    },
+    "repo_agent_id": {
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$",
+      "title": "Repo Agent Id",
+      "type": "string"
+    },
+    "reuse_decision": {
+      "enum": [
+        "reuse_existing_assets",
+        "generate_new_assets"
+      ],
+      "title": "Reuse Decision",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "split": {
+      "$ref": "#/$defs/SplitFinalization"
+    }
+  },
+  "required": [
+    "repo_agent_id",
+    "contract_hash",
+    "reuse_decision",
+    "dataset_strategy",
+    "generation_context_fingerprint",
+    "datasets",
+    "split",
+    "evaluators",
+    "definitions",
+    "activation",
+    "bundle_objective_hash",
+    "finalization_hash"
+  ],
+  "title": "EvaluationFinalization",
+  "type": "object"
+}

@@ -42,17 +42,11 @@ def load_trusted_manifest(plan_input: BootstrapPlanInput) -> tuple[TemplatePaylo
     payloads: list[TemplatePayloadSpec] = []
     base = Path(__file__).resolve().parents[3]
     for payload in manifest.managed_payloads:
-        if payload.template_id == "bootstrap-lock":
-            continue
         if payload.template_id == "sidecar":
-            if plan_input.evaluations_phase is None:
-                continue
-            raise BootstrapPlanError(
-                "evaluation activation requires a resolved sidecar/action "
-                "contract containing immutable split, evaluator, definition, "
-                "activation-run, and cleanup evidence; BootstrapPlanInput v1 "
-                "does not carry those fields"
-            )
+            # The sidecar is the only managed payload that depends on a successful cloud
+            # evaluation activation, so it is written by the receipt-bound finalize step
+            # (`foundry-opt bootstrap evaluation activate`), never by the repository phase.
+            continue
         targets = plan_input.repository.selected_agents if payload.scope == "agent" else (plan_input.repository.selected_agents[0],)
         for agent in targets:
             source = (base / payload.source_template_path).read_text(encoding="utf-8")
@@ -196,22 +190,10 @@ def _render_managed_payload(
             allow_unicode=False,
         )
     if template_id == "sidecar":
-        payload = yaml.safe_load(source)
-        if not isinstance(payload, dict):
-            raise BootstrapPlanError("sidecar template must be a YAML mapping")
-        payload["repo_agent_id"] = selected_agent.repo_agent_id
-        payload["source_root"] = selected_agent.root
-        payload["package_root"] = selected_agent.root
-        payload["editable_paths"] = list(selected_agent.editable_paths)
-        for evaluator in payload.get("default_evaluator_bundle", {}).get(
-            "objective",
-            {},
-        ).get("evaluators", []):
-            if isinstance(evaluator, dict):
-                reference = evaluator.get("reference")
-                if isinstance(reference, dict):
-                    reference["provenance"] = "reused_existing"
-        return yaml.safe_dump(payload, sort_keys=False, allow_unicode=False)
+        raise BootstrapPlanError(
+            "sidecar documents are produced from the resolved evaluation execution contract "
+            "after successful activation, never rendered during the repository phase"
+        )
     return source
 
 
@@ -231,7 +213,15 @@ def build_phase_actions(plan_input: BootstrapPlanInput, inventories: Mapping[str
     if "azure" in plan_input.required_phases and plan_input.azure_phase is not None:
         az = plan_input.azure_phase
         identity = az.identity
-        diagnostics = [f"subscription_id={az.subscription_id}", f"tenant_id={az.tenant_id}", f"location={az.location}", f"name=shared-uami", f"adopted={'false' if identity.create_if_missing else 'true'}"]
+        diagnostics = [
+            f"subscription_id={az.subscription_id}",
+            f"tenant_id={az.tenant_id}",
+            f"location={az.location}",
+            # The exact identity this operation adopts or creates, derived from the reviewed
+            # resource id so plans, receipts, and provider state never carry a placeholder.
+            f"name={identity.identity_name}",
+            f"adopted={'false' if identity.create_if_missing else 'true'}",
+        ]
         if identity.existing_resource_id:
             diagnostics.append(f"resource_id={identity.existing_resource_id}")
         if identity.existing_client_id:
@@ -249,13 +239,45 @@ def build_phase_actions(plan_input: BootstrapPlanInput, inventories: Mapping[str
         for role in az.approved_role_assignments:
             actions.append(BootstrapAction(action_id=f"azure-rbac-{role.alias}", phase="azure", stage="planned", kind="role-assignment", diagnostics=(f"scope={role.scope}", f"role={role.alias}", f"role_definition_id={role.role_definition_id}")))
     if "evaluations" in plan_input.required_phases and plan_input.evaluations_phase is not None:
-        raise BootstrapPlanError(
-            "evaluation action planning is blocked until BootstrapPlanInput "
-            "carries executable dataset generation/adoption, deterministic "
-            "split lineage, evaluator generation/adoption, definition, "
-            "activation-run, cleanup, and atomic sidecar payloads"
-        )
+        actions.extend(build_evaluation_actions(plan_input))
     return tuple(actions)
+
+
+def build_evaluation_actions(plan_input: BootstrapPlanInput) -> tuple[BootstrapAction, ...]:
+    """Build one approval-bound composite onboarding action per evaluation agent."""
+
+    if plan_input.evaluations_phase is None:
+        return ()
+    actions: list[BootstrapAction] = []
+    for agent in plan_input.evaluations_phase.agents:
+        contract = agent.onboarding_contract
+        if contract is None:
+            raise BootstrapPlanError(
+                "evaluation action planning requires an approved onboarding contract with "
+                "deterministic requested names, generation job ids, reuse candidates, "
+                "sidecar policy, and fail-closed bounds"
+            )
+        actions.extend(contract.composite_action())
+    action_ids = [action.action_id for action in actions]
+    if len(action_ids) != len(set(action_ids)):
+        raise BootstrapPlanError("evaluation action ids must be unique")
+    return tuple(actions)
+
+
+def stopped_evaluation_agents(plan_input: BootstrapPlanInput) -> tuple[Mapping[str, str], ...]:
+    """Report agents that must stop before evaluation generation and activation."""
+
+    if plan_input.evaluations_phase is None:
+        return ()
+    return tuple(
+        {
+            "repo_agent_id": agent.repo_agent_id,
+            "binding_classification": agent.onboarding_contract.binding_classification,
+            "stop_reason": agent.onboarding_contract.stop_reason or "",
+        }
+        for agent in plan_input.evaluations_phase.agents
+        if agent.onboarding_contract is not None and agent.onboarding_contract.stopped
+    )
 
 
 def read_live_status(plan_input: BootstrapPlanInput, drivers: Mapping[str, object]) -> dict[str, object]:
