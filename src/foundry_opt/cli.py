@@ -7,7 +7,7 @@ import re
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -17,6 +17,10 @@ from pydantic import ValidationError
 
 from foundry_opt import __version__
 from foundry_opt.bootstrap.cli import register_bootstrap_commands
+from foundry_opt.bootstrap.workflow_integration import (
+    build_registered_deployment_plan,
+    resolve_registry_selection,
+)
 from foundry_opt.poc import runtime as poc_runtime
 from foundry_opt.poc.auth import (
     AuthError,
@@ -380,6 +384,43 @@ def deploy_preflight(
         _echo_json(result.model_dump(mode="json"))
     except _JOB_COMMAND_ERRORS as error:
         _emit_blocked(error)
+
+
+@deploy_app.command("plan")
+def deploy_plan(
+        repository: Path = typer.Option(Path("."), "--repository"),
+        changed_root: str = typer.Option(..., "--changed-root"),
+        repo_agent_id: str = typer.Option(..., "--repo-agent-id"),
+        sidecar: Path | None = typer.Option(None, "--sidecar"),
+        exact_source: str = typer.Option(..., "--exact-source"),
+        check_eligibility: bool = typer.Option(False, "--check-eligibility"),
+        use_repository_default_evaluators: bool = typer.Option(
+            False,
+            "--use-repository-default-evaluators",
+        ),
+) -> None:
+        """Build a registry-bound deployment plan for one changed agent."""
+
+        try:
+            root = _repository_root(repository)
+            selection = resolve_registry_selection(root, repo_agent_id=repo_agent_id)
+            if sidecar is not None:
+                requested_sidecar = sidecar.as_posix()
+                if requested_sidecar != selection.config_path:
+                    raise POCConfigurationError(
+                        "sidecar path does not match the selected registry entry"
+                    )
+            if check_eligibility and not selection.sidecar.deployment.enabled:
+                raise POCConfigurationError("selected agent deployment is disabled")
+            plan = build_registered_deployment_plan(
+                selection,
+                changed_root=changed_root,
+                exact_source=exact_source,
+                use_repository_default_evaluators=use_repository_default_evaluators,
+            )
+            _echo_json({"status": "planned", **asdict(plan)})
+        except _JOB_COMMAND_ERRORS as error:
+            _emit_blocked(error)
 
 
 @deploy_app.command("publish")

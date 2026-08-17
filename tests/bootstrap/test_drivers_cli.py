@@ -5,7 +5,9 @@ import subprocess
 from pathlib import Path
 
 import httpx
+import pytest
 
+from foundry_opt.bootstrap.command_io import BootstrapCliError
 from foundry_opt.bootstrap.contracts import BootstrapAction, BootstrapPlan, BootstrapReceipt
 from foundry_opt.bootstrap.drivers import AzurePhaseDriver, EvaluationPhaseDriver, GitHubPhaseDriver, RepositoryPhaseDriver
 from foundry_opt.bootstrap.providers.github import GitHubBootstrapProvider
@@ -29,10 +31,10 @@ def test_repository_driver_exports_state(tmp_path: Path) -> None:
     assert exported["receipt_hash"] == receipt.receipt_hash
 
 
-def test_azure_driver_plan_has_provider_actions() -> None:
+def test_azure_driver_requires_authoritative_plan_input() -> None:
     driver = AzurePhaseDriver()
-    actions = driver.plan({"operation_id": "op", "runtime_repository": "https://github.com/org/repo.git", "runtime_commit": "a" * 40, "repository_id": "org/repo"})
-    assert actions
+    with pytest.raises(BootstrapCliError, match="BootstrapPlanInput is required"):
+        driver.plan({"operation_id": "op", "runtime_repository": "https://github.com/org/repo.git", "runtime_commit": "a" * 40, "repository_id": "org/repo"})
 
 
 def test_evaluation_driver_requires_provider() -> None:
@@ -40,4 +42,4 @@ def test_evaluation_driver_requires_provider() -> None:
     try:
         driver.inventory()
     except Exception as exc:
-        assert "requires configured project endpoint" in str(exc)
+        assert "requires configured project input" in str(exc)

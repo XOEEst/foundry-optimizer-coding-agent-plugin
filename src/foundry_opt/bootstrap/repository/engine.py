@@ -459,7 +459,7 @@ def _extract_block_id(block_text: str) -> str:
         candidate = stripped[2:] if stripped.startswith("- ") else stripped
         if candidate.startswith("id:"):
             return candidate[3:].strip()
-    raise BootstrapPlanError("managed workflow step block must contain id")
+    return ""
 
 
 def _extract_step_id(patch: SemanticPatchSpec) -> str:

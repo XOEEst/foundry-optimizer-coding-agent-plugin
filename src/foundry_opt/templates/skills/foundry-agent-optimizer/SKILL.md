@@ -1,17 +1,20 @@
 ---
 name: foundry-agent-optimizer
-description: Run one issue-driven, evidence-backed optimize job for a Microsoft Foundry hosted agent.
+description: Bootstrap a Microsoft Foundry agent repository or run one issue-driven, evidence-backed optimize job.
 ---
 
 # Foundry agent optimizer
 
-Use this skill only when an issue requests an agent optimize job.
+Use this skill for a guided local repository bootstrap or when an issue requests
+an agent optimize job.
 
 ## Operating contract
 
-- Treat `.github/foundry-optimizer.yaml` as the maximum repository policy.
-- Treat `.foundry/agent-metadata.yaml` as the agent-specific Foundry contract.
-- Treat `.github/foundry-opt.lock.yml` as the exact shared skill and CLI revision.
+- Treat `.foundry-opt/registry.yaml` as the enabled-agent registry.
+- Treat each registry `config_path` as trusted agent-specific configuration.
+- Treat `.foundry-opt/bootstrap.lock.json` as managed ownership state.
+- Legacy `.github/foundry-optimizer.yaml`, `.foundry/agent-metadata.yaml`, and
+  `.github/foundry-opt.lock.yml` are migration inputs only.
 - Authenticate to Foundry with OIDC only.
 - Use draft agent versions only. Never publish or change endpoint routing.
 - Use the broker-backed CLI for issue updates. Do not fall back to built-in
@@ -57,15 +60,23 @@ Use this skill only when an issue requests an agent optimize job.
 
 ## Bootstrap UX
 
-- Discover repository agents first, then explicitly select targets before any plan.
-- Show machine-readable repository, GitHub, Azure, and evaluation phase plans and diffs.
-- Require an approval record before apply; fail closed on stale plan or SHA drift.
-- Auto-adopt the generated rubric only after fail-closed gates pass.
-- Explain issue objectives alongside pinned, default, and issue-supplied evaluators.
-- Use `foundry-opt bootstrap evaluation inspect|replace` for bundle provenance and explicit replacement.
-- Review all four phases before confirmation: repository payloads, GitHub env/variables/branch policy, Azure identity/FIC/RBAC, and evaluation bundle actions.
-- Confirm only through the explicit approval file flow; never prompt inside the CLI.
-- When defaults differ from issue evaluators, explain default, pinned, and issue-supplied evaluators before replacement/apply.
+1. Run `foundry-opt bootstrap discover` with the verified runtime provenance and
+   repository root.
+2. Explicitly select agents and prepare a reviewed `BootstrapPlanInput`.
+3. Run `foundry-opt bootstrap plan --plan-input ...`; offline plans contain only
+   the repository phase.
+4. Show exact repository diffs and GitHub/Azure/evaluation action summaries.
+5. Create one approval record for one phase and run
+   `foundry-opt bootstrap apply --phase ... --approval-file ... --plan-input ...`.
+6. Stop on stale plan/SHA drift or any failed/compensation-required receipt.
+7. Use `status` and receipt-bound `rollback` to resume safely.
+8. Auto-adopt a generated rubric only after structural, execution, headroom,
+   activation, cleanup, and 100% Content Safety gates pass.
+9. Use `bootstrap evaluation inspect|replace` for provenance and explicit
+   replacement. There is no rubric editor in v1.
+10. Explain that issue objectives guide mutations, issue-supplied weighted
+    evaluators select optimize winners, and repository defaults govern
+    merge-time deployment.
 
 ## Candidate discipline
 
