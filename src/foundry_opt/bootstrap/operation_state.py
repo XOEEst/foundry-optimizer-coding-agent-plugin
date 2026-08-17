@@ -56,6 +56,7 @@ class OperationStatePayload(BootstrapDocument):
     bootstrap_plan: BootstrapPlan
     discovery_fingerprints: tuple[FingerprintRecord, ...]
     resource_fingerprints: tuple[FingerprintRecord, ...] = ()
+    required_phases: tuple[ApplyPhaseName, ...] = ()
     approvals: tuple[ApprovalRecord, ...] = ()
     phase_receipts: tuple[PhaseReceipt, ...] = ()
     evaluator_replacement: EvaluationReplacementRecord | None = None
@@ -100,6 +101,10 @@ class OperationStateEnvelope(BootstrapDocument):
     @property
     def resource_fingerprints(self) -> tuple[FingerprintRecord, ...]:
         return self.payload.resource_fingerprints
+
+    @property
+    def required_phases(self) -> tuple[ApplyPhaseName, ...]:
+        return self.payload.required_phases
 
     @property
     def approvals(self) -> tuple[ApprovalRecord, ...]:
@@ -228,9 +233,12 @@ def _jsonable(value: object) -> object:
 def status_from_state(envelope: OperationStateEnvelope) -> OperationStatus:
     phase_receipts = merge_phase_receipts({receipt.phase: receipt for receipt in envelope.phase_receipts})
     blockers = list(envelope.selection_plan.blockers)
-    required_phases = {"repository", "github", "azure", "evaluations"}
+    required_phases = set(envelope.required_phases)
     applied_phases = {receipt.phase for receipt in phase_receipts if receipt.state == "applied"}
-    deployment_eligible = required_phases == applied_phases
+    deployment_eligible = (
+        required_phases == {"repository", "github", "azure", "evaluations"}
+        and required_phases == applied_phases
+    )
     selected_ids = {item.casefold() for item in envelope.selection_plan.selected_agent_ids}
     aligned_ids = {
         item.agent_id.casefold()

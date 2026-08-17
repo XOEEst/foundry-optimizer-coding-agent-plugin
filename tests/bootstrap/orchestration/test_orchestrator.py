@@ -146,6 +146,58 @@ def test_deterministic_actions_order_and_hashes(tmp_path: Path) -> None:
     assert repeat.bootstrap_plan.actions == planned.bootstrap_plan.actions
 
 
+def test_offline_plan_invokes_only_repository_driver(tmp_path: Path) -> None:
+    drivers = _drivers()
+
+    def unexpected_cloud_call(_context):
+        raise AssertionError("offline plan invoked a cloud driver")
+
+    for phase in ("github", "azure", "evaluations"):
+        drivers[phase].live_fingerprints = unexpected_cloud_call
+        drivers[phase].plan = unexpected_cloud_call
+    orch, _ = _build_orchestrator(tmp_path, drivers)
+    repo_root = tmp_path / "repo"
+    _create_repo(repo_root)
+    discovered = orch.discover(
+        repo_root,
+        repository_id="org/repo",
+        operation_id="offline",
+        runtime_repository="https://github.com/org/repo.git",
+        runtime_commit="a" * 40,
+        selected_agents=({"root": ".", "repoAgentId": "root"},),
+    )
+    selection = discovered.selection_plan.model_copy(
+        update={
+            "binding_assessments": (
+                BindingAssessment(
+                    agent_id="root",
+                    classification="bound-aligned",
+                    detail="ok",
+                ),
+            )
+        }
+    )
+
+    planned = orch.build_plan(
+        repository_id="org/repo",
+        operation_id="offline",
+        runtime_repository="https://github.com/org/repo.git",
+        runtime_commit="a" * 40,
+        selection_plan=selection,
+        phases=("repository",),
+    )
+
+    assert planned.required_phases == ("repository",)
+    assert [action.phase for action in planned.bootstrap_plan.actions] == [
+        "repository"
+    ]
+    assert orch.status(
+        repository_id="org/repo",
+        operation_id="offline",
+        runtime_commit="a" * 40,
+    )["deployment_eligible"] is False
+
+
 def test_apply_binds_parent_phase_hashes_and_internal_live_drift(tmp_path: Path) -> None:
     orch, drivers = _build_orchestrator(tmp_path)
     _, _, planned = _discover_and_plan(tmp_path, orch, op="op4", selected_agents=({"root": ".", "repoAgentId": "root"},))
