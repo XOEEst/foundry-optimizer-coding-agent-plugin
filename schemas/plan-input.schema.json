@@ -1,0 +1,755 @@
+{
+  "$defs": {
+    "ApprovedRoleAssignment": {
+      "additionalProperties": false,
+      "properties": {
+        "alias": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9._-]*$",
+          "title": "Alias",
+          "type": "string"
+        },
+        "role_definition_id": {
+          "pattern": "^/subscriptions/[A-Za-z0-9-]+/providers/Microsoft\\.Authorization/roleDefinitions/[0-9a-fA-F-]{36}$",
+          "title": "Role Definition Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "scope": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Scope",
+          "type": "string"
+        }
+      },
+      "required": [
+        "alias",
+        "role_definition_id",
+        "scope"
+      ],
+      "title": "ApprovedRoleAssignment",
+      "type": "object"
+    },
+    "AzurePhaseInput": {
+      "additionalProperties": false,
+      "properties": {
+        "approved_role_assignments": {
+          "items": {
+            "$ref": "#/$defs/ApprovedRoleAssignment"
+          },
+          "title": "Approved Role Assignments",
+          "type": "array"
+        },
+        "existing_client_id": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Existing Client Id"
+        },
+        "existing_object_id": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Existing Object Id"
+        },
+        "existing_resource_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Existing Resource Id"
+        },
+        "github_repository_id": {
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+          "title": "Github Repository Id",
+          "type": "string"
+        },
+        "identity_kind": {
+          "enum": [
+            "user_assigned_managed_identity",
+            "entra_application",
+            "unresolved_migration"
+          ],
+          "title": "Identity Kind",
+          "type": "string"
+        },
+        "location": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9]+$",
+          "title": "Location",
+          "type": "string"
+        },
+        "resource_group": {
+          "maxLength": 90,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._()/-]+$",
+          "title": "Resource Group",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "subscription_id": {
+          "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+          "title": "Subscription Id",
+          "type": "string"
+        },
+        "tenant_id": {
+          "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+          "title": "Tenant Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tenant_id",
+        "subscription_id",
+        "identity_kind",
+        "resource_group",
+        "location",
+        "github_repository_id",
+        "approved_role_assignments"
+      ],
+      "title": "AzurePhaseInput",
+      "type": "object"
+    },
+    "EvaluationAgentInput": {
+      "additionalProperties": false,
+      "properties": {
+        "account_resource_id": {
+          "title": "Account Resource Id",
+          "type": "string"
+        },
+        "agent_name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Agent Name",
+          "type": "string"
+        },
+        "agent_version": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Agent Version",
+          "type": "string"
+        },
+        "connection_name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Connection Name",
+          "type": "string"
+        },
+        "existing_dataset_ids": {
+          "default": [],
+          "items": {
+            "maxLength": 240,
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Existing Dataset Ids",
+          "type": "array"
+        },
+        "existing_definition_ids": {
+          "default": [],
+          "items": {
+            "maxLength": 240,
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Existing Definition Ids",
+          "type": "array"
+        },
+        "existing_evaluator_ids": {
+          "default": [],
+          "items": {
+            "maxLength": 240,
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Existing Evaluator Ids",
+          "type": "array"
+        },
+        "generation_mode": {
+          "enum": [
+            "reuse_reviewed_sources",
+            "replace_reviewed_sources"
+          ],
+          "title": "Generation Mode",
+          "type": "string"
+        },
+        "generation_sources": {
+          "items": {
+            "$ref": "#/$defs/EvaluationGenerationSource"
+          },
+          "title": "Generation Sources",
+          "type": "array"
+        },
+        "model_deployment": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Model Deployment",
+          "type": "string"
+        },
+        "project_endpoint": {
+          "maxLength": 300,
+          "pattern": "^https://[^\\s]+/api/projects/[^\\s/]+/?$",
+          "title": "Project Endpoint",
+          "type": "string"
+        },
+        "replacement_intent": {
+          "title": "Replacement Intent",
+          "type": "boolean"
+        },
+        "repo_agent_id": {
+          "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$",
+          "title": "Repo Agent Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "sidecar_path": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Sidecar Path",
+          "type": "string"
+        },
+        "target_sample_count": {
+          "maximum": 100000,
+          "minimum": 1,
+          "title": "Target Sample Count",
+          "type": "integer"
+        },
+        "trace_window": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Trace Window",
+          "type": "string"
+        }
+      },
+      "required": [
+        "repo_agent_id",
+        "sidecar_path",
+        "project_endpoint",
+        "account_resource_id",
+        "agent_name",
+        "agent_version",
+        "generation_mode",
+        "generation_sources",
+        "model_deployment",
+        "trace_window",
+        "connection_name",
+        "target_sample_count",
+        "replacement_intent"
+      ],
+      "title": "EvaluationAgentInput",
+      "type": "object"
+    },
+    "EvaluationGenerationSource": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "reviewed_file",
+          "title": "Kind",
+          "type": "string"
+        },
+        "path": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "path"
+      ],
+      "title": "EvaluationGenerationSource",
+      "type": "object"
+    },
+    "EvaluationsPhaseInput": {
+      "additionalProperties": false,
+      "properties": {
+        "agents": {
+          "items": {
+            "$ref": "#/$defs/EvaluationAgentInput"
+          },
+          "title": "Agents",
+          "type": "array"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "agents"
+      ],
+      "title": "EvaluationsPhaseInput",
+      "type": "object"
+    },
+    "GitHubPhaseInput": {
+      "additionalProperties": false,
+      "properties": {
+        "client_id_variable_name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Z][A-Z0-9_]*$",
+          "title": "Client Id Variable Name",
+          "type": "string"
+        },
+        "default_branch_policy_intent": {
+          "enum": [
+            "preserve_repository_default",
+            "require_main",
+            "require_explicit"
+          ],
+          "title": "Default Branch Policy Intent",
+          "type": "string"
+        },
+        "deployment_environment": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "title": "Deployment Environment",
+          "type": "string"
+        },
+        "optimizer_environment": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "title": "Optimizer Environment",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "shared_client_id": {
+          "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+          "title": "Shared Client Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "optimizer_environment",
+        "deployment_environment",
+        "shared_client_id",
+        "client_id_variable_name",
+        "default_branch_policy_intent"
+      ],
+      "title": "GitHubPhaseInput",
+      "type": "object"
+    },
+    "RepositoryIdentityInput": {
+      "additionalProperties": false,
+      "properties": {
+        "default_branch": {
+          "title": "Default Branch",
+          "type": "string"
+        },
+        "repository_id": {
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+          "title": "Repository Id",
+          "type": "string"
+        },
+        "repository_url": {
+          "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\\.git)?$",
+          "title": "Repository Url",
+          "type": "string"
+        },
+        "root": {
+          "default": ".",
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Root",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "selected": {
+          "$ref": "#/$defs/SelectedRepositoryTarget"
+        }
+      },
+      "required": [
+        "repository_id",
+        "repository_url",
+        "default_branch",
+        "selected"
+      ],
+      "title": "RepositoryIdentityInput",
+      "type": "object"
+    },
+    "RepositoryPhaseInput": {
+      "additionalProperties": false,
+      "properties": {
+        "managed_payloads": {
+          "items": {
+            "$ref": "#/$defs/TemplateManifestEntry"
+          },
+          "title": "Managed Payloads",
+          "type": "array"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "trusted_manifest_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$",
+          "title": "Trusted Manifest Id",
+          "type": "string"
+        },
+        "trusted_manifest_version": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Trusted Manifest Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "trusted_manifest_id",
+        "trusted_manifest_version",
+        "managed_payloads"
+      ],
+      "title": "RepositoryPhaseInput",
+      "type": "object"
+    },
+    "RuntimeProvenanceInput": {
+      "additionalProperties": false,
+      "properties": {
+        "commit": {
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+          "title": "Commit",
+          "type": "string"
+        },
+        "repository_url": {
+          "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\\.git)?$",
+          "title": "Repository Url",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "uv_lock_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Uv Lock Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "repository_url",
+        "commit",
+        "uv_lock_sha256"
+      ],
+      "title": "RuntimeProvenanceInput",
+      "type": "object"
+    },
+    "SelectedRepositoryTarget": {
+      "additionalProperties": false,
+      "properties": {
+        "config_path": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Config Path",
+          "type": "string"
+        },
+        "repoAgentId": {
+          "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$",
+          "title": "Repoagentid",
+          "type": "string"
+        },
+        "root": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Root",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "repoAgentId",
+        "root",
+        "config_path"
+      ],
+      "title": "SelectedRepositoryTarget",
+      "type": "object"
+    },
+    "TemplateManifestEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "destination_path": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Destination Path",
+          "type": "string"
+        },
+        "ownership_mode": {
+          "enum": [
+            "owned",
+            "shared-template",
+            "adopted"
+          ],
+          "title": "Ownership Mode",
+          "type": "string"
+        },
+        "render_context": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/TemplateRenderContextValue"
+          },
+          "title": "Render Context",
+          "type": "array"
+        },
+        "required": {
+          "title": "Required",
+          "type": "boolean"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "scope": {
+          "enum": [
+            "repository",
+            "agent",
+            "shared-runtime"
+          ],
+          "title": "Scope",
+          "type": "string"
+        },
+        "semantic_patch_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9._/-]+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Semantic Patch Id"
+        },
+        "semantic_patch_mode": {
+          "default": "none",
+          "enum": [
+            "none",
+            "apply"
+          ],
+          "title": "Semantic Patch Mode",
+          "type": "string"
+        },
+        "source_template_path": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Source Template Path",
+          "type": "string"
+        },
+        "template_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$",
+          "title": "Template Id",
+          "type": "string"
+        },
+        "template_version": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Template Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "template_id",
+        "template_version",
+        "source_template_path",
+        "destination_path",
+        "ownership_mode",
+        "scope",
+        "required"
+      ],
+      "title": "TemplateManifestEntry",
+      "type": "object"
+    },
+    "TemplateRenderContextValue": {
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z][A-Za-z0-9_]*$",
+          "title": "Key",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "boolean"
+            }
+          ],
+          "title": "Value"
+        }
+      },
+      "required": [
+        "key",
+        "value"
+      ],
+      "title": "TemplateRenderContextValue",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "azure_phase": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AzurePhaseInput"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "evaluations_phase": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EvaluationsPhaseInput"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "github_phase": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GitHubPhaseInput"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "offline_plan": {
+      "default": false,
+      "title": "Offline Plan",
+      "type": "boolean"
+    },
+    "repository": {
+      "$ref": "#/$defs/RepositoryIdentityInput"
+    },
+    "repository_phase": {
+      "$ref": "#/$defs/RepositoryPhaseInput"
+    },
+    "required_phases": {
+      "default": [
+        "repository"
+      ],
+      "items": {
+        "enum": [
+          "repository",
+          "github",
+          "azure",
+          "evaluations"
+        ],
+        "type": "string"
+      },
+      "title": "Required Phases",
+      "type": "array"
+    },
+    "runtime_provenance": {
+      "$ref": "#/$defs/RuntimeProvenanceInput"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "repository",
+    "runtime_provenance",
+    "repository_phase"
+  ],
+  "title": "BootstrapPlanInput",
+  "type": "object"
+}
