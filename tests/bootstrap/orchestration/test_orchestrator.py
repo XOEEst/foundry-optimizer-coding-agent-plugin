@@ -12,6 +12,7 @@ from foundry_opt.bootstrap.errors import BootstrapApplyError
 from foundry_opt.bootstrap.operation_state import OperationStateEnvelope, read_operation_state, write_operation_state
 from foundry_opt.bootstrap.orchestrator import BootstrapOrchestrator
 from foundry_opt.bootstrap.providers.foundry import FoundryRollbackError
+from foundry_opt.bootstrap.providers.github import GitHubProviderRollbackError
 from foundry_opt.bootstrap.receipts import ApprovalRecord, EvaluationReplacementRecord
 
 
@@ -292,3 +293,68 @@ def test_orchestrator_persists_rollback_error_receipt_and_state(tmp_path: Path) 
     assert receipt.state == "compensation_required"
     assert receipt.receipt.compensation_required_actions == ("eval",)
     assert receipt.provider_state["stateKey"] == "evaluations-state"
+
+
+def test_orchestrator_persists_github_rollback_error_state(tmp_path: Path) -> None:
+    drivers = _drivers()
+
+    class _GitHubRollbackFailDriver(_Driver):
+        def apply(self, phase_plan: BootstrapPlan) -> BootstrapReceipt:
+            fail_receipt = BootstrapReceipt.create(
+                operation_id="op10",
+                runtime_repository="https://github.com/org/repo.git",
+                runtime_commit="a" * 40,
+                repository_identity="org/repo",
+                plan_hash=phase_plan.plan_hash,
+                compensation_required_actions=("github-environment",),
+                error_info=RedactedStatusInfo(
+                    code="apply_failed",
+                    summary="failed",
+                ),
+            )
+            raise GitHubProviderRollbackError(
+                "rollback failed",
+                compensation_receipt=fail_receipt,
+                provider_state={
+                    "stateKey": "github-state",
+                    "phase_plan_hash": phase_plan.plan_hash,
+                },
+            )
+
+    drivers["github"] = _GitHubRollbackFailDriver(
+        "github",
+        actions=(_plan_action("github-environment", "github"),),
+        live=(
+            FingerprintRecord(
+                label="github:live",
+                sha256="5" * 64,
+            ),
+        ),
+    )
+    orch, _ = _build_orchestrator(tmp_path, drivers)
+    _, _, planned = _discover_and_plan(
+        tmp_path,
+        orch,
+        op="op10",
+        selected_agents=({"root": ".", "repoAgentId": "root"},),
+    )
+    approval = ApprovalRecord.create(
+        parent_plan_hash=planned.bootstrap_plan.plan_hash,
+        phase="github",
+        actor="tester",
+        summary="github",
+    )
+
+    receipt = orch.apply_phase(
+        repository_id="org/repo",
+        operation_id="op10",
+        phase="github",
+        approval=approval,
+        runtime_commit="a" * 40,
+    )
+
+    assert receipt.state == "compensation_required"
+    assert receipt.receipt.compensation_required_actions == (
+        "github-environment",
+    )
+    assert receipt.provider_state["stateKey"] == "github-state"
