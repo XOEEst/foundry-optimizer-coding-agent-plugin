@@ -15,6 +15,7 @@ from foundry_opt.bootstrap.contracts import (
     ResolvedEvaluator,
     ResolvedWeightedObjective,
     RootRegistry,
+    TemplatePayloadSpec,
 )
 from foundry_opt.bootstrap.errors import BootstrapConfigError
 from foundry_opt.bootstrap.legacy import import_legacy_single_agent_documents
@@ -87,3 +88,13 @@ def test_root_registry_accepts_explicit_agents() -> None:
         agents=(ExplicitAgentEntry(agent_id='agent-one', root='src/one', config_path='src/one/.foundry/foundry-opt.yaml'),),
     )
     assert registry.agents[0].enabled is True
+
+
+def test_template_payload_accepts_reviewed_rendered_text() -> None:
+    payload = TemplatePayloadSpec(
+        template_id="foundry-opt-instructions",
+        destination_path=".github/instructions/foundry-opt.instructions.md",
+        rendered_template="---\napplyTo: \"**\"\n---\n\nUse OIDC only.\n",
+    )
+
+    assert payload.rendered_template.endswith("Use OIDC only.\n")

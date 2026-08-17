@@ -431,7 +431,7 @@ class SemanticPatchSpec(BootstrapDocument):
 class TemplatePayloadSpec(BootstrapDocument):
     template_id: str
     destination_path: str
-    payload: Mapping[str, object]
+    rendered_template: str
     semantic_patches: tuple[SemanticPatchSpec, ...] = ()
 
     @field_validator('destination_path')
@@ -439,10 +439,24 @@ class TemplatePayloadSpec(BootstrapDocument):
     def validate_destination(cls, value: str) -> str:
         return _validate_safe_path(value, field='destination_path')
 
+    @field_validator('rendered_template')
+    @classmethod
+    def validate_rendered_template(cls, value: str) -> str:
+        if not value:
+            raise BootstrapConfigError('rendered_template must not be empty')
+        if len(value.encode('utf-8')) > 1024 * 1024:
+            raise BootstrapConfigError('rendered_template exceeds the size limit')
+        if any(ord(character) < 32 and character not in '\t\n\r' for character in value):
+            raise BootstrapConfigError('rendered_template contains control characters')
+        if '\x7f' in value:
+            raise BootstrapConfigError('rendered_template contains control characters')
+        return value
+
     @model_validator(mode='after')
     def validate_payload(self) -> Self:
-        _reject_prohibited_mapping(self.payload, field='payload')
-        safe_persisted_document(self.model_dump(mode='json'))
+        for patch in self.semantic_patches:
+            if patch.target_path != self.destination_path:
+                raise BootstrapConfigError('semantic patch target must match destination_path')
         return self
 
 
