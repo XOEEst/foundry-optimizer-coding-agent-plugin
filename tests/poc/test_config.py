@@ -238,6 +238,19 @@ def test_issue_request_accepts_repo_agent_and_weighted_evaluators() -> None:
     )
 
 
+def test_issue_request_rejects_duplicate_evaluator_ids_even_with_different_weights() -> None:
+    with pytest.raises(POCConfigurationError, match="duplicate evaluator IDs"):
+        OptimizeIssueRequest.from_document(
+            {
+                **_generic_issue_request(),
+                "issue_evaluators": [
+                    "azureai://built-in/evaluators/safety",
+                    "azureai://built-in/evaluators/safety weight=2",
+                ],
+            }
+        )
+
+
 def test_issue_request_accepts_explicit_target_when_not_repo_agent_id() -> None:
     issue = OptimizeIssueRequest.from_document(
         {

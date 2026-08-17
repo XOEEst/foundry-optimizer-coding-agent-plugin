@@ -1374,7 +1374,14 @@ class OptimizeIssueRequest(FrozenModel):
         )
         if not items:
             return None
-        return tuple(IssueEvaluatorEntry.parse_line(item) for item in items)
+        parsed = tuple(IssueEvaluatorEntry.parse_line(item) for item in items)
+        seen: set[str] = set()
+        for entry in parsed:
+            key = entry.evaluator_id.casefold()
+            if key in seen:
+                raise ValueError("issue_evaluators must not contain duplicate evaluator IDs")
+            seen.add(key)
+        return parsed
 
     @model_validator(mode="after")
     def validate_safe_document(self) -> Self:

@@ -15,6 +15,7 @@ from foundry_opt.bootstrap.workflow_integration import (
     build_changed_path_matrix,
     build_registered_deployment_plan,
     protected_editable_patterns,
+    protected_editable_patterns_for_repository,
     resolve_registry_selection,
     verify_issue_evaluator_authority,
 )
@@ -203,6 +204,21 @@ def test_changed_path_matrix_supports_shared_roots_noop_and_manual(tmp_path: Pat
     assert noop == ()
     shared = build_changed_path_matrix(root, changed_paths=("shared/main.py",))
     assert {entry.repo_agent_id for entry in shared} == {"example-agent", "shared-agent"}
+
+
+def test_changed_path_matrix_rejects_unknown_shared_relation(tmp_path: Path) -> None:
+    root = _write_repo(tmp_path)
+    sidecar = root / "agent" / ".foundry" / "foundry-opt.yaml"
+    sidecar.write_text(sidecar.read_text(encoding="utf-8").replace("shared-agent", "missing-agent", 1), encoding="utf-8")
+    with pytest.raises(BootstrapConfigError, match="unknown agent_id"):
+        build_changed_path_matrix(root, changed_paths=("agent/main.py",))
+
+
+def test_repository_protected_patterns_include_all_registry_config_paths(tmp_path: Path) -> None:
+    root = _write_repo(tmp_path, second_enabled=True)
+    protected = protected_editable_patterns_for_repository(root)
+    assert "agent/.foundry/foundry-opt.yaml" in protected
+    assert "shared/.foundry/foundry-opt.yaml" in protected
 
 
 def test_registered_deployment_plan_uses_repository_defaults(tmp_path: Path) -> None:

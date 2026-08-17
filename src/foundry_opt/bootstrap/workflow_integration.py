@@ -87,6 +87,25 @@ def protected_editable_patterns(selection: RegistrySelection) -> tuple[str, ...]
     return tuple(sorted(protected))
 
 
+def protected_editable_patterns_for_repository(
+    repository_root: Path,
+    *,
+    repo_agent_id: str | None = None,
+) -> tuple[str, ...]:
+    registry = RootRegistry.from_document((repository_root / ".foundry-opt" / "registry.yaml").read_text(encoding="utf-8"))
+    protected = {".foundry-opt/**", ".foundry-opt/registry.yaml"}
+    enabled = [agent for agent in registry.agents if agent.enabled]
+    selected_agents = enabled
+    if repo_agent_id is not None:
+        selected_agents = [agent for agent in registry.agents if agent.agent_id == repo_agent_id]
+        if len(selected_agents) != 1:
+            raise BootstrapConfigError("repoAgentId must resolve exactly one registry agent")
+    for agent in selected_agents:
+        protected.add(agent.config_path)
+        protected.add(f"{PurePosixPath(agent.config_path).parent.as_posix()}/**")
+    return tuple(sorted(protected))
+
+
 def verify_issue_evaluator_authority(
     author_login: str,
     evaluators: Sequence[IssueEvaluatorEntry] | None,
@@ -110,6 +129,7 @@ def build_changed_path_matrix(
 ) -> tuple[WorkflowMatrixEntry, ...]:
     registry = RootRegistry.from_document((repository_root / ".foundry-opt" / "registry.yaml").read_text(encoding="utf-8"))
     enabled = [agent for agent in registry.agents if agent.enabled]
+    by_id = {agent.agent_id: agent for agent in registry.agents}
     if manual_repo_agent_id is not None:
         chosen = [agent for agent in enabled if agent.agent_id == manual_repo_agent_id]
         if len(chosen) != 1:
@@ -127,13 +147,16 @@ def build_changed_path_matrix(
     )
     sidecars = {
         agent.agent_id: BootstrapSidecar.from_document((repository_root / agent.config_path).read_text(encoding="utf-8"))
-        for agent in enabled
+        for agent in registry.agents
     }
     include: list[WorkflowMatrixEntry] = []
     for agent in sorted(enabled, key=lambda item: (item.root.casefold(), item.agent_id.casefold(), item.config_path.casefold())):
         sidecar = sidecars[agent.agent_id]
         relations = {relation.agent_id for relation in sidecar.shared_source_relations}
-        roots = {agent.root, *(registry_agent.root for registry_agent in enabled if registry_agent.agent_id in relations)}
+        unknown = sorted(relation for relation in relations if relation not in by_id)
+        if unknown:
+            raise BootstrapConfigError(f"shared_source_relations references unknown agent_id: {unknown[0]}")
+        roots = {agent.root, *(by_id[relation].root for relation in relations)}
         prefixes = tuple(sorted({f"{root}/" for root in roots} | {agent.config_path}))
         if shared_contract_changed or any(path == agent.config_path or any(path.startswith(prefix) for prefix in prefixes) for path in normalized):
             include.append(WorkflowMatrixEntry(changed_root=agent.root, repo_agent_id=agent.agent_id, config_path=agent.config_path))

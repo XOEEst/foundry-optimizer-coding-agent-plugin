@@ -1569,12 +1569,14 @@ def _load_issue_event(path: Path) -> tuple[IssueBinding, str]:
 def _issue_request_from_body(body: str) -> OptimizeIssueRequest:
     parsed = parse_issue_body(body)
     return OptimizeIssueRequest(
+        repo_agent_id=None if parsed.target == "default" else parsed.target,
         goal=parsed.goal,
         observed_failures=(parsed.observed_failures,),
         constraints=(parsed.constraints,),
         candidate_budget=parsed.candidate_budget,
         model_subset=parsed.candidate_models or None,
         editable_scope_subset=parsed.editable_scope or None,
+        issue_evaluators=list(parsed.issue_evaluators) or None,
     )
 
 

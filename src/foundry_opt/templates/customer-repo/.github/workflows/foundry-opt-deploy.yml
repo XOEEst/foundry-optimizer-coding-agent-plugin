@@ -4,13 +4,6 @@ on:
   push:
     branches:
       - main
-    paths:
-      - .foundry-opt/**
-      - '**/.foundry/foundry-opt.yaml'
-      - '.github/workflows/foundry-opt-deploy.yml'
-      - '.github/workflows/copilot-setup-steps.yml'
-      - 'agent/**'
-      - 'tests/agent/**'
   workflow_dispatch:
     inputs:
       repo_agent_id:
@@ -75,7 +68,6 @@ jobs:
           if [[ -z "$base_ref" || "$base_ref" == "0000000000000000000000000000000000000000" ]]; then
             base_ref="$(git rev-list --max-parents=0 HEAD)"
           fi
-          manual_repo_agent_id="${{ github.event.inputs.repo_agent_id || '' }}"
           changed_files="$(git diff --name-only "$base_ref" "$GITHUB_SHA")"
           export CHANGED_FILES_RAW="$changed_files"
           python - <<'PY'
@@ -113,7 +105,7 @@ jobs:
               handle.write(f"matrix={json.dumps(matrix)}\n")
           PY
         env:
-          MANUAL_REPO_AGENT_ID: ${{ github.event.inputs.repo_agent_id || '' }}
+          MANUAL_REPO_AGENT_ID: ""
 
   deploy:
     needs: discover
