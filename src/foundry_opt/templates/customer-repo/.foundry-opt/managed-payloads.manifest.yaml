@@ -11,7 +11,6 @@ managed_payloads:
   semantic_patch_mode: none
   scope: repository
   required: true
-  render_context: []
 - schema_version: 1
   template_id: sidecar
   template_version: 1.0.0
@@ -21,10 +20,6 @@ managed_payloads:
   semantic_patch_mode: none
   scope: agent
   required: true
-  render_context:
-  - schema_version: 1
-    key: selectedRoot
-    value: agent
 - schema_version: 1
   template_id: optimizer-instruction
   template_version: 1.0.0
@@ -34,7 +29,6 @@ managed_payloads:
   semantic_patch_mode: none
   scope: repository
   required: true
-  render_context: []
 - schema_version: 1
   template_id: optimizer-issue-form
   template_version: 1.0.0
@@ -44,7 +38,6 @@ managed_payloads:
   semantic_patch_mode: none
   scope: repository
   required: true
-  render_context: []
 - schema_version: 1
   template_id: custom-agent
   template_version: 1.0.0
@@ -54,7 +47,6 @@ managed_payloads:
   semantic_patch_mode: none
   scope: repository
   required: true
-  render_context: []
 - schema_version: 1
   template_id: setup-semantic-patch
   template_version: 1.0.0
@@ -65,7 +57,6 @@ managed_payloads:
   semantic_patch_mode: apply
   scope: shared-runtime
   required: true
-  render_context: []
 - schema_version: 1
   template_id: validation-workflow
   template_version: 1.0.0
@@ -75,7 +66,6 @@ managed_payloads:
   semantic_patch_mode: none
   scope: repository
   required: true
-  render_context: []
 - schema_version: 1
   template_id: deploy-workflow
   template_version: 1.0.0
@@ -85,7 +75,6 @@ managed_payloads:
   semantic_patch_mode: none
   scope: repository
   required: true
-  render_context: []
 - schema_version: 1
   template_id: bootstrap-lock
   template_version: 1.0.0
@@ -95,4 +84,3 @@ managed_payloads:
   semantic_patch_mode: none
   scope: repository
   required: true
-  render_context: []

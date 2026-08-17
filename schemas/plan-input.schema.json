@@ -1,5 +1,34 @@
 {
   "$defs": {
+    "AgentRenderContext": {
+      "additionalProperties": false,
+      "properties": {
+        "repo_agent_id": {
+          "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$",
+          "title": "Repo Agent Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "values": {
+          "items": {
+            "$ref": "#/$defs/TemplateRenderValue"
+          },
+          "title": "Values",
+          "type": "array"
+        }
+      },
+      "required": [
+        "repo_agent_id",
+        "values"
+      ],
+      "title": "AgentRenderContext",
+      "type": "object"
+    },
     "ApprovedRoleAssignment": {
       "additionalProperties": false,
       "properties": {
@@ -11,7 +40,7 @@
           "type": "string"
         },
         "role_definition_id": {
-          "pattern": "^/subscriptions/[A-Za-z0-9-]+/providers/Microsoft\\.Authorization/roleDefinitions/[0-9a-fA-F-]{36}$",
+          "pattern": "^/subscriptions/[0-9a-fA-F-]+/providers/Microsoft\\.Authorization/roleDefinitions/[0-9a-fA-F-]{36}$",
           "title": "Role Definition Id",
           "type": "string"
         },
@@ -36,16 +65,9 @@
       "title": "ApprovedRoleAssignment",
       "type": "object"
     },
-    "AzurePhaseInput": {
+    "AzureIdentityInput": {
       "additionalProperties": false,
       "properties": {
-        "approved_role_assignments": {
-          "items": {
-            "$ref": "#/$defs/ApprovedRoleAssignment"
-          },
-          "title": "Approved Role Assignments",
-          "type": "array"
-        },
         "existing_client_id": {
           "anyOf": [
             {
@@ -84,11 +106,6 @@
           "default": null,
           "title": "Existing Resource Id"
         },
-        "github_repository_id": {
-          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
-          "title": "Github Repository Id",
-          "type": "string"
-        },
         "identity_kind": {
           "enum": [
             "user_assigned_managed_identity",
@@ -97,6 +114,37 @@
           ],
           "title": "Identity Kind",
           "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "identity_kind"
+      ],
+      "title": "AzureIdentityInput",
+      "type": "object"
+    },
+    "AzurePhaseInput": {
+      "additionalProperties": false,
+      "properties": {
+        "approved_role_assignments": {
+          "items": {
+            "$ref": "#/$defs/ApprovedRoleAssignment"
+          },
+          "title": "Approved Role Assignments",
+          "type": "array"
+        },
+        "github_repository_id": {
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+          "title": "Github Repository Id",
+          "type": "string"
+        },
+        "identity": {
+          "$ref": "#/$defs/AzureIdentityInput"
         },
         "location": {
           "maxLength": 64,
@@ -132,7 +180,7 @@
       "required": [
         "tenant_id",
         "subscription_id",
-        "identity_kind",
+        "identity",
         "resource_group",
         "location",
         "github_repository_id",
@@ -169,8 +217,7 @@
         "existing_dataset_ids": {
           "default": [],
           "items": {
-            "maxLength": 240,
-            "minLength": 1,
+            "pattern": "^azureai://accounts/[^/]+/projects/[^/]+/data/[^/]+/versions/[^/]+$",
             "type": "string"
           },
           "title": "Existing Dataset Ids",
@@ -179,8 +226,7 @@
         "existing_definition_ids": {
           "default": [],
           "items": {
-            "maxLength": 240,
-            "minLength": 1,
+            "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9._-]*|azureai://accounts/[^/]+/projects/[^/]+/evaluationDefinitions/[^/]+/versions/[^/]+)$",
             "type": "string"
           },
           "title": "Existing Definition Ids",
@@ -189,9 +235,16 @@
         "existing_evaluator_ids": {
           "default": [],
           "items": {
-            "maxLength": 240,
-            "minLength": 1,
-            "type": "string"
+            "anyOf": [
+              {
+                "pattern": "^azureai://accounts/[^/]+/projects/[^/]+/evaluators/[^/]+/versions/[^/]+$",
+                "type": "string"
+              },
+              {
+                "pattern": "^azureai://built-in/evaluators/[^/]+$",
+                "type": "string"
+              }
+            ]
           },
           "title": "Existing Evaluator Ids",
           "type": "array"
@@ -366,9 +419,17 @@
           "type": "integer"
         },
         "shared_client_id": {
-          "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
-          "title": "Shared Client Id",
-          "type": "string"
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+              "type": "string"
+            },
+            {
+              "const": "azure_identity_resolution_required",
+              "type": "string"
+            }
+          ],
+          "title": "Shared Client Id"
         }
       },
       "required": [
@@ -385,6 +446,8 @@
       "additionalProperties": false,
       "properties": {
         "default_branch": {
+          "maxLength": 255,
+          "minLength": 1,
           "title": "Default Branch",
           "type": "string"
         },
@@ -411,15 +474,19 @@
           "title": "Schema Version",
           "type": "integer"
         },
-        "selected": {
-          "$ref": "#/$defs/SelectedRepositoryTarget"
+        "selected_agents": {
+          "items": {
+            "$ref": "#/$defs/SelectedAgent"
+          },
+          "title": "Selected Agents",
+          "type": "array"
         }
       },
       "required": [
         "repository_id",
         "repository_url",
         "default_branch",
-        "selected"
+        "selected_agents"
       ],
       "title": "RepositoryIdentityInput",
       "type": "object"
@@ -427,11 +494,11 @@
     "RepositoryPhaseInput": {
       "additionalProperties": false,
       "properties": {
-        "managed_payloads": {
+        "agent_render_contexts": {
           "items": {
-            "$ref": "#/$defs/TemplateManifestEntry"
+            "$ref": "#/$defs/AgentRenderContext"
           },
-          "title": "Managed Payloads",
+          "title": "Agent Render Contexts",
           "type": "array"
         },
         "schema_version": {
@@ -439,6 +506,11 @@
           "default": 1,
           "title": "Schema Version",
           "type": "integer"
+        },
+        "trusted_manifest_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Trusted Manifest Hash",
+          "type": "string"
         },
         "trusted_manifest_id": {
           "maxLength": 128,
@@ -457,7 +529,8 @@
       "required": [
         "trusted_manifest_id",
         "trusted_manifest_version",
-        "managed_payloads"
+        "trusted_manifest_hash",
+        "agent_render_contexts"
       ],
       "title": "RepositoryPhaseInput",
       "type": "object"
@@ -465,14 +538,14 @@
     "RuntimeProvenanceInput": {
       "additionalProperties": false,
       "properties": {
-        "commit": {
+        "runtime_commit": {
           "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
-          "title": "Commit",
+          "title": "Runtime Commit",
           "type": "string"
         },
-        "repository_url": {
+        "runtime_repository_url": {
           "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\\.git)?$",
-          "title": "Repository Url",
+          "title": "Runtime Repository Url",
           "type": "string"
         },
         "schema_version": {
@@ -488,14 +561,14 @@
         }
       },
       "required": [
-        "repository_url",
-        "commit",
+        "runtime_repository_url",
+        "runtime_commit",
         "uv_lock_sha256"
       ],
       "title": "RuntimeProvenanceInput",
       "type": "object"
     },
-    "SelectedRepositoryTarget": {
+    "SelectedAgent": {
       "additionalProperties": false,
       "properties": {
         "config_path": {
@@ -504,9 +577,18 @@
           "title": "Config Path",
           "type": "string"
         },
-        "repoAgentId": {
+        "editable_paths": {
+          "items": {
+            "maxLength": 240,
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Editable Paths",
+          "type": "array"
+        },
+        "repo_agent_id": {
           "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$",
-          "title": "Repoagentid",
+          "title": "Repo Agent Id",
           "type": "string"
         },
         "root": {
@@ -523,115 +605,15 @@
         }
       },
       "required": [
-        "repoAgentId",
+        "repo_agent_id",
         "root",
-        "config_path"
+        "config_path",
+        "editable_paths"
       ],
-      "title": "SelectedRepositoryTarget",
+      "title": "SelectedAgent",
       "type": "object"
     },
-    "TemplateManifestEntry": {
-      "additionalProperties": false,
-      "properties": {
-        "destination_path": {
-          "maxLength": 240,
-          "minLength": 1,
-          "title": "Destination Path",
-          "type": "string"
-        },
-        "ownership_mode": {
-          "enum": [
-            "owned",
-            "shared-template",
-            "adopted"
-          ],
-          "title": "Ownership Mode",
-          "type": "string"
-        },
-        "render_context": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/TemplateRenderContextValue"
-          },
-          "title": "Render Context",
-          "type": "array"
-        },
-        "required": {
-          "title": "Required",
-          "type": "boolean"
-        },
-        "schema_version": {
-          "const": 1,
-          "default": 1,
-          "title": "Schema Version",
-          "type": "integer"
-        },
-        "scope": {
-          "enum": [
-            "repository",
-            "agent",
-            "shared-runtime"
-          ],
-          "title": "Scope",
-          "type": "string"
-        },
-        "semantic_patch_id": {
-          "anyOf": [
-            {
-              "maxLength": 128,
-              "minLength": 1,
-              "pattern": "^[A-Za-z0-9._/-]+$",
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Semantic Patch Id"
-        },
-        "semantic_patch_mode": {
-          "default": "none",
-          "enum": [
-            "none",
-            "apply"
-          ],
-          "title": "Semantic Patch Mode",
-          "type": "string"
-        },
-        "source_template_path": {
-          "maxLength": 240,
-          "minLength": 1,
-          "title": "Source Template Path",
-          "type": "string"
-        },
-        "template_id": {
-          "maxLength": 128,
-          "minLength": 1,
-          "pattern": "^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$",
-          "title": "Template Id",
-          "type": "string"
-        },
-        "template_version": {
-          "maxLength": 64,
-          "minLength": 1,
-          "title": "Template Version",
-          "type": "string"
-        }
-      },
-      "required": [
-        "template_id",
-        "template_version",
-        "source_template_path",
-        "destination_path",
-        "ownership_mode",
-        "scope",
-        "required"
-      ],
-      "title": "TemplateManifestEntry",
-      "type": "object"
-    },
-    "TemplateRenderContextValue": {
+    "TemplateRenderValue": {
       "additionalProperties": false,
       "properties": {
         "key": {
@@ -669,7 +651,7 @@
         "key",
         "value"
       ],
-      "title": "TemplateRenderContextValue",
+      "title": "TemplateRenderValue",
       "type": "object"
     }
   },
