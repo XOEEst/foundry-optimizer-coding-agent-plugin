@@ -55,6 +55,18 @@ Use this skill only when an issue requests an agent optimize job.
 10. Confirm the final issue update contains every candidate, every Foundry
     evaluation link, guardrail results, tradeoffs, and the final decision.
 
+## Bootstrap UX
+
+- Discover repository agents first, then explicitly select targets before any plan.
+- Show machine-readable repository, GitHub, Azure, and evaluation phase plans and diffs.
+- Require an approval record before apply; fail closed on stale plan or SHA drift.
+- Auto-adopt the generated rubric only after fail-closed gates pass.
+- Explain issue objectives alongside pinned, default, and issue-supplied evaluators.
+- Use `foundry-opt bootstrap evaluation inspect|replace` for bundle provenance and explicit replacement.
+- Review all four phases before confirmation: repository payloads, GitHub env/variables/branch policy, Azure identity/FIC/RBAC, and evaluation bundle actions.
+- Confirm only through the explicit approval file flow; never prompt inside the CLI.
+- When defaults differ from issue evaluators, explain default, pinned, and issue-supplied evaluators before replacement/apply.
+
 ## Candidate discipline
 
 - One candidate is one coherent hypothesis.
