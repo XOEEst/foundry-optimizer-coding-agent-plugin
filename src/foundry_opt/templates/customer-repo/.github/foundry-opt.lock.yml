@@ -1,0 +1,6 @@
+schema_version: 1
+repository_url: https://github.com/XOEEst/foundry-optimizer-coding-agent-plugin.git
+commit: 92bca79a5faea0718e32101e56b34ebf29c628e3
+package_path: .
+skill_path: src/foundry_opt/templates/skills/foundry-agent-optimizer
+uv_lock_sha256: 74d7bb534c53e71a61ce197f3d5fa3169f2413373c2e42617280e78e83d6c681
