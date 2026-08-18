@@ -209,7 +209,23 @@ def build_phase_actions(plan_input: BootstrapPlanInput, inventories: Mapping[str
             )
         )
         if gh.shared_client_id != "azure_identity_resolution_required":
-            actions.append(BootstrapAction(action_id="github-variable-client-id", phase="github", stage="planned", kind="github-variable", diagnostics=(gh.deployment_environment, gh.shared_client_id)))
+            seen_environments: list[str] = []
+            for environment in (gh.optimizer_environment, gh.deployment_environment):
+                if environment in seen_environments:
+                    # The shared identity is bound to a single client_id, so a
+                    # variable action is only emitted once per distinct
+                    # environment even when optimizer and deployment share one.
+                    continue
+                seen_environments.append(environment)
+                actions.append(
+                    BootstrapAction(
+                        action_id=f"github-variable-client-id-{environment}",
+                        phase="github",
+                        stage="planned",
+                        kind="github-variable",
+                        diagnostics=(environment, gh.client_id_variable_name, gh.shared_client_id),
+                    )
+                )
     if "azure" in plan_input.required_phases and plan_input.azure_phase is not None:
         az = plan_input.azure_phase
         identity = az.identity
