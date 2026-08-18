@@ -189,10 +189,12 @@ The split stage reads and republishes real dataset content with the shipped SDK:
 1. `datasets.get_credentials(name, version)` returns `blob_reference.credential.sas_uri`
    (attribute models, `as_dict` payloads with wire names, and `model_dump` models are all
    accepted). A credential without a usable SAS uri fails closed.
-2. The blob is downloaded over HTTPS with hard byte and row budgets (32 MiB / 5000 rows).
-   Rejected downloads surface as permission errors, transport failures as retryable network
-   errors. Folder and multi-file layouts, and unsupported file types, fail closed instead of
-   being guessed; JSONL/NDJSON and CSV are supported.
+2. A single blob is downloaded directly. A container- or folder-scoped credential is listed
+   through the SAS-protected Blob REST API, capped at 32 files, and downloaded in stable name
+   order. The combined content keeps the same hard 32 MiB / 5000-row budgets. Rejected
+   listings/downloads surface as permission errors, transport failures as retryable network
+   errors, and pagination or unsupported file types fail closed. JSONL/NDJSON and CSV are
+   supported.
 3. Every row gets a stable identifier: the first present safe id field
    (`row_id`/`id`/`case_id`/`sample_id`/`item_id`, camelCase included), otherwise a canonical
    SHA-256 of the row. Duplicate identifiers fail closed. Optional `group_id`/`category` are

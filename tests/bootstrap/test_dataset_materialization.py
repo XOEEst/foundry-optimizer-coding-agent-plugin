@@ -13,6 +13,7 @@ import json
 import os
 import threading
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 import pytest
 
@@ -107,6 +108,56 @@ class _BlobServer:
     def url(self, path: str) -> str:
         host, port = self._httpd.server_address[:2]
         return f"https://{host}:{port}{path}"
+
+    def http_url(self, path: str) -> str:
+        host, port = self._httpd.server_address[:2]
+        return f"http://{host}:{port}{path}"
+
+    def close(self) -> None:
+        self._httpd.shutdown()
+        self._httpd.server_close()
+
+
+class _FolderBlobServer:
+    """Container-list plus blob-download surface for folder datasets."""
+
+    def __init__(self, files: dict[str, bytes], *, next_marker: str = "") -> None:
+        self.files = dict(files)
+        self.next_marker = next_marker
+        handler = self._handler()
+        self._httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
+        self._thread.start()
+
+    def _handler(self):
+        server = self
+
+        class _Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802 - stdlib naming
+                parsed = urlparse(self.path)
+                if "comp=list" in parsed.query and "restype=container" in parsed.query:
+                    blobs = "".join(
+                        f"<Blob><Name>{name}</Name><Properties><Content-Length>{len(payload)}</Content-Length></Properties></Blob>"
+                        for name, payload in sorted(server.files.items())
+                    )
+                    payload = (
+                        f"<?xml version=\"1.0\" encoding=\"utf-8\"?>"
+                        f"<EnumerationResults><Blobs>{blobs}</Blobs>"
+                        f"<NextMarker>{server.next_marker}</NextMarker></EnumerationResults>"
+                    ).encode("utf-8")
+                    self.send_response(200)
+                else:
+                    name = unquote(parsed.path.removeprefix("/eval/"))
+                    payload = server.files.get(name, b"")
+                    self.send_response(200 if name in server.files else 404)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *args: object) -> None:
+                return
+
+        return _Handler
 
     def http_url(self, path: str) -> str:
         host, port = self._httpd.server_address[:2]
@@ -227,6 +278,20 @@ def server_factory():
         item.close()
 
 
+@pytest.fixture()
+def folder_server_factory():
+    created: list[_FolderBlobServer] = []
+
+    def _make(files: dict[str, bytes], *, next_marker: str = "") -> _FolderBlobServer:
+        server = _FolderBlobServer(files, next_marker=next_marker)
+        created.append(server)
+        return server
+
+    yield _make
+    for item in created:
+        item.close()
+
+
 @pytest.mark.parametrize(
     "credential_factory",
     (_DatasetCredential, _SerializedCredential, _DumpableCredential),
@@ -288,16 +353,91 @@ def test_an_unreachable_blob_is_classified_as_network(server_factory) -> None:
         adapter.dataset_case_index(SOURCE_NAME, SOURCE_VERSION)
 
 
-def test_folder_and_unsupported_layouts_fail_closed(server_factory) -> None:
-    server = server_factory(_jsonl(_rows(2)))
-    adapter, _fakes = _live_adapter(server, blob_path="/eval/folder/")
-
-    with pytest.raises(FoundryUnsupportedCapabilityError, match="folder or multi-file dataset layouts"):
-        adapter.dataset_case_index(SOURCE_NAME, SOURCE_VERSION)
-
+def test_unsupported_single_file_layouts_fail_closed(server_factory) -> None:
     parquet_server = server_factory(_jsonl(_rows(2)))
     adapter, _fakes = _live_adapter(parquet_server, blob_path="/eval/source.parquet")
     with pytest.raises(FoundryUnsupportedCapabilityError, match="unsupported dataset file type"):
+        adapter.dataset_case_index(SOURCE_NAME, SOURCE_VERSION)
+
+
+def test_folder_dataset_lists_and_merges_supported_files(folder_server_factory) -> None:
+    server = folder_server_factory(
+        {
+            "part-02.jsonl": _jsonl(_rows(2)[1:]),
+            "part-01.jsonl": _jsonl(_rows(2)[:1]),
+        }
+    )
+    sas_uri = server.http_url("/eval?sv=2024-01-01&sig=redacted")
+    credential = _DatasetCredential(
+        "https://example.blob.core.windows.net/eval",
+        sas_uri,
+    )
+    adapter, _fakes = _live_adapter(
+        server,
+        credential=credential,
+        blob_path="/eval",
+    )
+
+    index = adapter.dataset_case_index(SOURCE_NAME, SOURCE_VERSION)
+
+    assert [item["row_id"] for item in index] == ["case-000", "case-001"]
+
+
+def test_folder_dataset_file_count_and_pagination_are_bounded(folder_server_factory, monkeypatch) -> None:
+    server = folder_server_factory(
+        {
+            "part-01.jsonl": _jsonl(_rows(1)),
+            "part-02.jsonl": _jsonl([{"id": "case-002", "query": "q", "response": "a"}]),
+        }
+    )
+    credential = _DatasetCredential(
+        "https://example.blob.core.windows.net/eval",
+        server.http_url("/eval?sig=redacted"),
+    )
+    adapter, _fakes = _live_adapter(server, credential=credential, blob_path="/eval")
+    monkeypatch.setattr(foundry_module, "_MAX_DATASET_FILES", 1)
+
+    with pytest.raises(FoundryPrerequisiteError, match="file count exceeds"):
+        adapter.dataset_case_index(SOURCE_NAME, SOURCE_VERSION)
+
+    paged = folder_server_factory(
+        {"part-01.jsonl": _jsonl(_rows(1))},
+        next_marker="more",
+    )
+    credential = _DatasetCredential(
+        "https://example.blob.core.windows.net/eval",
+        paged.http_url("/eval?sig=redacted"),
+    )
+    adapter, _fakes = _live_adapter(paged, credential=credential, blob_path="/eval")
+
+    with pytest.raises(FoundryPrerequisiteError, match="file count exceeds"):
+        adapter.dataset_case_index(SOURCE_NAME, SOURCE_VERSION)
+
+
+def test_folder_dataset_rejects_unsupported_or_duplicate_rows(folder_server_factory) -> None:
+    unsupported = folder_server_factory({"part.parquet": _jsonl(_rows(1))})
+    credential = _DatasetCredential(
+        "https://example.blob.core.windows.net/eval",
+        unsupported.http_url("/eval?sig=redacted"),
+    )
+    adapter, _fakes = _live_adapter(unsupported, credential=credential, blob_path="/eval")
+
+    with pytest.raises(FoundryUnsupportedCapabilityError, match="unsupported dataset file type"):
+        adapter.dataset_case_index(SOURCE_NAME, SOURCE_VERSION)
+
+    duplicate = folder_server_factory(
+        {
+            "part-01.jsonl": _jsonl([{"id": "same", "query": "a"}]),
+            "part-02.jsonl": _jsonl([{"id": "same", "query": "b"}]),
+        }
+    )
+    credential = _DatasetCredential(
+        "https://example.blob.core.windows.net/eval",
+        duplicate.http_url("/eval?sig=redacted"),
+    )
+    adapter, _fakes = _live_adapter(duplicate, credential=credential, blob_path="/eval")
+
+    with pytest.raises(FoundryPrerequisiteError, match="duplicate stable row identifiers"):
         adapter.dataset_case_index(SOURCE_NAME, SOURCE_VERSION)
 
 
@@ -558,5 +698,9 @@ def test_created_only_rollback_removes_uploaded_splits(server_factory) -> None:
 
     adapter.rollback_resources(receipt)
 
-    assert sorted(fakes["datasets"].delete_calls) == [("dev-set", "1"), ("val-set", "1")]
+    assert sorted(fakes["datasets"].delete_calls) == [
+        ("dev-set", "1"),
+        ("generated-set", "1"),
+        ("val-set", "1"),
+    ]
     assert adapter.verify_rollback(receipt) is True
