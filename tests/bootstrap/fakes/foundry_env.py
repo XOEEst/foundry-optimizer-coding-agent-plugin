@@ -64,14 +64,17 @@ def onboarding_definition_criteria(
 ) -> list[dict[str, object]]:
     """The exact criteria the onboarding machine binds, for adoption-signature fixtures."""
 
-    mapping = {"query": "{{item.query}}", "response": "{{sample.output_text}}"}
+    safety_mapping = {"query": "{{item.query}}", "response": "{{sample.output_text}}"}
     criteria: list[dict[str, object]] = [
         {
             "type": "azure_ai_evaluator",
             "name": objective_name,
             "evaluator_name": objective_name,
             "evaluator_version": objective_version,
-            "data_mapping": dict(mapping),
+            "data_mapping": {
+                "query": "{{item.query}}",
+                "response": "{{sample.output_items}}",
+            },
             "initialization_parameters": {"deployment_name": model_deployment},
         }
     ]
@@ -82,7 +85,7 @@ def onboarding_definition_criteria(
                 "name": f"builtin.{name}",
                 "evaluator_name": f"builtin.{name}",
                 "evaluator_version": safety_version,
-                "data_mapping": dict(mapping),
+                "data_mapping": dict(safety_mapping),
             }
         )
     return criteria

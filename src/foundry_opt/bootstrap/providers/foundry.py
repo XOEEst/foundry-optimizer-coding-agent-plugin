@@ -111,6 +111,7 @@ _EVAL_SCENARIO = 'synthetic_data_gen_preview'
 _SYNTHETIC_ITEM_GENERATION_TYPE = 'synthetic_data_gen_preview'
 _ITEM_QUERY_REFERENCE = 'item.query'
 _EVALUATOR_DATA_MAPPING = {'query': '{{item.query}}', 'response': '{{sample.output_text}}'}
+_OBJECTIVE_DATA_MAPPING = {'query': '{{item.query}}', 'response': '{{sample.output_items}}'}
 _MAX_RUN_OUTPUT_ITEMS = 5000
 _MAX_AGENT_CODE_BYTES = 32 * 1024 * 1024
 _MAX_AGENT_CODE_ENTRIES = 2000
@@ -2482,7 +2483,11 @@ class FoundryAdapter:
                 'type': 'azure_ai_evaluator',
                 'name': name,
                 'evaluator_name': str(criterion['evaluator_name']),
-                'data_mapping': dict(_EVALUATOR_DATA_MAPPING),
+                'data_mapping': dict(
+                    criterion.get('data_mapping')
+                    if isinstance(criterion.get('data_mapping'), Mapping)
+                    else _EVALUATOR_DATA_MAPPING
+                ),
             }
             initialization = criterion.get('initialization_parameters')
             if isinstance(initialization, Mapping) and initialization:
@@ -2552,7 +2557,19 @@ class FoundryAdapter:
             'type': 'azure_ai_target_completions',
             'source': {'type': 'file_id', 'id': dataset_file_id},
             'target': target,
-            'input_messages': {'type': 'item_reference', 'item_reference': _ITEM_QUERY_REFERENCE},
+            'input_messages': {
+                'type': 'template',
+                'template': [
+                    {
+                        'type': 'message',
+                        'role': 'user',
+                        'content': {
+                            'type': 'input_text',
+                            'text': '{{item.query}}',
+                        },
+                    }
+                ],
+            },
         }
 
     def run_synthetic_generation(
@@ -3244,6 +3261,7 @@ class FoundryAdapter:
                 # AI-assisted evaluators are initialized with the judge deployment; built-in
                 # safety evaluators take no initialization parameters.
                 'initialization_parameters': {'deployment_name': contract.activation_plan.model_deployment},
+                'data_mapping': dict(_OBJECTIVE_DATA_MAPPING),
             },
         }
         for guardrail in guardrails:

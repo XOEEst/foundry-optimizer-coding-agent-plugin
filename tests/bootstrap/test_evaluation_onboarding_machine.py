@@ -452,6 +452,10 @@ def test_definitions_bind_real_azure_ai_evaluator_graders() -> None:
         objective = by_name["quality-eval"]
         assert objective["evaluator_name"] == "quality-eval"
         assert objective["evaluator_version"] == "2"
+        assert objective["data_mapping"] == {
+            "query": "{{item.query}}",
+            "response": "{{sample.output_items}}",
+        }
         # AI-assisted evaluators are initialized with the judge deployment; safety built-ins
         # take no initialization parameters (matches the official SDK sample).
         assert objective["initialization_parameters"] == {"deployment_name": "baseline-model"}
@@ -474,7 +478,19 @@ def test_activation_runs_use_target_completions_against_the_split_datasets() -> 
     for _eval_id, data_source in activation_runs:
         assert data_source["source"]["type"] == "file_id"
         assert data_source["target"] == {"type": "azure_ai_agent", "name": "draft-agent", "version": "1"}
-        assert data_source["input_messages"]["type"] == "item_reference"
+        assert data_source["input_messages"] == {
+            "type": "template",
+            "template": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": {
+                        "type": "input_text",
+                        "text": "{{item.query}}",
+                    },
+                }
+            ],
+        }
 
 
 def test_activation_submission_reconciles_a_run_before_create_returns() -> None:
