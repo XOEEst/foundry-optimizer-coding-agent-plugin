@@ -75,12 +75,3 @@ managed_payloads:
   semantic_patch_mode: none
   scope: repository
   required: true
-- schema_version: 1
-  template_id: bootstrap-lock
-  template_version: 1.0.0
-  source_template_path: src/foundry_opt/templates/customer-repo/.github/foundry-opt.lock.yml
-  destination_path: .github/foundry-opt.lock.yml
-  ownership_mode: owned
-  semantic_patch_mode: none
-  scope: repository
-  required: true

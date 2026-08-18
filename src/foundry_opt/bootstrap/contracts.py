@@ -19,7 +19,13 @@ RepositoryUrl = Annotated[str, StringConstraints(pattern=r"^https://github\.com/
 AgentId = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")]
 DatasetUri = Annotated[str, StringConstraints(pattern=r"^azureai://accounts/[^/]+/projects/[^/]+/data/[^/]+/versions/[^/]+$")]
 VersionedEvaluatorUri = Annotated[str, StringConstraints(pattern=r"^azureai://accounts/[^/]+/projects/[^/]+/evaluators/[^/]+/versions/[^/]+$")]
+# Built-in evaluators are returned from the shared registry with immutable versioned ids, for
+# example `azureml://registries/azureml/evaluators/builtin.violence/versions/3`. The legacy
+# `azureai://built-in/evaluators/<name>` shape is still accepted because some projects return
+# it, but it is never assumed to exist.
+RegistryEvaluatorId = Annotated[str, StringConstraints(pattern=r"^azureml://registries/[^/]+/evaluators/[^/]+/versions/[^/]+$")]
 BuiltInEvaluatorId = Annotated[str, StringConstraints(pattern=r"^azureai://built-in/evaluators/[^/]+$")]
+EvaluatorIdentifier = VersionedEvaluatorUri | BuiltInEvaluatorId | RegistryEvaluatorId
 EvaluationDefinitionId = Annotated[str, StringConstraints(pattern=r"^(?:[A-Za-z0-9][A-Za-z0-9._-]*|azureai://accounts/[^/]+/projects/[^/]+/evaluationDefinitions/[^/]+/versions/[^/]+)$")]
 ApplyPhase = Literal["repository", "github", "azure", "evaluations"]
 OperationStage = Literal["planned", "applying", "verifying", "completed", "failed", "compensation_required"]
@@ -229,7 +235,7 @@ class ImmutableDefinitionReference(BootstrapDocument):
 
 
 class EvaluatorReference(BootstrapDocument):
-    evaluator_id: VersionedEvaluatorUri | BuiltInEvaluatorId
+    evaluator_id: EvaluatorIdentifier
     provenance: EvaluatorProvenance
 
 
@@ -247,7 +253,7 @@ class ResolvedEvaluator(BootstrapDocument):
 
 
 class IssueEvaluatorRequestEntry(BootstrapDocument):
-    evaluator_id: VersionedEvaluatorUri | BuiltInEvaluatorId
+    evaluator_id: EvaluatorIdentifier
     weight: float | None = None
 
     @field_validator('weight')
@@ -297,6 +303,41 @@ class DefaultEvaluatorBundle(BootstrapDocument):
     definitions: tuple[ImmutableDefinitionReference, ...]
 
 
+class ActivationBinding(BootstrapDocument):
+    """Binds one persisted sidecar mutation to an approved plan, receipt, and runtime SHA."""
+
+    operation_id: Annotated[str, StringConstraints(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")]
+    plan_hash: Sha256
+    approval_hash: Sha256
+    receipt_hash: Sha256
+    runtime_commit: GitCommit
+    finalization_hash: Sha256 | None = None
+
+
+class EvaluationLineage(BootstrapDocument):
+    """Non-secret evaluation lineage persisted in the sidecar after successful activation."""
+
+    split_algorithm_version: Annotated[str, StringConstraints(min_length=1, max_length=64)]
+    split_hash: Sha256
+    split_lineage_hash: Sha256
+    development_case_count: int = Field(ge=0)
+    validating_case_count: int = Field(ge=0)
+    dataset_strategy: Literal["trace", "synthetic_only"]
+    generation_context_fingerprint: Sha256
+    evaluator_provenance: EvaluatorProvenance
+    evaluator_generation_operation_id: Annotated[str, StringConstraints(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")] | None = None
+    bundle_objective_hash: Sha256
+    activation_binding: ActivationBinding | None = None
+
+    @model_validator(mode='after')
+    def validate_lineage(self) -> Self:
+        if self.evaluator_provenance == 'issue_supplied_existing':
+            raise BootstrapConfigError('issue-supplied evaluators never become the repository default bundle')
+        if (self.evaluator_provenance == 'auto_generated_unreviewed') != (self.evaluator_generation_operation_id is not None):
+            raise BootstrapConfigError('generated evaluator lineage requires exactly one generation operation id')
+        return self
+
+
 class HardGuardrail(BootstrapDocument):
     evaluator_name: str
     required_pass_rate: float
@@ -328,6 +369,7 @@ class BootstrapSidecar(BootstrapDocument):
     development_definition: ImmutableDefinitionReference
     validating_definition: ImmutableDefinitionReference
     default_evaluator_bundle: DefaultEvaluatorBundle
+    evaluation_lineage: EvaluationLineage | None = None
     max_issue_evaluators: int = MAX_ISSUE_EVALUATORS
     hard_guardrails: tuple[HardGuardrail, ...]
     deployment: DeploymentSettings

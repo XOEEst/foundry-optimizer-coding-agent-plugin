@@ -783,6 +783,12 @@ def _repo_relative(path: Path, root: Path) -> str:
     return path.relative_to(root).as_posix()
 
 
+def atomic_write_bytes(path: Path, data: bytes, *, fsync: bool = True) -> None:
+    """Atomically replace `path` with `data` (public helper for post-activation writes)."""
+
+    _atomic_write_bytes(path, data, fsync=fsync)
+
+
 def _atomic_write_json(path: Path, payload: object, *, fsync: bool = False) -> None:
     _atomic_write_bytes(path, json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii"), fsync=fsync)
 

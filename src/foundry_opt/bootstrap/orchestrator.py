@@ -8,7 +8,7 @@ from foundry_opt.bootstrap.canonical import canonical_sha256, safe_persisted_doc
 from foundry_opt.bootstrap.contracts import BindingAssessment, BootstrapAction, BootstrapPlan, BootstrapReceipt, FingerprintRecord, RedactedStatusInfo
 from foundry_opt.bootstrap.discovery import DiscoveryResult, discover_repository_agents
 from foundry_opt.bootstrap.errors import BootstrapApplyError
-from foundry_opt.bootstrap.operation_state import OperationStateEnvelope, SelectionPlan, next_generation, read_operation_state, status_from_state, write_operation_state
+from foundry_opt.bootstrap.operation_state import DiscoveredAgentRecord, DiscoveryBlockerRecord, OperationStateEnvelope, SelectionPlan, next_generation, read_operation_state, status_from_state, write_operation_state
 from foundry_opt.bootstrap.providers.foundry import (
     rollback_failure_details as foundry_rollback_failure_details,
 )
@@ -46,13 +46,31 @@ class BootstrapOrchestrator:
             "evaluations": evaluations_driver,
         }
         self._state_root = state_root
+        self._checkpoints: dict[str, Mapping[str, object]] = {}
 
     def discover(self, repository_root: Path, *, repository_id: str, operation_id: str, runtime_repository: str, runtime_commit: str, binding_evidence_by_root: Mapping[str, Mapping[str, object]] | None = None, approved_shared_sources: Mapping[str, Sequence[str]] | None = None, selected_agents: Sequence[Mapping[str, str] | str] | None = None) -> OperationStateEnvelope:
         result: DiscoveryResult = discover_repository_agents(repository_root, binding_evidence_by_root=binding_evidence_by_root, approved_shared_sources=approved_shared_sources, selected_agents=selected_agents)
         selected = tuple(item["repoAgentId"] if isinstance(item, Mapping) else "" for item in (selected_agents or ()) if isinstance(item, Mapping))
         fingerprints = tuple(FingerprintRecord(label=f"discovery:{agent.root}", sha256=canonical_sha256(agent.model_dump(mode="json"))) for agent in result.agents)
         blockers = tuple(sorted({blocker.detail for agent in result.agents for blocker in agent.blockers}))
-        selection = SelectionPlan(repository_root=result.repositoryRoot, selected_agent_ids=selected, binding_assessments=tuple(agent.bindingAssessment for agent in result.agents), discovery_fingerprints=fingerprints, blockers=blockers)
+        discovered_agents = tuple(
+            DiscoveredAgentRecord(
+                repo_agent_id=agent.repoAgentId,
+                root=agent.root,
+                config_path=agent.configPath,
+                source_root=agent.sourceRoot,
+                package_root=agent.packageRoot,
+                source_fingerprint=agent.sourceFingerprint,
+                package_fingerprint=agent.packageFingerprint,
+                classification=agent.bindingAssessment.classification,
+                detail=agent.bindingAssessment.detail,
+                confidence=agent.confidence,
+                blockers=tuple(DiscoveryBlockerRecord(code=blocker.code, detail=blocker.detail) for blocker in agent.blockers),
+                approved_shared_source_repo_agent_ids=agent.approvedSharedSourceRepoAgentIds,
+            )
+            for agent in result.agents
+        )
+        selection = SelectionPlan(repository_root=result.repositoryRoot, selected_agent_ids=selected, binding_assessments=tuple(agent.bindingAssessment for agent in result.agents), discovery_fingerprints=fingerprints, blockers=blockers, discovered_agents=discovered_agents)
         empty_plan = BootstrapPlan.create(operation_id=operation_id, runtime_repository=runtime_repository, runtime_commit=runtime_commit, repository_identity=repository_id, actions=())
         envelope = OperationStateEnvelope.create(generation=0, repository_id=repository_id, operation_id=operation_id, runtime_repository=runtime_repository, runtime_commit=runtime_commit, selection_plan=selection, bootstrap_plan=empty_plan, discovery_fingerprints=fingerprints)
         write_operation_state(envelope, state_root=self._state_root)
@@ -104,6 +122,50 @@ class BootstrapOrchestrator:
             raise BootstrapApplyError("resume requires the exact runtime commit")
         return envelope
 
+    def _install_checkpoint(self, phase: ApplyPhaseName, *, repository_id: str, operation_id: str) -> None:
+        """Give the phase driver a durable sink for in-flight operation handles.
+
+        Long-running generation jobs record their continuation before the first poll, so a
+        crash mid-generation resumes the recorded job instead of resubmitting it.
+        """
+
+        setter = getattr(self._drivers[phase], "set_checkpoint", None)
+        if not callable(setter):
+            return
+
+        def _persist(snapshot: Mapping[str, object]) -> None:
+            latest = read_operation_state(repository_id, operation_id, state_root=self._state_root)
+            receipts = tuple(
+                item.model_copy(update={"provider_state": dict(snapshot)}) if item.phase == phase and item.state == "applying" else item
+                for item in latest.phase_receipts
+            )
+            if not any(item.phase == phase and item.state == "applying" for item in latest.phase_receipts):
+                return
+            write_operation_state(next_generation(latest, phase_receipts=receipts), expected_generation=latest.generation, state_root=self._state_root)
+            self._checkpoints[phase] = dict(snapshot)
+
+        setter(_persist)
+
+    def _clear_checkpoint(self, phase: ApplyPhaseName) -> None:
+        setter = getattr(self._drivers[phase], "set_checkpoint", None)
+        if callable(setter):
+            setter(None)
+
+    @staticmethod
+    def _resumable_provider_state(envelope: OperationStateEnvelope, phase: ApplyPhaseName) -> Mapping[str, object]:
+        previous = next((item for item in envelope.phase_receipts if item.phase == phase), None)
+        state = previous.provider_state if previous is not None else None
+        if isinstance(state, Mapping) and state.get("checkpoint"):
+            return dict(state)
+        return {}
+
+    def _restore_in_flight(self, phase: ApplyPhaseName, state: Mapping[str, object]) -> None:
+        if not state.get("checkpoint"):
+            return
+        restore = getattr(self._drivers[phase], "restore_provider_state", None)
+        if callable(restore):
+            restore(state)
+
     def apply_phase(self, *, repository_id: str, operation_id: str, phase: ApplyPhaseName, approval: ApprovalRecord, runtime_commit: str) -> PhaseReceipt:
         envelope = self.resume(repository_id=repository_id, operation_id=operation_id, runtime_commit=runtime_commit)
         if phase not in envelope.required_phases:
@@ -113,12 +175,27 @@ class BootstrapOrchestrator:
             raise BootstrapApplyError("approval does not match parent plan hash and phase")
         expected_fingerprints = tuple(sorted((item for item in envelope.resource_fingerprints if item.label.startswith(f"{phase}:")), key=lambda item: (item.label, item.sha256)))
         live_fingerprints = tuple(sorted(self._drivers[phase].live_fingerprints(self._build_context_from_envelope(envelope, phase)), key=lambda item: (item.label, item.sha256)))
+        resume_state = self._resumable_provider_state(envelope, phase)
         if live_fingerprints != expected_fingerprints:
-            raise BootstrapApplyError("live fingerprints drifted from planned phase fingerprints")
-        applying = PhaseReceipt(phase=phase, state="applying", provider=phase, receipt=self._placeholder_receipt(envelope, phase_plan), parent_plan_hash=envelope.bootstrap_plan.plan_hash, phase_plan_hash=phase_plan.plan_hash, approval_hash=approval.approval_hash, summary="phase applying", provider_state={}, recorded_fingerprints=live_fingerprints)
+            # An interrupted apply legitimately changes live inventory; resuming it is only
+            # allowed when the same approval already started from a non-drifted state and a
+            # durable in-flight checkpoint exists. Any other drift still fails closed.
+            previous = next((item for item in envelope.phase_receipts if item.phase == phase), None)
+            resumable = (
+                bool(resume_state)
+                and previous is not None
+                and previous.approval_hash == approval.approval_hash
+                and tuple(sorted(previous.recorded_fingerprints, key=lambda item: (item.label, item.sha256))) == expected_fingerprints
+            )
+            if not resumable:
+                raise BootstrapApplyError("live fingerprints drifted from planned phase fingerprints")
+            live_fingerprints = expected_fingerprints
+        applying = PhaseReceipt(phase=phase, state="applying", provider=phase, receipt=self._placeholder_receipt(envelope, phase_plan), parent_plan_hash=envelope.bootstrap_plan.plan_hash, phase_plan_hash=phase_plan.plan_hash, approval_hash=approval.approval_hash, summary="phase applying", provider_state=resume_state, recorded_fingerprints=live_fingerprints)
         updated = next_generation(envelope, approvals=tuple([*envelope.approvals, approval]), phase_receipts=tuple([*{item.phase: item for item in envelope.phase_receipts}.values(), applying]))
         write_operation_state(updated, expected_generation=envelope.generation, state_root=self._state_root)
         envelope = updated
+        self._install_checkpoint(phase, repository_id=repository_id, operation_id=operation_id)
+        self._restore_in_flight(phase, applying.provider_state)
         try:
             receipt = self._drivers[phase].apply(phase_plan)
             if receipt.plan_hash != phase_plan.plan_hash:
@@ -130,12 +207,13 @@ class BootstrapOrchestrator:
             if not verified:
                 raise BootstrapApplyError("phase verification failed")
             phase_receipt = PhaseReceipt(phase=phase, state="applied", provider=phase, receipt=receipt, parent_plan_hash=envelope.bootstrap_plan.plan_hash, phase_plan_hash=phase_plan.plan_hash, approval_hash=approval.approval_hash, summary=summarize_receipt(receipt), provider_state=provider_state, recorded_fingerprints=live_fingerprints)
-            if phase == "evaluations" and envelope.evaluator_replacement is not None:
-                replacement = envelope.evaluator_replacement.model_copy(update={"status": "activated"})
-                envelope = next_generation(envelope, phase_receipts=self._replace_phase(envelope.phase_receipts, phase_receipt), evaluator_replacement=replacement)
+            latest = read_operation_state(repository_id, operation_id, state_root=self._state_root)
+            if phase == "evaluations" and latest.evaluator_replacement is not None:
+                replacement = latest.evaluator_replacement.model_copy(update={"status": "activated"})
+                envelope = next_generation(latest, phase_receipts=self._replace_phase(latest.phase_receipts, phase_receipt), evaluator_replacement=replacement)
             else:
-                envelope = next_generation(envelope, phase_receipts=self._replace_phase(envelope.phase_receipts, phase_receipt))
-            write_operation_state(envelope, expected_generation=updated.generation, state_root=self._state_root)
+                envelope = next_generation(latest, phase_receipts=self._replace_phase(latest.phase_receipts, phase_receipt))
+            write_operation_state(envelope, expected_generation=latest.generation, state_root=self._state_root)
             return phase_receipt
         except Exception as exc:
             code, summary = self._sanitize_error(exc)
@@ -156,10 +234,16 @@ class BootstrapOrchestrator:
                 compensation_actions = original_receipt.compensation_required_actions
             failure = failure_receipt(phase=phase, provider=phase, operation_id=envelope.operation_id, runtime_repository=envelope.runtime_repository, runtime_commit=envelope.runtime_commit, repository_identity=envelope.bootstrap_plan.repository_identity, parent_plan_hash=envelope.bootstrap_plan.plan_hash, phase_plan_hash=phase_plan.plan_hash, before_fingerprints=live_fingerprints, code=code, summary=summary, compensation_required_actions=compensation_actions)
             state = "compensation_required" if compensation_actions else "failed"
+            if not provider_state and self._checkpoints.get(phase):
+                # Preserve the in-flight generation handle so a retry resumes it.
+                provider_state = dict(self._checkpoints[phase])
             failed_receipt = PhaseReceipt(phase=phase, state=state, provider=phase, receipt=original_receipt or failure.receipt, parent_plan_hash=envelope.bootstrap_plan.plan_hash, phase_plan_hash=phase_plan.plan_hash, approval_hash=approval.approval_hash, summary=failure.summary, provider_state=provider_state, recorded_fingerprints=live_fingerprints)
-            envelope = next_generation(envelope, phase_receipts=self._replace_phase(envelope.phase_receipts, failed_receipt))
-            write_operation_state(envelope, expected_generation=updated.generation, state_root=self._state_root)
+            latest = read_operation_state(repository_id, operation_id, state_root=self._state_root)
+            envelope = next_generation(latest, phase_receipts=self._replace_phase(latest.phase_receipts, failed_receipt))
+            write_operation_state(envelope, expected_generation=latest.generation, state_root=self._state_root)
             return failed_receipt
+        finally:
+            self._clear_checkpoint(phase)
 
     def rollback_phase(self, *, repository_id: str, operation_id: str, phase: ApplyPhaseName, runtime_commit: str) -> PhaseReceipt:
         envelope = self.resume(repository_id=repository_id, operation_id=operation_id, runtime_commit=runtime_commit)

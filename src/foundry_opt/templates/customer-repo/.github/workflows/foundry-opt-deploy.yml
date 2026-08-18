@@ -92,7 +92,7 @@ jobs:
               agent = selected[0]
               include.append({'changed_root': agent.root, 'repo_agent_id': agent.agent_id, 'config_path': agent.config_path})
           else:
-              shared_contract_changed = any(path.startswith('.foundry-opt/') or path.startswith('.github/workflows/') or path == '.github/foundry-opt.lock.yml' for path in changed)
+              shared_contract_changed = any(path.startswith('.foundry-opt/') or path.startswith('.github/workflows/') for path in changed)
               roots_by_id = {agent.agent_id: agent.root for agent in enabled}
               for agent in enabled:
                   sidecar = BootstrapSidecar.from_document((root / agent.config_path).read_text(encoding='utf-8'))

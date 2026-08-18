@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from azure.identity import AzureCliCredential, DefaultAzureCredential
@@ -198,35 +198,146 @@ class AzurePhaseDriver(PhaseDriver):
 
 
 class EvaluationPhaseDriver(PhaseDriver):
+    """Routes every evaluation operation to the Foundry project that owns the agent.
+
+    Agents in one repository may live in different Foundry projects, so a single adapter is
+    never shared across endpoints. Per-project receipts and provider state are aggregated
+    deterministically, and a partially applied multi-project phase compensates the projects
+    that already created resources before the failure is re-raised.
+    """
+
     def __init__(
         self,
         *,
         plan_input: BootstrapPlanInput | None = None,
         provider: FoundryAdapter | None = None,
+        checkpoint: Callable[[Mapping[str, object]], None] | None = None,
     ) -> None:
         self._plan_input = plan_input
         self._provider = provider
+        self._providers: dict[str, FoundryAdapter] = {}
+        self._checkpoint = checkpoint
+        self._project_receipts: dict[str, BootstrapReceipt] = {}
+
+    def set_checkpoint(self, checkpoint: Callable[[Mapping[str, object]], None] | None) -> None:
+        self._checkpoint = checkpoint
+        for adapter in self._active_providers():
+            adapter.set_checkpoint(self._checkpoint_for(adapter))
+
+    def _checkpoint_for(self, adapter: FoundryAdapter) -> Callable[[Mapping[str, object]], None] | None:
+        if self._checkpoint is None:
+            return None
+        endpoint = adapter.project_endpoint
+
+        def _publish(snapshot: Mapping[str, object]) -> None:
+            assert self._checkpoint is not None
+            self._checkpoint({"schema_version": 1, "checkpoint": True, "projects": {endpoint: dict(snapshot)}})
+
+        return _publish
+
+    def _active_providers(self) -> tuple[FoundryAdapter, ...]:
+        if self._provider is not None:
+            return (self._provider,)
+        try:
+            endpoints = self._endpoints()
+        except BootstrapCliError:
+            endpoints = tuple(sorted(self._providers))
+        return tuple(self._client_for(endpoint) for endpoint in endpoints)
+
+    def _agents(self, plan_input: BootstrapPlanInput | None = None) -> tuple[object, ...]:
+        resolved = plan_input if plan_input is not None else self._plan_input
+        if resolved is None or resolved.evaluations_phase is None:
+            raise BootstrapCliError("foundry-config-missing", "Foundry evaluation phase requires configured project input", exit_code=BootstrapExitCode.CONFIG)
+        return tuple(resolved.evaluations_phase.agents)
+
+    def _endpoints(self, plan_input: BootstrapPlanInput | None = None) -> tuple[str, ...]:
+        return tuple(sorted({str(agent.project_endpoint) for agent in self._agents(plan_input)}))
+
+    def _endpoint_for_agent(self, repo_agent_id: str, plan_input: BootstrapPlanInput | None = None) -> str:
+        for agent in self._agents(plan_input):
+            if str(agent.repo_agent_id).casefold() == repo_agent_id.casefold():
+                return str(agent.project_endpoint)
+        raise BootstrapCliError("foundry-project-unresolved", "evaluation action does not map to a reviewed agent project", exit_code=BootstrapExitCode.CONFIG, details={"repo_agent_id": repo_agent_id})
 
     def _client(self, plan_input: BootstrapPlanInput | None = None) -> FoundryAdapter:
+        """Single-project convenience accessor; multi-project paths use `_client_for`."""
+
         if self._provider is not None:
             return self._provider
-        if plan_input is None or plan_input.evaluations_phase is None:
-            raise BootstrapCliError("foundry-config-missing", "Foundry evaluation phase requires configured project input", exit_code=BootstrapExitCode.CONFIG)
-        endpoint = plan_input.evaluations_phase.agents[0].project_endpoint
-        self._provider = FoundryAdapter(endpoint, DefaultAzureCredential(exclude_interactive_browser_credential=True))
-        return self._provider
+        endpoints = self._endpoints(plan_input)
+        if len(endpoints) != 1:
+            raise BootstrapCliError("foundry-project-ambiguous", "this operation requires an explicit agent project", exit_code=BootstrapExitCode.CONFIG, details={"projects": list(endpoints)})
+        return self._client_for(endpoints[0])
+
+    def _client_for(self, endpoint: str) -> FoundryAdapter:
+        if self._provider is not None:
+            return self._provider
+        adapter = self._providers.get(endpoint)
+        if adapter is None:
+            adapter = FoundryAdapter(endpoint, DefaultAzureCredential(exclude_interactive_browser_credential=True))
+            self._providers[endpoint] = adapter
+        adapter.set_checkpoint(self._checkpoint_for(adapter))
+        return adapter
+
+    def _client_for_agent(self, repo_agent_id: str, plan_input: BootstrapPlanInput | None = None) -> FoundryAdapter:
+        return self._client_for(self._endpoint_for_agent(repo_agent_id, plan_input))
+
+    @staticmethod
+    def _action_agent_id(action: BootstrapAction) -> str:
+        parts = action.action_id.split(":")
+        return parts[1] if len(parts) > 2 else ""
+
+    def _group_actions(self, phase_plan: BootstrapPlan) -> dict[str, tuple[BootstrapAction, ...]]:
+        grouped: dict[str, list[BootstrapAction]] = {}
+        for action in phase_plan.actions:
+            if action.phase != "evaluations":
+                continue
+            endpoint = self._endpoint_for_agent(self._action_agent_id(action))
+            grouped.setdefault(endpoint, []).append(action)
+        return {endpoint: tuple(actions) for endpoint, actions in sorted(grouped.items())}
+
+    @staticmethod
+    def _sub_plan(phase_plan: BootstrapPlan, actions: Sequence[BootstrapAction]) -> BootstrapPlan:
+        return BootstrapPlan.create(
+            operation_id=phase_plan.operation_id,
+            runtime_repository=phase_plan.runtime_repository,
+            runtime_commit=phase_plan.runtime_commit,
+            repository_identity=phase_plan.repository_identity,
+            actions=tuple(actions),
+        )
+
+    @staticmethod
+    def _merge_receipts(phase_plan: BootstrapPlan, receipts: Mapping[str, BootstrapReceipt]) -> BootstrapReceipt:
+        ordered = [receipts[key] for key in sorted(receipts)]
+        def _union(field: str) -> tuple[str, ...]:
+            return tuple(sorted({item for receipt in ordered for item in getattr(receipt, field)}))
+        fingerprints = lambda field: tuple(sorted({(record.label, record.sha256) for receipt in ordered for record in getattr(receipt, field)}))  # noqa: E731
+        return BootstrapReceipt.create(
+            operation_id=phase_plan.operation_id,
+            runtime_repository=phase_plan.runtime_repository,
+            runtime_commit=phase_plan.runtime_commit,
+            repository_identity=phase_plan.repository_identity,
+            plan_hash=phase_plan.plan_hash,
+            before_fingerprints=[{"label": label, "sha256": sha} for label, sha in fingerprints("before_fingerprints")],
+            after_fingerprints=[{"label": label, "sha256": sha} for label, sha in fingerprints("after_fingerprints")],
+            created_actions=_union("created_actions"),
+            adopted_actions=_union("adopted_actions"),
+            changed_actions=_union("changed_actions"),
+            skipped_actions=_union("skipped_actions"),
+            compensation_required_actions=_union("compensation_required_actions"),
+        )
 
     def live_fingerprints(self, context: Mapping[str, object]) -> Sequence[FingerprintRecord]:
         plan_input = _contextual_plan_input(context, self._plan_input)
         assert plan_input.evaluations_phase is not None
-        inventory_hash = _hash_json(self.inventory())
+        inventory_by_endpoint = {endpoint: _hash_json(self.inventory(endpoint=endpoint)) for endpoint in self._endpoints(plan_input)}
         return tuple(
             FingerprintRecord(
                 label=f"evaluations:{agent.repo_agent_id}",
                 sha256=_hash_json(
                     {
                         "agent": agent.model_dump(mode="json"),
-                        "inventory": inventory_hash,
+                        "inventory": inventory_by_endpoint[str(agent.project_endpoint)],
                     }
                 ),
             )
@@ -238,25 +349,102 @@ class EvaluationPhaseDriver(PhaseDriver):
         return tuple(action for action in build_phase_actions(plan_input) if action.phase == "evaluations")
 
     def apply(self, phase_plan: BootstrapPlan) -> BootstrapReceipt:
-        return self._client().apply_resources(phase_plan)
+        groups = self._group_actions(phase_plan)
+        if len(groups) <= 1:
+            endpoint = next(iter(groups), None) or self._endpoints()[0]
+            receipt = self._client_for(endpoint).apply_resources(phase_plan)
+            self._project_receipts = {endpoint: receipt}
+            return receipt
+        receipts: dict[str, BootstrapReceipt] = {}
+        try:
+            for endpoint, actions in groups.items():
+                receipts[endpoint] = self._client_for(endpoint).apply_resources(self._sub_plan(phase_plan, actions))
+        except Exception:
+            # Created-only compensation across projects: everything already created by this
+            # apply is rolled back before the failure surfaces.
+            for applied_endpoint, applied_receipt in receipts.items():
+                self._client_for(applied_endpoint).rollback_resources(applied_receipt)
+            self._project_receipts = {}
+            raise
+        self._project_receipts = dict(receipts)
+        return self._merge_receipts(phase_plan, receipts)
+
+    def _receipt_for(self, endpoint: str, receipt: BootstrapReceipt) -> BootstrapReceipt:
+        recorded = self._project_receipts.get(endpoint)
+        return recorded if recorded is not None else receipt
 
     def verify(self, receipt: BootstrapReceipt) -> bool:
-        return self._client().verify_resources(receipt)
+        if len(self._project_receipts) <= 1:
+            return self._client_for(self._only_endpoint()).verify_resources(self._receipt_for(self._only_endpoint(), receipt))
+        return all(self._client_for(endpoint).verify_resources(item) for endpoint, item in sorted(self._project_receipts.items()))
+
+    def _only_endpoint(self) -> str:
+        if self._project_receipts:
+            return sorted(self._project_receipts)[0]
+        endpoints = self._endpoints()
+        return endpoints[0]
 
     def export_provider_state(self, receipt: BootstrapReceipt) -> Mapping[str, object]:
-        return self._client().export_provider_state(receipt)
+        if len(self._project_receipts) <= 1:
+            endpoint = self._only_endpoint()
+            return self._client_for(endpoint).export_provider_state(self._receipt_for(endpoint, receipt))
+        return {
+            "schema_version": 1,
+            "multi_project": True,
+            "projects": {
+                endpoint: {
+                    "receipt": item.model_dump(mode="json"),
+                    "provider_state": self._client_for(endpoint).export_provider_state(item),
+                }
+                for endpoint, item in sorted(self._project_receipts.items())
+            },
+        }
 
     def restore_provider_state(self, mapping: Mapping[str, object]) -> None:
-        self._client().restore_provider_state(mapping)
+        if mapping.get("multi_project"):
+            projects = mapping.get("projects")
+            if not isinstance(projects, Mapping):
+                raise BootstrapCliError("provider-state-invalid", "multi-project provider state is invalid", exit_code=BootstrapExitCode.CONFIG)
+            restored: dict[str, BootstrapReceipt] = {}
+            for endpoint, payload in sorted(projects.items()):
+                if not isinstance(payload, Mapping):
+                    raise BootstrapCliError("provider-state-invalid", "multi-project provider state entry is invalid", exit_code=BootstrapExitCode.CONFIG)
+                adapter = self._client_for(str(endpoint))
+                state = payload.get("provider_state")
+                if isinstance(state, Mapping):
+                    adapter.restore_provider_state(state)
+                receipt_payload = payload.get("receipt")
+                if isinstance(receipt_payload, Mapping):
+                    restored[str(endpoint)] = BootstrapReceipt.model_validate(dict(receipt_payload))
+            self._project_receipts = restored
+            return
+        if mapping.get("checkpoint"):
+            projects = mapping.get("projects")
+            if not isinstance(projects, Mapping):
+                raise BootstrapCliError("provider-state-invalid", "checkpoint provider state is invalid", exit_code=BootstrapExitCode.CONFIG)
+            for endpoint, snapshot in sorted(projects.items()):
+                if isinstance(snapshot, Mapping):
+                    self._client_for(str(endpoint)).restore_checkpoint(snapshot)
+            return
+        self._client(self._plan_input).restore_provider_state(mapping)
 
     def rollback(self, receipt: BootstrapReceipt) -> None:
-        self._client().rollback_resources(receipt)
+        if len(self._project_receipts) <= 1:
+            endpoint = self._only_endpoint()
+            self._client_for(endpoint).rollback_resources(self._receipt_for(endpoint, receipt))
+            return
+        for endpoint, item in sorted(self._project_receipts.items()):
+            self._client_for(endpoint).rollback_resources(item)
 
     def verify_rollback(self, receipt: BootstrapReceipt) -> bool:
-        return self._client().verify_rollback(receipt)
+        if len(self._project_receipts) <= 1:
+            endpoint = self._only_endpoint()
+            return self._client_for(endpoint).verify_rollback(self._receipt_for(endpoint, receipt))
+        return all(self._client_for(endpoint).verify_rollback(item) for endpoint, item in sorted(self._project_receipts.items()))
 
-    def inventory(self) -> Mapping[str, object]:
-        client = self._client(self._plan_input)
+    def inventory(self, *, endpoint: str | None = None) -> Mapping[str, object]:
+        target = endpoint or self._endpoints(self._plan_input)[0]
+        client = self._client_for(target)
         return {
             "agents": client.inventory_agents(),
             "datasets": client.inventory_datasets(),
@@ -264,6 +452,19 @@ class EvaluationPhaseDriver(PhaseDriver):
             "connections": client.inventory_connections(),
             "model_deployments": client.inventory_model_deployments(),
         }
+
+    def inventory_by_project(self) -> Mapping[str, Mapping[str, object]]:
+        return {endpoint: self.inventory(endpoint=endpoint) for endpoint in self._endpoints(self._plan_input)}
+
+    def onboarding_finalizations(self) -> Mapping[str, Mapping[str, object]]:
+        merged: dict[str, Mapping[str, object]] = {}
+        for adapter in self._active_providers():
+            merged.update(adapter.onboarding_finalizations())
+        return merged
+
+    def observe_agent_binding(self, *, repo_agent_id: str | None = None, agent_name: str, agent_version: str, source_root: str, package_root: str) -> Mapping[str, object]:
+        client = self._client_for_agent(repo_agent_id, self._plan_input) if repo_agent_id else self._client(self._plan_input)
+        return client.observe_agent_binding(agent_name=agent_name, agent_version=agent_version, source_root=source_root, package_root=package_root)
 
 
 def _contextual_plan_input(

@@ -9,7 +9,7 @@ The first supported release will provide:
 - local `discover -> plan -> apply` repository bootstrap
 - multi-agent registry and per-agent configuration
 - OIDC-only GitHub and Azure setup
-- evaluation dataset and evaluator onboarding
+- evaluation dataset and evaluator onboarding with a receipt-bound sidecar activation
 - Copilot optimize-job instructions and workflows
 - exact-commit merge-time Foundry deployment
 
@@ -30,6 +30,10 @@ See:
 
 - [Distribution and pinning](docs/distribution.md)
 - [Recommended branch protection](docs/branch-protection.md)
+- [Managed files](docs/managed-files.md)
+- [Identity and RBAC](docs/identity-rbac.md)
+- [Binding evidence](docs/binding-evidence.md)
+- [Evaluation onboarding](docs/evaluation-onboarding.md)
 
 ## License
 

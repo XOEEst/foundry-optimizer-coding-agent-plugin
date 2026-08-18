@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from foundry_opt.bootstrap.canonical import canonical_sha256
 from foundry_opt.bootstrap.errors import BootstrapConfigError
 from foundry_opt.bootstrap.input_contracts import BootstrapPlanInput, TrustedTemplateManifest, load_bootstrap_plan_input
+from tests.bootstrap.fakes.evaluation_contract import build_contract
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 MANIFEST_PATH = REPOSITORY_ROOT / 'src' / 'foundry_opt' / 'templates' / 'customer-repo' / '.foundry-opt' / 'managed-payloads.manifest.yaml'
@@ -87,7 +88,7 @@ def _sample_payload() -> dict[str, object]:
                 {
                     'schema_version': 1,
                     'alias': 'foundry-user',
-                    'role_definition_id': '/subscriptions/33333333-3333-3333-3333-333333333333/providers/Microsoft.Authorization/roleDefinitions/00000000-0000-0000-0000-000000000001',
+                    'role_definition_id': '/subscriptions/33333333-3333-3333-3333-333333333333/providers/Microsoft.Authorization/roleDefinitions/53ca6127-db72-4b80-b1b0-d745d6d5456d',
                     'scope': '/subscriptions/33333333-3333-3333-3333-333333333333/resourceGroups/example-rg/providers/Microsoft.CognitiveServices/accounts/example',
                 }
             ],
@@ -116,6 +117,12 @@ def _sample_payload() -> dict[str, object]:
                     'connection_name': 'foundry-default',
                     'target_sample_count': 25,
                     'replacement_intent': False,
+                    'onboarding_contract': build_contract(
+                        repo_agent_id='example-agent',
+                        root='agent',
+                        target_sample_count=25,
+                        agent_version='1.2.3',
+                    ).model_dump(mode='json'),
                 }
             ],
         },

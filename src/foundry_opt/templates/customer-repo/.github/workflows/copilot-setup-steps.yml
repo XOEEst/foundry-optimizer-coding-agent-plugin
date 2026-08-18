@@ -5,7 +5,7 @@ on:
   push:
     paths:
       - .github/workflows/copilot-setup-steps.yml
-      - .github/foundry-opt.lock.yml
+      - .foundry-opt/bootstrap.lock.json
       - .foundry-opt/registry.yaml
       - '**/.foundry/foundry-opt.yaml'
 
@@ -102,7 +102,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          foundry-opt bootstrap verify --pin .github/foundry-opt.lock.yml --checkout "$FOUNDRY_OPT_SHARED_ROOT" --receipt "$FOUNDRY_OPT_BOOTSTRAP_RECEIPT"
+          foundry-opt bootstrap verify --registry .foundry-opt/registry.yaml --uv-lock-sha256 74d7bb534c53e71a61ce197f3d5fa3169f2413373c2e42617280e78e83d6c681 --checkout "$FOUNDRY_OPT_SHARED_ROOT" --receipt "$FOUNDRY_OPT_BOOTSTRAP_RECEIPT"
           "$FOUNDRY_OPT_PACKAGE_ROOT/.venv/bin/python" - <<'PY'
           from pathlib import Path
           from foundry_opt.bootstrap.contracts import BootstrapSidecar, RootRegistry

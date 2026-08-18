@@ -361,14 +361,17 @@ def test_generated_samples_below_15_rejected_with_no_outputs() -> None:
     assert result['output_datasets'] == ()
 
 
-def test_traces_require_companion_source_and_content_safety_no_impersonation() -> None:
+def test_traces_require_companion_source_and_safety_bundle_no_impersonation() -> None:
     evaluator_jobs = _Jobs(create_results=[] , list_result=[_SdkValue({'name': 'fake-content-safety', 'version': '1', 'id': 'azureai://accounts/a/projects/p/evaluators/content_safety/versions/1', 'evaluator_type': 'custom'}), _SdkValue({'name': 'content-safety', 'version': '1', 'id': 'azureai://built-in/evaluators/content_safety', 'evaluator_type': 'builtin'})])
     adapter = FoundryAdapter('https://account.services.ai.azure.com/api/projects/demo', _Cred(), client=_Client(beta=_Beta(datasets=_Jobs(create_results=[]), evaluators=evaluator_jobs)))
     with pytest.raises(FoundryPrerequisiteError):
         adapter.create_evaluator_generation_job({'sources': [{'type': 'traces', 'agent_name': 'a', 'start_time': datetime(2026,1,1,tzinfo=UTC)}], 'model': 'gpt-4o', 'evaluator_name': 'rubric'})
-    resolved = adapter.resolve_builtin_content_safety()
-    assert resolved['evaluator_type'] == 'builtin'
-    assert resolved['id'] == 'azureai://built-in/evaluators/content_safety'
+    # A custom evaluator that merely *looks* like content safety is never treated as a
+    # built-in guardrail; only the real built-in entry is resolved.
+    resolved = adapter.resolve_safety_bundle()
+    assert [item['id'] for item in resolved] == ['azureai://built-in/evaluators/content_safety']
+    assert resolved[0]['evaluator_type'] == 'builtin'
+    assert resolved[0]['safety_name'] == 'content_safety'
 
 
 def test_plan_apply_rollback_lifecycle_and_canonical_operation_ids() -> None:

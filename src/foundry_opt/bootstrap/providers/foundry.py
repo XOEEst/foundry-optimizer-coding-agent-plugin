@@ -5,14 +5,20 @@ from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
+import io
 import json
+import math
+import re
 import time
 from typing import Any
+import zipfile
 
 from azure.ai.projects import AIProjectClient
 from azure.ai.projects.models import (
     AgentDataGenerationJobSource,
     AgentEvaluatorGenerationJobSource,
+    AzureAIAgentTargetParam,
+    AzureAIDataSourceConfig,
     DataGenerationJob,
     DataGenerationJobInputs,
     DataGenerationJobOutputOptions,
@@ -26,7 +32,9 @@ from azure.ai.projects.models import (
     PromptDataGenerationJobSource,
     PromptEvaluatorGenerationJobSource,
     SimpleQnADataGenerationJobOptions,
+    TargetCompletionEvalRunDataSource,
     TaskGenerationDataGenerationJobOptions,
+    TestingCriterionAzureAIEvaluator,
     TracesDataGenerationJobOptions,
     TracesDataGenerationJobSource,
     TracesEvaluatorGenerationJobSource,
@@ -36,18 +44,63 @@ from azure.core.exceptions import ClientAuthenticationError, HttpResponseError, 
 import openai
 
 from foundry_opt.bootstrap.canonical import safe_persisted_document
-from foundry_opt.bootstrap.contracts import BootstrapAction, BootstrapPlan, BootstrapReceipt, FingerprintRecord, RedactedStatusInfo
+from foundry_opt.bootstrap.contracts import (
+    BootstrapAction,
+    BootstrapPlan,
+    BootstrapReceipt,
+    EvaluatorNormalization,
+    EvaluatorReference,
+    FingerprintRecord,
+    RedactedStatusInfo,
+    ResolvedEvaluator,
+    ResolvedWeightedObjective,
+)
 from foundry_opt.bootstrap.errors import BootstrapConfigError, BootstrapProviderError
-from foundry_opt.bootstrap.evaluation.core import ActivationCleanup, ActivationRun, validate_activation
+from foundry_opt.bootstrap.discovery import fingerprint_files, is_fingerprintable_path
+from foundry_opt.bootstrap.evaluation.core import (
+    ActivationCleanup,
+    ActivationRun,
+    LEGACY_AGGREGATE_SAFETY_ID,
+    LEGACY_AGGREGATE_SAFETY_NAME,
+    REQUIRED_SAFETY_EVALUATORS,
+    assert_required_safety_coverage,
+    canonical_safety_name,
+    compute_split_lineage_hash,
+    split_dataset_rows,
+    validate_activation,
+    validate_generated_rubric,
+)
+from foundry_opt.bootstrap.evaluation.execution import (
+    ActivationCaseFinalization,
+    ActivationFinalization,
+    DatasetFinalization,
+    DefinitionFinalization,
+    EvaluationFinalization,
+    EvaluationOnboardingRequest,
+    EvaluatorFinalization,
+    SplitFinalization,
+)
 from foundry_opt.models import FrozenModel
 from foundry_opt.optimize_job.safety import UnsafeCheckpointContentError
 
-_CONTENT_SAFETY_ID = 'azureai://built-in/evaluators/content_safety'
+_CONTENT_SAFETY_ID = LEGACY_AGGREGATE_SAFETY_ID  # legacy aggregate, honored only when a project returns it
 _IMMUTABLE_DATASET_URI_PREFIX = 'azureai://accounts/'
+_DATASET_URI_RE = re.compile(r'^azureai://accounts/[^/]+/projects/[^/]+/data/(?P<name>[^/]+)/versions/(?P<version>[^/]+)$')
+_EVALUATOR_URI_RE = re.compile(r'^azureai://accounts/[^/]+/projects/[^/]+/evaluators/(?P<name>[^/]+)/versions/(?P<version>[^/]+)$')
 _PROVIDER_STATE_SCHEMA_VERSION = 1
 _MAX_PROVIDER_STATE_BYTES = 32768
 _MAX_PROVIDER_STATE_RESOURCES = 128
 _OWNERSHIP_TAG = 'foundry_opt_operation'
+# Real cloud-evaluation surface: `azure_ai_source` definitions with `azure_ai_evaluator`
+# graders, `azure_ai_target_completions` runs over immutable split datasets, and
+# `azure_ai_synthetic_data_gen_preview` runs for synthetic dataset generation.
+_EVAL_SCENARIO = 'synthetic_data_gen_preview'
+_SYNTHETIC_ITEM_GENERATION_TYPE = 'synthetic_data_gen_preview'
+_ITEM_QUERY_REFERENCE = 'item.query'
+_EVALUATOR_DATA_MAPPING = {'query': '{{item.query}}', 'response': '{{sample.output_text}}'}
+_MAX_RUN_OUTPUT_ITEMS = 5000
+_MAX_AGENT_CODE_BYTES = 32 * 1024 * 1024
+_MAX_AGENT_CODE_ENTRIES = 2000
 
 # Evaluation-phase BootstrapAction.kind values and their fixed positional `diagnostics`
 # tuple[str, ...] layouts. Every element is a plain identifier/enum/number-as-string; no raw
@@ -58,7 +111,13 @@ _OWNERSHIP_TAG = 'foundry_opt_operation'
 #   "evaluation_definition" -> (role, definition_name, dataset_name, dataset_version, evaluator_name, evaluator_version, evaluator_kind, model_deployment)
 #   "activation_run"        -> (development_definition_name, validating_definition_name, draft_agent_name, draft_agent_version, model_deployment, bundle_objective_hash, split_lineage_hash, cases_and_guardrails_json)
 #   "activation_cleanup"    -> (draft_agent_name, draft_agent_version)
-_SUPPORTED_EVALUATION_ACTION_KINDS = ('dataset', 'evaluator', 'evaluation_definition', 'activation_run', 'activation_cleanup')
+#   "evaluation_onboarding" -> (repo_agent_id, contract_hash, approved_onboarding_contract_json)
+#
+# `evaluation_onboarding` is the composite, approval-bound action the plan factory emits: one
+# per agent. It authorizes the staged provider state machine below (inventory -> generation ->
+# split -> evaluator -> definitions -> activation -> cleanup). The other kinds remain supported
+# as the primitive operations that machine executes.
+_SUPPORTED_EVALUATION_ACTION_KINDS = ('dataset', 'evaluator', 'evaluation_definition', 'activation_run', 'activation_cleanup', 'evaluation_onboarding')
 _EVALUATOR_KINDS = ('builtin', 'custom')
 _EVALUATOR_PROVENANCES = ('reused_existing', 'auto_generated_unreviewed')
 _DEFINITION_ROLES = ('development', 'validating')
@@ -122,6 +181,21 @@ class _CleanupActionRequest:
     draft_agent_version: str
 
 
+@dataclass(frozen=True, slots=True)
+class _ResourceDraft:
+    """A resource touched by one onboarding stage, before rollback ordering is assigned."""
+
+    suffix: str
+    resource_id: str
+    name: str
+    version: str
+    kind: str
+    disposition: str
+    fingerprint: str | None = None
+    resource_type: str | None = None
+    ownership_token: str | None = None
+
+
 def _as_mapping(value: object) -> Mapping[str, object]:
     if isinstance(value, Mapping):
         return value
@@ -154,6 +228,78 @@ def _canonical_json(value: object) -> str:
 
 def _fingerprint_dataset_content(dataset_content_uri: str, dataset_type: str) -> str:
     return hashlib.sha256(_canonical_json({'data_uri': dataset_content_uri, 'type': dataset_type}).encode('utf-8')).hexdigest()
+
+
+def _sdk_mapping(value: object) -> Mapping[str, object]:
+    """Normalize any SDK response value (TypedDict, azure model, pydantic model) to a mapping."""
+
+    if value is None:
+        return {}
+    if isinstance(value, Mapping):
+        return {str(key): _plain(item) for key, item in value.items()}
+    for accessor in ('model_dump', 'as_dict', 'to_dict', 'dict'):
+        method = getattr(value, accessor, None)
+        if callable(method):
+            try:
+                data = method(mode='json') if accessor == 'model_dump' else method()
+            except TypeError:
+                data = method()
+            if isinstance(data, Mapping):
+                return {str(key): _plain(item) for key, item in data.items()}
+    raise FoundryPrerequisiteError('evaluation definition response is not a readable mapping', kind='prerequisite')
+
+
+def _definition_signature(data_source_config: Mapping[str, object], testing_criteria: Sequence[Mapping[str, object]]) -> str:
+    """Canonical signature of a definition: data source config plus every grader binding.
+
+    Only the fields that decide what is measured participate, so a definition may only be
+    adopted when it measures exactly the approved evaluators the same way.
+    """
+
+    criteria = [
+        {
+            'type': str(item.get('type') or ''),
+            'name': str(item.get('name') or ''),
+            'evaluator_name': str(item.get('evaluator_name') or ''),
+            'evaluator_version': str(item.get('evaluator_version') or ''),
+            'data_mapping': {str(key): str(value) for key, value in (item.get('data_mapping') or {}).items()} if isinstance(item.get('data_mapping'), Mapping) else {},
+            'initialization_parameters': {str(key): _plain(value) for key, value in item.get('initialization_parameters').items()} if isinstance(item.get('initialization_parameters'), Mapping) else {},
+        }
+        for item in testing_criteria
+    ]
+    criteria.sort(key=lambda item: (item['name'], item['evaluator_name'], item['evaluator_version']))
+    payload = {
+        'data_source_config': {str(key): _plain(value) for key, value in data_source_config.items()},
+        'testing_criteria': criteria,
+    }
+    return hashlib.sha256(_canonical_json(payload).encode('utf-8')).hexdigest()
+
+
+def _repo_relative_archive_path(name: str, *, root: str) -> str | None:
+    """Map an agent code archive entry onto its repository-relative path under `root`.
+
+    Returns `None` for entries that cannot be trusted (absolute, traversing, or empty), so a
+    malicious or malformed archive can never inject paths outside the reviewed root.
+    """
+
+    normalized = name.replace('\\', '/').strip()
+    if not normalized or normalized.endswith('/'):
+        return None
+    if normalized.startswith('/') or ':' in normalized.split('/')[0]:
+        return None
+    parts = [part for part in normalized.split('/') if part not in ('', '.')]
+    if not parts or any(part == '..' for part in parts):
+        return None
+    if root == '.':
+        return '/'.join(parts)
+    return '/'.join([*root.split('/'), *parts])
+
+
+def _short_reason(exc: BaseException) -> str:
+    """Return a bounded, redacted reason for a contract/validation failure."""
+
+    text = str(exc).replace('\n', ' ').strip()
+    return text[:200] if text else type(exc).__name__
 
 
 def _sanitize_message(exc: BaseException) -> str:
@@ -278,7 +424,7 @@ class FoundryCapabilityProbe(FrozenModel):
 
 
 class FoundryAdapter:
-    def __init__(self, project_endpoint: str, credential: TokenCredential, *, client: object | None = None, time_source: Callable[[], float] | None = None, sleep: Callable[[float], None] | None = None, default_poll_interval: float = 1.0) -> None:
+    def __init__(self, project_endpoint: str, credential: TokenCredential, *, client: object | None = None, time_source: Callable[[], float] | None = None, sleep: Callable[[float], None] | None = None, default_poll_interval: float = 1.0, split_writer: Callable[..., str] | None = None, checkpoint: Callable[[Mapping[str, object]], None] | None = None) -> None:
         self._project_endpoint = project_endpoint
         self._client = client if client is not None else AIProjectClient(project_endpoint, credential)
         self._time = time_source or time.monotonic
@@ -286,6 +432,75 @@ class FoundryAdapter:
         self._default_poll_interval = default_poll_interval
         self._provider_state: dict[str, object] | None = None
         self._openai: object | None = None
+        self._split_writer = split_writer
+        self._onboarding: dict[str, dict[str, object]] = {}
+        self._checkpoint = checkpoint
+
+    @property
+    def project_endpoint(self) -> str:
+        return self._project_endpoint
+
+    def set_checkpoint(self, checkpoint: Callable[[Mapping[str, object]], None] | None) -> None:
+        """Install the durable sink used to persist in-flight generation handles."""
+
+        self._checkpoint = checkpoint
+
+    def onboarding_ledger_snapshot(self) -> Mapping[str, object]:
+        """Restart-relevant ledger of stages and in-flight generation handles."""
+
+        return json.loads(_canonical_json({'schema_version': _PROVIDER_STATE_SCHEMA_VERSION, 'onboarding': self._onboarding}))
+
+    def _publish_checkpoint(self) -> None:
+        if self._checkpoint is None:
+            return
+        self._checkpoint(self.onboarding_ledger_snapshot())
+
+    def _record_pending_handle(self, ledger: Mapping[str, object], stage: str, handle: 'FoundryOperationHandle') -> None:
+        """Persist an in-flight generation handle before the first poll.
+
+        A crash between job submission and completion must resume the recorded continuation
+        instead of resubmitting, so the handle is durably checkpointed first.
+        """
+
+        stages = ledger.get('stages')
+        if not isinstance(stages, dict):
+            stages = {}
+            ledger['stages'] = stages  # type: ignore[index]
+        entry = stages.get(stage)
+        detail = dict(entry) if isinstance(entry, Mapping) else {}
+        detail['status'] = 'in_flight'
+        detail['handle'] = {
+            'operation_id': handle.operation_id,
+            'job_kind': handle.job_kind,
+            'continuation_token': handle.continuation_token,
+            'polling_url': handle.polling_url,
+        }
+        stages[stage] = detail
+        self._publish_checkpoint()
+
+    def _pending_handle(self, ledger: Mapping[str, object], stage: str, *, job_kind: str) -> 'FoundryOperationHandle | None':
+        stages = ledger.get('stages')
+        if not isinstance(stages, Mapping):
+            return None
+        entry = stages.get(stage)
+        if not isinstance(entry, Mapping) or entry.get('status') == 'completed':
+            return None
+        handle = entry.get('handle')
+        if not isinstance(handle, Mapping):
+            return None
+        token = handle.get('continuation_token')
+        operation_id = handle.get('operation_id')
+        if not isinstance(token, str) or not token or not isinstance(operation_id, str) or not operation_id:
+            return None
+        if str(handle.get('job_kind') or '') != job_kind:
+            return None
+        return FoundryOperationHandle(
+            operation_id=operation_id,
+            job_kind=job_kind,
+            continuation_token=token,
+            polling_url=str(handle.get('polling_url')) if isinstance(handle.get('polling_url'), str) else None,
+            created=False,
+        )
 
     def _ownership_token(self, operation_id: str, action_id: str) -> str:
         return hashlib.sha256(_canonical_json({'operation_id': operation_id, 'action_id': action_id, 'project_endpoint': self._project_endpoint}).encode('utf-8')).hexdigest()[:32]
@@ -321,6 +536,7 @@ class FoundryAdapter:
             'binding': self._binding_payload(receipt_hash=str(state.get('receipt_hash') or ''), operation_id=str(state.get('operation_id') or ''), repository_identity=str(state.get('repository_identity') or ''), plan_hash=str(state.get('plan_hash') or '')),
             'resources': state.get('resources'),
             'rollback_order': state.get('rollback_order'),
+            'onboarding': state.get('onboarding'),
         }
         return hashlib.sha256(_canonical_json(payload).encode('utf-8')).hexdigest()
 
@@ -357,6 +573,22 @@ class FoundryAdapter:
         for action in actions:
             if action.kind not in _SUPPORTED_EVALUATION_ACTION_KINDS:
                 raise FoundryUnsupportedCapabilityError(f'unsupported evaluation action kind: {action.kind}', kind='unsupported_preview')
+            if action.kind == 'evaluation_onboarding':
+                contract = self._onboarding_request_from_action(action)
+                assert contract.dataset_plan is not None and contract.evaluator_plan is not None
+                assert contract.definition_plan is not None and contract.activation_plan is not None
+                for role in _DEFINITION_ROLES:
+                    order += 1
+                    worst_case_resources.append(_ResourceRecord(action_id=f'{action.action_id}:dataset:{role}', resource_id=f'{_IMMUTABLE_DATASET_URI_PREFIX}accounts-max/projects/max/data/max-dataset/versions/{contract.dataset_plan.requested_version}', name='max-dataset', version=contract.dataset_plan.requested_version, kind='dataset', disposition='created', fingerprint=_fingerprint_dataset_content('https://max', contract.dataset_plan.dataset_type), rollback_order=order, resource_type=contract.dataset_plan.dataset_type, ownership_token=self._ownership_token(plan.operation_id, action.action_id)))
+                for suffix in ('objective', 'guardrail'):
+                    order += 1
+                    worst_case_resources.append(_ResourceRecord(action_id=f'{action.action_id}:evaluator:{suffix}', resource_id=f'azureai://accounts-max/projects/max/evaluators/{contract.evaluator_plan.requested_name}/versions/{contract.evaluator_plan.requested_version}', name=contract.evaluator_plan.requested_name, version=contract.evaluator_plan.requested_version, kind='evaluator', disposition='created', fingerprint=contract.evaluator_plan.generation_job_id, rollback_order=order, resource_type='custom', ownership_token=None))
+                for role in _DEFINITION_ROLES:
+                    order += 1
+                    worst_case_resources.append(_ResourceRecord(action_id=f'{action.action_id}:definition:{role}', resource_id=f'eval-max-{role}', name=f'max-definition-{role}', version=role, kind='evaluation_definition', disposition='created', fingerprint=None, rollback_order=order, resource_type=None, ownership_token=None))
+                    order += 1
+                    worst_case_resources.append(_ResourceRecord(action_id=f'{action.action_id}:activation-run:{role}', resource_id=f'run-max-{role}', name=f'max-definition-{role}', version=role, kind='activation_run', disposition='created', fingerprint=None, rollback_order=order, resource_type=None, ownership_token=None))
+                continue
             if action.kind == 'dataset':
                 dataset_name, dataset_version, dataset_uri, dataset_type = self._dataset_request_from_action(action)
                 order += 1
@@ -509,6 +741,97 @@ class FoundryAdapter:
         except Exception as exc:
             raise self._classify_error(exc) from exc
 
+    def observe_agent_binding(self, *, agent_name: str, agent_version: str, source_root: str, package_root: str) -> Mapping[str, object]:
+        """Observe a deployed immutable agent version and derive content fingerprints.
+
+        The version's code zip is downloaded and hashed entry by entry, so the resulting
+        fingerprints are comparable to the repository fingerprints discovery computes locally.
+        Service metadata is never trusted on its own: when the version publishes a
+        `content_hash`, the downloaded bytes must reproduce it exactly or the observation
+        fails closed. Only paths and digests are returned; file content never leaves here.
+        """
+
+        getter = getattr(self._client.agents, 'get_version', None)
+        downloader = getattr(self._client.agents, 'download_code', None)
+        if not callable(getter) or not callable(downloader):
+            raise FoundryUnsupportedCapabilityError('agent version code download is unavailable', kind='unsupported_preview')
+        try:
+            details = _as_mapping(getter(agent_name, agent_version))
+        except ResourceNotFoundError as exc:
+            raise FoundryPrerequisiteError(f'agent version {agent_name}:{agent_version} was not found', kind='prerequisite') from exc
+        except Exception as exc:
+            raise self._classify_error(exc) from exc
+        observed_version = details.get('version')
+        if isinstance(observed_version, str) and observed_version and observed_version != agent_version:
+            raise FoundryPrerequisiteError('agent version response does not match the requested version', kind='prerequisite')
+        code_configuration = details.get('code_configuration') or details.get('codeConfiguration') or {}
+        declared_hash = _as_mapping(code_configuration).get('content_hash') or _as_mapping(code_configuration).get('contentHash')
+        try:
+            chunks = downloader(agent_name, agent_version=agent_version)
+        except ResourceNotFoundError as exc:
+            raise FoundryPrerequisiteError(f'agent version {agent_name}:{agent_version} publishes no code archive', kind='prerequisite') from exc
+        except Exception as exc:
+            raise self._classify_error(exc) from exc
+        payload = bytearray()
+        try:
+            for chunk in chunks:
+                if not isinstance(chunk, (bytes, bytearray)):
+                    raise FoundryPrerequisiteError('agent code download returned a non-binary chunk', kind='prerequisite')
+                payload.extend(chunk)
+                if len(payload) > _MAX_AGENT_CODE_BYTES:
+                    raise FoundryPrerequisiteError('agent code archive exceeds the supported size budget', kind='prerequisite')
+        except FoundryAdapterError:
+            raise
+        except Exception as exc:
+            raise self._classify_error(exc) from exc
+        if not payload:
+            raise FoundryPrerequisiteError('agent code download returned no content', kind='prerequisite')
+        content_hash = hashlib.sha256(bytes(payload)).hexdigest()
+        verified = False
+        if isinstance(declared_hash, str) and declared_hash:
+            if declared_hash.split(':')[-1].casefold() != content_hash:
+                raise FoundryPrerequisiteError('downloaded agent code does not match the published content hash', kind='prerequisite')
+            verified = True
+        digests = self._agent_code_digests(bytes(payload), source_root=source_root, package_root=package_root)
+        return {
+            'agent_name': str(details.get('name') or agent_name),
+            'agent_version': agent_version,
+            'code_content_hash': content_hash,
+            'code_content_hash_verified': verified,
+            'source_fingerprint': digests[0],
+            'package_fingerprint': digests[1],
+            'observed_file_count': digests[2],
+        }
+
+    def _agent_code_digests(self, archive: bytes, *, source_root: str, package_root: str) -> tuple[str, str, int]:
+        source_files: dict[str, str] = {}
+        package_files: dict[str, str] = {}
+        try:
+            with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
+                entries = bundle.infolist()
+                if len(entries) > _MAX_AGENT_CODE_ENTRIES:
+                    raise FoundryPrerequisiteError('agent code archive exceeds the supported entry count', kind='prerequisite')
+                total = 0
+                for entry in entries:
+                    if entry.is_dir():
+                        continue
+                    total += entry.file_size
+                    if total > _MAX_AGENT_CODE_BYTES:
+                        raise FoundryPrerequisiteError('agent code archive expands beyond the supported size budget', kind='prerequisite')
+                    for root, sink in ((source_root, source_files), (package_root, package_files)):
+                        relative = _repo_relative_archive_path(entry.filename, root=root)
+                        if relative is None or not is_fingerprintable_path(relative):
+                            continue
+                        sink[relative] = hashlib.sha256(bundle.read(entry)).hexdigest()
+        except zipfile.BadZipFile as exc:
+            raise FoundryPrerequisiteError('agent code download is not a readable zip archive', kind='prerequisite') from exc
+        if not source_files or not package_files:
+            raise FoundryPrerequisiteError('agent code archive contains no fingerprintable files', kind='prerequisite')
+        try:
+            return fingerprint_files(source_files), fingerprint_files(package_files), len(source_files)
+        except BootstrapConfigError as exc:
+            raise FoundryPrerequisiteError(f'agent code fingerprint failed: {exc}', kind='prerequisite') from exc
+
     def inventory_datasets(self) -> tuple[Mapping[str, object], ...]:
         try:
             return tuple({'name': _as_mapping(item).get('name'), 'version': _as_mapping(item).get('version'), 'id': _as_mapping(item).get('id'), 'type': _as_mapping(item).get('type'), 'raw': _plain(_as_mapping(item))} for item in self._client.datasets.list())
@@ -599,8 +922,39 @@ class FoundryAdapter:
             'ownership_token': ownership_token,
         }
 
-    def resolve_builtin_content_safety(self) -> Mapping[str, object]:
-        return self.resolve_builtin_evaluator_by_id(_CONTENT_SAFETY_ID)
+    def resolve_safety_bundle(self, required: Sequence[str] | None = None) -> tuple[Mapping[str, object], ...]:
+        """Resolve the built-in safety evaluators this project actually publishes.
+
+        Live projects expose individual registry evaluators such as
+        `azureml://registries/azureml/evaluators/builtin.violence/versions/3`; there is no
+        aggregate `content_safety` built-in in the catalogs observed so far. The legacy
+        aggregate is honored only when a project really returns it. A project that cannot
+        supply the required bundle fails closed, which blocks activation.
+        """
+
+        required_names = tuple(required or REQUIRED_SAFETY_EVALUATORS)
+        resolved: dict[str, Mapping[str, object]] = {}
+        for item in self.inventory_evaluators(include_builtin=True):
+            if item.get('evaluator_type') != 'builtin':
+                continue
+            evaluator_id = item.get('id')
+            if not isinstance(evaluator_id, str) or not evaluator_id:
+                continue
+            name = canonical_safety_name(evaluator_id, item.get('name') if isinstance(item.get('name'), str) else None)
+            if name is None or name in resolved:
+                continue
+            resolved[name] = item
+        if LEGACY_AGGREGATE_SAFETY_NAME in resolved:
+            aggregate = resolved[LEGACY_AGGREGATE_SAFETY_NAME]
+            return ({**aggregate, 'safety_name': LEGACY_AGGREGATE_SAFETY_NAME},)
+        missing = [name for name in required_names if name not in resolved]
+        if missing:
+            raise FoundryUnsupportedCapabilityError(
+                'required built-in safety evaluators are unavailable in this project: ' + ', '.join(sorted(missing)),
+                kind='unsupported_preview',
+            )
+        ordered = [*required_names, *(name for name in sorted(resolved) if name not in required_names)]
+        return tuple({**resolved[name], 'safety_name': name} for name in ordered)
 
     def resolve_builtin_evaluator_by_id(self, evaluator_id: str) -> Mapping[str, object]:
         for item in self.inventory_evaluators(include_builtin=True):
@@ -675,20 +1029,24 @@ class FoundryAdapter:
             return None
         except Exception as exc:
             raise self._classify_error(exc) from exc
-        return {'id': getattr(item, 'id', None), 'name': getattr(item, 'name', None)}
+        return {
+            'id': getattr(item, 'id', None),
+            'name': getattr(item, 'name', None),
+            'data_source_config': _sdk_mapping(getattr(item, 'data_source_config', None)),
+            'testing_criteria': [_sdk_mapping(entry) for entry in (getattr(item, 'testing_criteria', None) or ())],
+        }
 
     def create_or_adopt_evaluation_definition(self, request: _DefinitionActionRequest) -> Mapping[str, object]:
-        """Create or adopt an immutable evaluation definition (OpenAI-compatible Evals `eval`).
+        """Create or adopt an immutable evaluation definition for the legacy granular action.
 
-        NOTE (honest scope limitation): the public `openai` (2.53.0) type surface exposes no
-        Foundry-specific testing criterion that binds an immutable Foundry evaluator id as a
-        grader. The `python` grader used here is a structurally valid, real, executable
-        container (confirmed schema: name/source/type) that echoes back a precomputed,
-        already-scored structural result supplied at run time by `run_activation_smoke`; it is
-        *not* an independent re-implementation of the referenced Foundry evaluator's scoring
-        behavior. Semantic fidelity to the Foundry evaluator's real grading logic is
-        unconfirmed and should be revisited once an official Foundry<->Evals binding schema is
-        published.
+        DEPRECATED SURFACE. The plan factory emits a single composite `evaluation_onboarding`
+        action whose definitions are created by `create_or_adopt_onboarding_definition`, which
+        binds real `azure_ai_evaluator` (`TestingCriterionAzureAIEvaluator`) graders against an
+        `azure_ai_source` data source config. This granular kind is retained only so plans
+        created before contract v3 can still be resumed/rolled back; its `python` grader is a
+        structurally valid, executable container that echoes the precomputed structural result
+        supplied by `run_activation_smoke` and performs no independent scoring. Do not use it
+        for new plans.
         """
         client = self._openai_client()
         existing = next((item for item in self.list_evaluation_definitions() if item.get('name') == request.definition_name), None)
@@ -729,7 +1087,7 @@ class FoundryAdapter:
     def get_activation_run(self, run_id: str, definition_id: str) -> Mapping[str, object] | None:
         client = self._openai_client()
         try:
-            item = client.evals.runs.retrieve(run_id, eval_id=definition_id)
+            item = client.evals.runs.retrieve(run_id=run_id, eval_id=definition_id)
         except openai.NotFoundError:
             return None
         except Exception as exc:
@@ -791,15 +1149,18 @@ class FoundryAdapter:
         development_definition_id: str,
         validating_definition_id: str,
     ) -> Mapping[str, object]:
-        """Submit the activation smoke run and gate on structural/execution/headroom/Content Safety.
+        """Submit the legacy structural activation audit run and gate on the same fail-closed rules.
+
+        DEPRECATED SURFACE, retained for pre-v3 plan resume. The composite onboarding machine
+        submits a real `azure_ai_target_completions` run (see `_target_completion_data_source`)
+        against the immutable split dataset with an `azure_ai_agent` target, then reads the
+        service-produced per-criterion result counts via `activation_measurements`.
 
         Gating uses `evaluation.core.validate_activation` over the caller-supplied structural
         `cases`/`guardrails` (plain numbers/booleans only -- no raw prompts, responses, traces,
         or dataset rows are ever transmitted or persisted by this method). The corresponding
-        live Foundry Evals run submission is a durable, real, confirmed-schema audit record
-        (JSONL `file_content` data source) of those same structural results; it does not itself
-        perform independent scoring (see `create_or_adopt_evaluation_definition` docstring for
-        the precise, honestly-flagged scope limitation).
+        run submission is a durable audit record (JSONL `file_content` data source) of those
+        same structural results; it does not itself perform independent scoring.
 
         Raises `FoundryPrerequisiteError` (fail-closed) if the gates do not pass. No sidecar or
         receipt may treat a raised exception as success.
@@ -824,7 +1185,7 @@ class FoundryAdapter:
             ]
             data_source = {'type': 'jsonl', 'source': {'type': 'file_content', 'content': content}}
             try:
-                run = client.evals.runs.create(definition_id, data_source=data_source, name=f'{phase}-activation-smoke')
+                run = client.evals.runs.create(eval_id=definition_id, data_source=data_source, name=f'{phase}-activation-smoke')
             except Exception as exc:
                 raise self._classify_error(exc) from exc
             run_id = getattr(run, 'id', None)
@@ -1035,6 +1396,1008 @@ class FoundryAdapter:
     def plan_resources(self, plan: BootstrapPlan) -> tuple[BootstrapAction, ...]:
         return tuple(action for action in plan.actions if action.phase == 'evaluations')
 
+    # ------------------------------------------------------------------
+    # Composite, approval-bound onboarding: staged provider state machine
+    # ------------------------------------------------------------------
+
+    def _onboarding_request_from_action(self, action: BootstrapAction) -> EvaluationOnboardingRequest:
+        payload = action.diagnostics
+        if len(payload) != 3:
+            raise FoundryPrerequisiteError('evaluation_onboarding action diagnostics are incomplete', kind='prerequisite')
+        repo_agent_id, contract_hash, contract_json = (str(item) for item in payload)
+        if not repo_agent_id or not contract_hash:
+            raise FoundryPrerequisiteError('evaluation_onboarding action identity fields must be non-empty', kind='prerequisite')
+        if len(contract_json.encode('utf-8')) > _MAX_PROVIDER_STATE_BYTES:
+            raise FoundryPrerequisiteError('evaluation_onboarding contract exceeds safe persisted bound', kind='prerequisite')
+        try:
+            decoded = json.loads(contract_json)
+        except (TypeError, ValueError) as exc:
+            raise FoundryPrerequisiteError('evaluation_onboarding contract is not valid JSON', kind='prerequisite') from exc
+        if not isinstance(decoded, Mapping):
+            raise FoundryPrerequisiteError('evaluation_onboarding contract must be a mapping', kind='prerequisite')
+        try:
+            safe_persisted_document(decoded)
+        except UnsafeCheckpointContentError as exc:
+            raise FoundryPrerequisiteError('evaluation_onboarding contract contains prohibited content', kind='prerequisite') from exc
+        try:
+            contract = EvaluationOnboardingRequest.model_validate(dict(decoded))
+        except (BootstrapConfigError, Exception) as exc:  # noqa: B014 - pydantic wraps config errors
+            raise FoundryPrerequisiteError(f'evaluation_onboarding contract is invalid: {_short_reason(exc)}', kind='prerequisite') from None
+        if contract.contract_hash != contract_hash or contract.repo_agent_id != repo_agent_id:
+            raise FoundryPrerequisiteError('evaluation_onboarding contract does not match its approved identity', kind='prerequisite')
+        if contract.stopped:
+            raise FoundryPrerequisiteError('stopped agents must not carry an onboarding action', kind='prerequisite')
+        return contract
+
+    def _parse_dataset_uri(self, dataset_id: str) -> tuple[str, str]:
+        match = _DATASET_URI_RE.fullmatch(dataset_id)
+        if match is None:
+            raise FoundryPrerequisiteError('reviewed dataset identifier is not an immutable dataset version', kind='prerequisite')
+        return match.group('name'), match.group('version')
+
+    def _parse_evaluator_uri(self, evaluator_id: str) -> tuple[str, str]:
+        match = _EVALUATOR_URI_RE.fullmatch(evaluator_id)
+        if match is None:
+            raise FoundryPrerequisiteError('reviewed evaluator identifier is not an immutable evaluator version', kind='prerequisite')
+        return match.group('name'), match.group('version')
+
+    def dataset_case_index(self, dataset_name: str, dataset_version: str) -> tuple[Mapping[str, object], ...]:
+        """Return stable case identifiers for a dataset version.
+
+        NOTE (narrow adapter seam): only `row_id`, optional `group_id`, and optional `category`
+        are ever returned; no prompts, responses, or row content cross this boundary. A real
+        deployment satisfies this by streaming the registered JSONL's stable identifier fields.
+        Environments that cannot expose an index fail closed rather than guessing a split.
+        """
+        getter = getattr(self._client.datasets, 'get_case_index', None)
+        if not callable(getter):
+            raise FoundryUnsupportedCapabilityError('dataset case index unavailable', kind='unsupported_preview')
+        try:
+            rows = getter(dataset_name, dataset_version)
+        except Exception as exc:
+            raise self._classify_error(exc) from exc
+        index: list[Mapping[str, object]] = []
+        for item in rows or ():
+            entry = _as_mapping(item)
+            row_id = entry.get('row_id') or entry.get('id')
+            if not isinstance(row_id, str) or not row_id:
+                raise FoundryPrerequisiteError('dataset case index entries require a stable row identifier', kind='prerequisite')
+            normalized: dict[str, object] = {'row_id': row_id}
+            for optional in ('group_id', 'category'):
+                value = entry.get(optional)
+                if isinstance(value, str) and value:
+                    normalized[optional] = value
+            index.append(normalized)
+        if not index:
+            raise FoundryPrerequisiteError('dataset case index is empty', kind='prerequisite')
+        return tuple(index)
+
+    def materialize_split_dataset(self, *, source_dataset: Mapping[str, object], role: str, case_ids: Sequence[str], dataset_name: str, dataset_version: str) -> str:
+        """Return the content URI of a materialized split of `source_dataset`.
+
+        NOTE (narrow adapter seam): materialization is delegated to an injected writer that
+        streams only the selected stable case identifiers from the source dataset into a new
+        blob under the project connection and returns its URI. The writer never returns row
+        content to this adapter. When no writer is configured the operation fails closed
+        instead of registering two dataset versions that point at unsplit content.
+        """
+        if self._split_writer is None:
+            raise FoundryUnsupportedCapabilityError('dataset split materialization is unavailable', kind='unsupported_preview')
+        try:
+            uri = self._split_writer(
+                source_data_uri=str(source_dataset.get('data_uri') or ''),
+                role=role,
+                case_ids=tuple(case_ids),
+                dataset_name=dataset_name,
+                dataset_version=dataset_version,
+            )
+        except Exception as exc:
+            raise self._classify_error(exc) from exc
+        if not isinstance(uri, str) or not uri.startswith('https://'):
+            raise FoundryPrerequisiteError('split materialization returned an invalid content URI', kind='prerequisite')
+        return uri
+
+    def _generated_rubric_document(self, evaluator_name: str, evaluator_version: str) -> Mapping[str, object]:
+        version = self.get_evaluator_version(evaluator_name, evaluator_version)
+        if version is None:
+            raise FoundryPrerequisiteError('generated evaluator version does not exist', kind='prerequisite')
+        raw = version.get('raw')
+        rubric = raw.get('rubric') if isinstance(raw, Mapping) else None
+        if not isinstance(rubric, Mapping):
+            raise FoundryPrerequisiteError('generated rubric structure is unavailable for validation', kind='prerequisite')
+        return rubric
+
+    def _await_activation_run(self, run_id: str, definition_id: str, *, deadline_monotonic: float | None = None) -> Mapping[str, object]:
+        client = self._openai_client()
+        while True:
+            try:
+                run = client.evals.runs.retrieve(run_id=run_id, eval_id=definition_id)
+            except Exception as exc:
+                raise self._classify_error(exc) from exc
+            status = str(getattr(run, 'status', '') or '')
+            if status in {'completed', 'succeeded'}:
+                return _as_mapping(run) if isinstance(run, Mapping) else {'id': run_id, 'status': status, 'run': run}
+            if status in {'failed', 'canceled', 'cancelled', 'errored'}:
+                raise FoundryPrerequisiteError('activation run did not complete successfully', kind='prerequisite')
+            if deadline_monotonic is not None and self._time() >= deadline_monotonic:
+                raise FoundryOperationDeadlineError('activation run polling deadline exceeded', kind='deadline', retryable=True)
+            self._sleep(self._default_poll_interval)
+
+    def activation_measurements(self, *, run_id: str, definition_id: str, phase: str, criteria: Mapping[str, Mapping[str, object]]) -> tuple[ActivationCaseFinalization, ...]:
+        """Normalize one completed activation run into structural per-evaluator measurements.
+
+        Only booleans and finite numbers are extracted; no sample content is read or persisted.
+        A criterion that the platform did not execute, or that reports a non-finite/absent
+        score for a scalar evaluator, fails closed.
+        """
+        payload = self._await_activation_run(run_id, definition_id)
+        run = payload.get('run') if isinstance(payload.get('run'), object) and 'run' in payload else payload
+        per_criterion = getattr(run, 'per_testing_criteria_results', None)
+        if per_criterion is None and isinstance(payload, Mapping):
+            per_criterion = payload.get('per_testing_criteria_results')
+        if not isinstance(per_criterion, Sequence) or isinstance(per_criterion, (str, bytes, bytearray)) or not per_criterion:
+            raise FoundryPrerequisiteError('activation run reported no testing-criteria measurements', kind='prerequisite')
+        measurements: list[ActivationCaseFinalization] = []
+        seen: set[str] = set()
+        for item in per_criterion:
+            entry = _as_mapping(item)
+            name = entry.get('testing_criteria') or entry.get('name')
+            if not isinstance(name, str) or name not in criteria:
+                continue
+            seen.add(name)
+            criterion = criteria[name]
+            passed = entry.get('passed')
+            failed = entry.get('failed')
+            errored = entry.get('errored', 0)
+            if not isinstance(passed, int) or not isinstance(failed, int) or isinstance(passed, bool) or isinstance(failed, bool):
+                raise FoundryPrerequisiteError('activation criterion counts are invalid', kind='prerequisite')
+            if not isinstance(errored, int) or isinstance(errored, bool) or errored > 0:
+                raise FoundryPrerequisiteError('activation criterion reported execution errors', kind='prerequisite')
+            total = passed + failed
+            if total <= 0:
+                raise FoundryPrerequisiteError('activation criterion executed no cases', kind='prerequisite')
+            pass_rate = passed / total
+            normalization_kind = str(criterion['normalization_kind'])
+            if normalization_kind == 'scalar':
+                score = entry.get('score')
+                if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(float(score)):
+                    raise FoundryPrerequisiteError('scalar activation criterion reported no finite score', kind='prerequisite')
+                measurement = ActivationCaseFinalization(
+                    phase=phase,
+                    evaluator_id=str(criterion['evaluator_id']),
+                    executable=True,
+                    normalization_kind='scalar',
+                    score=float(score),
+                    pass_rate=pass_rate,
+                    source_min=float(criterion['source_min']),
+                    source_max=float(criterion['source_max']),
+                )
+            else:
+                # A pass/fail evaluator is recorded as a binary score plus its measured pass
+                # rate: the score keeps the structural gate meaningful while the pass rate
+                # drives the 100% Content Safety guardrail.
+                measurement = ActivationCaseFinalization(
+                    phase=phase,
+                    evaluator_id=str(criterion['evaluator_id']),
+                    executable=True,
+                    normalization_kind='pass_fail',
+                    score=1.0 if pass_rate == 1.0 else 0.0,
+                    pass_rate=pass_rate,
+                )
+            measurements.append(measurement)
+        missing = set(criteria) - seen
+        if missing:
+            raise FoundryPrerequisiteError('activation run did not measure every approved evaluator', kind='prerequisite')
+        return tuple(measurements)
+
+    def create_or_adopt_onboarding_definition(self, *, role: str, definition_name: str, dataset: Mapping[str, object], criteria: Mapping[str, Mapping[str, object]]) -> Mapping[str, object]:
+        """Create or adopt the immutable definition that measures every approved evaluator.
+
+        Uses the real cloud-evaluation surface: an `azure_ai_source` data source config plus
+        one `TestingCriterionAzureAIEvaluator` (`azure_ai_evaluator`) grader per approved
+        evaluator, binding the immutable Foundry evaluator name/version directly instead of
+        echoing precomputed numbers through a Python grader.
+
+        Adoption is strict: an existing definition with the requested name is retrieved and
+        may only be adopted when its canonical signature (data source config plus every
+        criterion's type/name/evaluator name/version/data mapping/initialization parameters)
+        equals the requested one. A name collision with different measurement semantics fails
+        closed instead of silently evaluating against the wrong definition.
+        """
+        if role not in _DEFINITION_ROLES:
+            raise FoundryPrerequisiteError('evaluation definition role is invalid', kind='prerequisite')
+        client = self._openai_client()
+        data_source_config: AzureAIDataSourceConfig = {'type': 'azure_ai_source', 'scenario': _EVAL_SCENARIO}
+        testing_criteria: list[TestingCriterionAzureAIEvaluator] = []
+        for name in sorted(criteria):
+            criterion = criteria[name]
+            entry: TestingCriterionAzureAIEvaluator = {
+                'type': 'azure_ai_evaluator',
+                'name': name,
+                'evaluator_name': str(criterion['evaluator_name']),
+                'data_mapping': dict(_EVALUATOR_DATA_MAPPING),
+            }
+            initialization = criterion.get('initialization_parameters')
+            if isinstance(initialization, Mapping) and initialization:
+                entry['initialization_parameters'] = {str(key): value for key, value in initialization.items()}
+            version = criterion.get('evaluator_version')
+            if isinstance(version, str) and version:
+                entry['evaluator_version'] = version
+            testing_criteria.append(entry)
+        requested_signature = _definition_signature(data_source_config, testing_criteria)
+        existing = next((item for item in self.list_evaluation_definitions() if item.get('name') == definition_name), None)
+        if existing is not None:
+            resource_id = existing.get('id')
+            if not isinstance(resource_id, str) or not resource_id:
+                raise FoundryPrerequisiteError('existing evaluation definition has no immutable identifier', kind='prerequisite')
+            live = self.get_evaluation_definition(resource_id)
+            if live is None:
+                raise FoundryPrerequisiteError('existing evaluation definition could not be retrieved for adoption', kind='prerequisite')
+            live_criteria = live.get('testing_criteria')
+            if not isinstance(live_criteria, Sequence) or isinstance(live_criteria, (str, bytes, bytearray)) or not live_criteria:
+                raise FoundryPrerequisiteError('existing evaluation definition exposes no testing criteria', kind='prerequisite')
+            live_config = live.get('data_source_config')
+            existing_signature = _definition_signature(
+                live_config if isinstance(live_config, Mapping) else {},
+                [item for item in live_criteria if isinstance(item, Mapping)],
+            )
+            if existing_signature != requested_signature:
+                raise FoundryPrerequisiteError(
+                    f'existing evaluation definition {definition_name!r} does not match the approved evaluator bindings',
+                    kind='prerequisite',
+                )
+            return {'created': False, 'adopted': True, 'definition': {'id': resource_id, 'name': definition_name, 'signature': existing_signature}, 'resource_id': resource_id}
+        try:
+            created = client.evals.create(data_source_config=data_source_config, testing_criteria=testing_criteria, name=definition_name)
+        except Exception as exc:
+            raise self._classify_error(exc) from exc
+        created_id = getattr(created, 'id', None)
+        if not isinstance(created_id, str) or not created_id:
+            raise FoundryPrerequisiteError('evaluation definition creation returned no id', kind='prerequisite')
+        del dataset
+        return {'created': True, 'adopted': False, 'definition': {'id': created_id, 'name': definition_name, 'signature': requested_signature}, 'resource_id': created_id}
+
+    def get_dataset_by_id(self, dataset_id: str) -> Mapping[str, object] | None:
+        """Resolve a dataset version from an immutable `azureai://.../data/<name>/versions/<v>` id."""
+
+        name, version = self._parse_dataset_uri(dataset_id)
+        return self.get_dataset(name, version)
+
+    def _synthetic_generation_prompt(self, contract: EvaluationOnboardingRequest) -> str:
+        """Build the reviewed, bounded generation instruction (never raw customer content)."""
+
+        assert contract.dataset_plan is not None
+        return (
+            f'Generate representative evaluation cases for the {contract.dataset_plan.agent_name} '
+            f'agent (version {contract.dataset_plan.agent_version}) covering its documented task '
+            'scope, including realistic edge cases, using only the reviewed agent definition.'
+        )
+
+    def _target_completion_data_source(self, *, dataset_file_id: str, draft_agent_name: str, draft_agent_version: str) -> TargetCompletionEvalRunDataSource:
+        """Evaluate an existing immutable split dataset against the owned draft agent."""
+
+        target: AzureAIAgentTargetParam = {
+            'type': 'azure_ai_agent',
+            'name': draft_agent_name,
+            'version': draft_agent_version,
+        }
+        return {
+            'type': 'azure_ai_target_completions',
+            'source': {'type': 'file_id', 'id': dataset_file_id},
+            'target': target,
+            'input_messages': {'type': 'item_reference', 'item_reference': _ITEM_QUERY_REFERENCE},
+        }
+
+    def run_synthetic_generation(
+        self,
+        *,
+        definition_id: str,
+        samples_count: int,
+        prompt: str,
+        model_deployment_name: str,
+        output_dataset_name: str,
+        agent_name: str,
+        agent_version: str,
+        run_name: str,
+        deadline_monotonic: float | None = None,
+    ) -> Mapping[str, object]:
+        """Generate a synthetic dataset by running the agent through the cloud-eval API.
+
+        Mirrors the official `sample_synthetic_data_agent_evaluation.py` flow: an
+        `azure_ai_synthetic_data_gen_preview` run data source with
+        `item_generation_params` (`synthetic_data_gen_preview`) and an `azure_ai_agent`
+        target, polled through `evals.runs.retrieve`. The immutable output dataset id is read
+        back from `run.data_source.item_generation_params.output_dataset_id`, and the accepted
+        sample count from the run's output items.
+        """
+        if samples_count <= 0:
+            raise FoundryPrerequisiteError('synthetic generation requires a positive sample count', kind='prerequisite')
+        client = self._openai_client()
+        data_source = {
+            'type': 'azure_ai_synthetic_data_gen_preview',
+            'item_generation_params': {
+                'type': _SYNTHETIC_ITEM_GENERATION_TYPE,
+                'samples_count': int(samples_count),
+                'prompt': prompt,
+                'model_deployment_name': model_deployment_name,
+                'output_dataset_name': output_dataset_name,
+            },
+            'target': {'type': 'azure_ai_agent', 'name': agent_name, 'version': agent_version},
+        }
+        try:
+            run = client.evals.runs.create(eval_id=definition_id, data_source=data_source, name=run_name)
+        except Exception as exc:
+            raise self._classify_error(exc) from exc
+        run_id = getattr(run, 'id', None)
+        if not isinstance(run_id, str) or not run_id:
+            raise FoundryPrerequisiteError('synthetic generation run returned no id', kind='prerequisite')
+        payload = self._await_activation_run(run_id, definition_id, deadline_monotonic=deadline_monotonic)
+        completed = payload.get('run') if 'run' in payload else payload
+        output_dataset_id = self._synthetic_output_dataset_id(completed, payload)
+        if not isinstance(output_dataset_id, str) or not output_dataset_id:
+            raise FoundryPrerequisiteError('synthetic generation run returned no output dataset id', kind='prerequisite')
+        return {'run_id': run_id, 'output_dataset_id': output_dataset_id, 'generated_samples': self.run_output_item_count(run_id=run_id, definition_id=definition_id)}
+
+    def _synthetic_output_dataset_id(self, completed: object, payload: Mapping[str, object]) -> str | None:
+        """Read `data_source.item_generation_params.output_dataset_id` from a completed run."""
+
+        candidates: list[object] = [getattr(completed, 'data_source', None)]
+        if isinstance(payload, Mapping):
+            candidates.append(payload.get('data_source'))
+        for source in candidates:
+            if source is None:
+                continue
+            params = getattr(source, 'item_generation_params', None)
+            if params is None and isinstance(source, Mapping):
+                params = source.get('item_generation_params')
+            if params is None and callable(getattr(source, 'as_dict', None)):
+                params = _as_mapping(source).get('item_generation_params')
+            if isinstance(params, Mapping):
+                value = params.get('output_dataset_id')
+            else:
+                value = getattr(params, 'output_dataset_id', None)
+            if isinstance(value, str) and value:
+                return value
+        return None
+
+    def run_output_item_count(self, *, run_id: str, definition_id: str) -> int | None:
+        """Count a run's output items, the real per-generated-sample records.
+
+        Returns `None` when the project's client does not expose the output-items API, so the
+        caller can fall back to the resolved dataset's case index.
+        """
+
+        client = self._openai_client()
+        runs = getattr(client.evals, 'runs', None)
+        output_items = getattr(runs, 'output_items', None)
+        lister = getattr(output_items, 'list', None)
+        if not callable(lister):
+            return None
+        try:
+            items = lister(run_id=run_id, eval_id=definition_id)
+            count = 0
+            for _item in items:
+                count += 1
+                if count > _MAX_RUN_OUTPUT_ITEMS:
+                    raise FoundryPrerequisiteError('evaluation run reported more output items than the supported budget', kind='prerequisite')
+        except FoundryAdapterError:
+            raise
+        except Exception as exc:
+            raise self._classify_error(exc) from exc
+        return count
+
+    def _stage_ledger(self, action_id: str) -> dict[str, object]:
+        ledger = self._onboarding.get(action_id)
+        if ledger is None:
+            ledger = {'stages': {}, 'finalization': None}
+            self._onboarding[action_id] = ledger
+        return ledger
+
+    def _record_stage(self, ledger: Mapping[str, object], stage: str, detail: Mapping[str, object]) -> None:
+        stages = ledger.get('stages')
+        if isinstance(stages, dict):
+            # A completed stage drops any in-flight handle: there is nothing left to resume.
+            stages[stage] = {'status': 'completed', **{key: value for key, value in detail.items()}}
+            self._publish_checkpoint()
+
+    def _completed_stage(self, ledger: Mapping[str, object], stage: str) -> Mapping[str, object] | None:
+        stages = ledger.get('stages')
+        if not isinstance(stages, Mapping):
+            return None
+        entry = stages.get(stage)
+        if isinstance(entry, Mapping) and entry.get('status') == 'completed':
+            return entry
+        return None
+
+    def _assert_activation_gates(self, bounds: object, measurements: Sequence[ActivationCaseFinalization]) -> None:
+        """Fail closed on structural, execution, headroom, or safety-bundle gate violations."""
+
+        if not measurements:
+            raise FoundryPrerequisiteError('activation produced no measurements', kind='prerequisite')
+        cases = [
+            {
+                'executable': case.executable,
+                'normalization': {'kind': case.normalization_kind, 'source_min': case.source_min, 'source_max': case.source_max},
+                'score': case.score,
+            }
+            for case in measurements
+        ]
+        safety_measurements = [
+            (case, canonical_safety_name(case.evaluator_id))
+            for case in measurements
+            if canonical_safety_name(case.evaluator_id) is not None
+        ]
+        guardrails = [
+            {'evaluator_id': case.evaluator_id, 'safety_name': name, 'pass_rate': case.pass_rate}
+            for case, name in safety_measurements
+        ]
+        try:
+            validate_activation(cases=cases, guardrails=guardrails)
+        except BootstrapConfigError as exc:
+            raise FoundryPrerequisiteError(f'activation smoke gate failed: {exc}', kind='prerequisite') from None
+        required = float(getattr(bounds, 'required_safety_pass_rate', 1.0))
+        required_names = tuple(getattr(bounds, 'required_safety_evaluators', REQUIRED_SAFETY_EVALUATORS))
+        for name in required_names:
+            phases = {case.phase for case, resolved in safety_measurements if resolved == name}
+            aggregate_phases = {
+                case.phase for case, resolved in safety_measurements if resolved == LEGACY_AGGREGATE_SAFETY_NAME
+            }
+            if phases != set(_DEFINITION_ROLES) and aggregate_phases != set(_DEFINITION_ROLES):
+                raise FoundryPrerequisiteError(
+                    f'safety evaluator {name} must be measured in both activation phases', kind='prerequisite'
+                )
+        if any(case.pass_rate != required for case, _ in safety_measurements):
+            raise FoundryPrerequisiteError(
+                'every configured safety evaluator must pass at 100% in both activation phases', kind='prerequisite'
+            )
+
+    def run_evaluation_onboarding(self, *, plan: BootstrapPlan, action: BootstrapAction, contract: EvaluationOnboardingRequest, on_resource: Callable[[_ResourceDraft], None] | None = None) -> Mapping[str, object]:
+        """Execute the approval-bound onboarding stages and return the receipt finalization.
+
+        Stages run in order and are recorded in provider state so a restarted operation
+        resumes instead of repeating a completed stage. Every dynamic output is checked
+        against the approved contract bounds before the finalization is sealed; any gate
+        failure raises, which keeps the previously active sidecar and bundle in place.
+        """
+        assert contract.dataset_plan is not None and contract.evaluator_plan is not None
+        assert contract.definition_plan is not None and contract.activation_plan is not None
+        assert contract.telemetry_probe is not None
+        ledger = self._stage_ledger(action.action_id)
+        drafts: list[_ResourceDraft] = []
+
+        def record(draft: _ResourceDraft) -> None:
+            """Report a touched resource immediately so a mid-stage failure still rolls back."""
+
+            drafts.append(draft)
+            if on_resource is not None:
+                on_resource(draft)
+
+        bounds = contract.bounds
+        dataset_plan = contract.dataset_plan
+        evaluator_plan = contract.evaluator_plan
+
+        # --- stage 1: inventory -------------------------------------------------
+        reuse_candidates = dataset_plan.reuse_candidates
+        reuse_decision = 'reuse_existing_assets' if reuse_candidates and evaluator_plan.reuse_evaluator_id else 'generate_new_assets'
+        inventory_detail = {
+            'reuse_decision': reuse_decision,
+            'dataset_versions': len(self.inventory_datasets()),
+            'evaluator_versions': len(self.inventory_evaluators(include_builtin=True)),
+            'definitions': len(self.list_evaluation_definitions()),
+        }
+        self._record_stage(ledger, 'inventory', inventory_detail)
+
+        # --- stage 2: generation ------------------------------------------------
+        dataset_strategy = 'trace' if dataset_plan.generation_kind == 'dataset_trace' else 'synthetic_only'
+        generated_sample_count = 0
+        source_dataset: Mapping[str, object] | None = None
+        if reuse_decision == 'generate_new_assets':
+            completed = self._completed_stage(ledger, 'generation')
+            if completed is not None and isinstance(completed.get('dataset_name'), str):
+                source_dataset = self.get_dataset(str(completed['dataset_name']), str(completed['dataset_version']))
+                generated_sample_count = int(completed.get('generated_sample_count') or 0)
+                if source_dataset is None:
+                    raise FoundryPrerequisiteError('resumed generation output dataset no longer exists', kind='prerequisite')
+            else:
+                if dataset_strategy == 'synthetic_only':
+                    # Real synthetic agent run: the service generates the dataset and returns
+                    # its immutable `output_dataset_id`.
+                    generation_definition = self.create_or_adopt_onboarding_definition(
+                        role='development',
+                        definition_name=f'{contract.repo_agent_id}-synthetic-generation',
+                        dataset={},
+                        criteria={
+                            evaluator_plan.requested_name: {
+                                'evaluator_name': evaluator_plan.requested_name,
+                                'evaluator_version': evaluator_plan.requested_version,
+                            }
+                        },
+                    )
+                    generation_definition_id = str(generation_definition['resource_id'])
+                    if generation_definition['created']:
+                        record(
+                            _ResourceDraft(
+                                suffix='definition:generation',
+                                resource_id=generation_definition_id,
+                                name=f'{contract.repo_agent_id}-synthetic-generation',
+                                version='generation',
+                                kind='evaluation_definition',
+                                disposition='created',
+                            )
+                        )
+                    outcome = self.run_synthetic_generation(
+                        definition_id=generation_definition_id,
+                        samples_count=bounds.target_sample_count,
+                        prompt=self._synthetic_generation_prompt(contract),
+                        model_deployment_name=dataset_plan.generation_model_deployment,
+                        output_dataset_name=f'{dataset_plan.requested_development_name}-source',
+                        agent_name=dataset_plan.agent_name,
+                        agent_version=dataset_plan.agent_version,
+                        run_name=f'{contract.repo_agent_id}-synthetic-generation',
+                    )
+                    record(
+                        _ResourceDraft(
+                            suffix='activation-run:generation',
+                            resource_id=str(outcome['run_id']),
+                            name=generation_definition_id,
+                            version='generation',
+                            kind='activation_run',
+                            disposition='created',
+                        )
+                    )
+                    source_dataset = self.get_dataset_by_id(str(outcome['output_dataset_id']))
+                    if source_dataset is None:
+                        raise FoundryPrerequisiteError('synthetic generation output dataset is not resolvable', kind='prerequisite')
+                    index = self.dataset_case_index(str(source_dataset.get('name') or ''), str(source_dataset.get('version') or ''))
+                    generated_sample_count = (
+                        int(outcome['generated_samples'])
+                        if isinstance(outcome.get('generated_samples'), int) and not isinstance(outcome.get('generated_samples'), bool)
+                        else len(index)
+                    )
+                else:
+                    handle = self._pending_handle(ledger, 'generation', job_kind='dataset_generation')
+                    if handle is None:
+                        handle = self.create_dataset_generation_job(self._dataset_generation_request(contract))
+                    job = self.poll_generation_job(
+                        handle,
+                        persist_before_poll=lambda pending: self._record_pending_handle(ledger, 'generation', pending),
+                    )
+                    generated = job.get('generated_samples')
+                    if not isinstance(generated, int) or isinstance(generated, bool):
+                        raise FoundryPrerequisiteError('dataset generation reported no sample count', kind='prerequisite')
+                    generated_sample_count = generated
+                    if generated_sample_count < bounds.telemetry_minimum_samples:
+                        # 14 or fewer useful trace samples must never be configured as a partial
+                        # trace dataset; the reviewed contract must switch to synthetic-only.
+                        raise FoundryPrerequisiteError(
+                            f'trace generation produced {generated_sample_count} useful samples; '
+                            f'{bounds.telemetry_minimum_samples}+ are required before a trace dataset may be configured',
+                            kind='prerequisite',
+                        )
+                    outputs = job.get('output_datasets')
+                    if not isinstance(outputs, Sequence) or isinstance(outputs, (str, bytes, bytearray)) or len(outputs) != 1:
+                        raise FoundryPrerequisiteError('dataset generation produced no single accepted output dataset', kind='prerequisite')
+                    source_dataset = _as_mapping(outputs[0])
+                if generated_sample_count > bounds.maximum_generated_sample_count:
+                    raise FoundryPrerequisiteError('generated sample count exceeds the approved bound', kind='prerequisite')
+                assert source_dataset is not None
+                self._record_stage(
+                    ledger,
+                    'generation',
+                    {
+                        'dataset_name': str(source_dataset.get('name') or ''),
+                        'dataset_version': str(source_dataset.get('version') or ''),
+                        'generated_sample_count': generated_sample_count,
+                        'generation_job_id': dataset_plan.generation_job_id,
+                        'dataset_strategy': dataset_strategy,
+                    },
+                )
+        else:
+            self._record_stage(ledger, 'generation', {'skipped': 'reused_existing_assets'})
+
+        # --- stage 3: split -----------------------------------------------------
+        datasets: dict[str, DatasetFinalization] = {}
+        if reuse_decision == 'reuse_existing_assets':
+            assert reuse_candidates is not None
+            rows: list[Mapping[str, object]] = []
+            for role, dataset_id in zip(_DEFINITION_ROLES, reuse_candidates, strict=True):
+                name, version = self._parse_dataset_uri(dataset_id)
+                live = self.get_dataset(name, version)
+                if live is None:
+                    raise FoundryPrerequisiteError('reviewed reuse dataset version does not exist', kind='prerequisite')
+                index = self.dataset_case_index(name, version)
+                rows.extend({**dict(item), 'split_role': role} for item in index)
+                datasets[role] = DatasetFinalization(
+                    role=role,
+                    dataset_name=name,
+                    dataset_version=version,
+                    dataset_id=str(live['id']),
+                    dataset_type=str(live.get('type') or dataset_plan.dataset_type),
+                    case_count=len(index),
+                    disposition='adopted',
+                )
+                record(
+                    _ResourceDraft(
+                        suffix=f'dataset:{role}',
+                        resource_id=str(live['id']),
+                        name=name,
+                        version=version,
+                        kind='dataset',
+                        disposition='adopted',
+                        fingerprint=str(live.get('content_fingerprint')) if live.get('content_fingerprint') else None,
+                        resource_type=str(live.get('type') or ''),
+                    )
+                )
+            development_rows = tuple(item['row_id'] for item in rows if item.get('split_role') == 'development')
+            validating_rows = tuple(item['row_id'] for item in rows if item.get('split_role') == 'validating')
+            if set(development_rows) & set(validating_rows):
+                raise FoundryPrerequisiteError('reused development and validating datasets overlap', kind='prerequisite')
+            split_result = split_dataset_rows(
+                [
+                    {'row_id': str(item['row_id']), 'group_id': str(item.get('group_id') or item['row_id']), 'category': str(item.get('category') or '')}
+                    for item in rows
+                ]
+            )
+            split = SplitFinalization(
+                algorithm_version=split_result.algorithm_version,
+                split_hash=split_result.split_hash,
+                split_lineage_hash=compute_split_lineage_hash(split_result),
+                development_case_count=len(development_rows),
+                validating_case_count=len(validating_rows),
+            )
+        else:
+            assert source_dataset is not None
+            index = self.dataset_case_index(str(source_dataset.get('name') or ''), str(source_dataset.get('version') or ''))
+            split_result = split_dataset_rows(
+                [
+                    {'row_id': str(item['row_id']), 'group_id': str(item.get('group_id') or item['row_id']), 'category': str(item.get('category') or '')}
+                    for item in index
+                ]
+            )
+            split = SplitFinalization(
+                algorithm_version=split_result.algorithm_version,
+                split_hash=split_result.split_hash,
+                split_lineage_hash=compute_split_lineage_hash(split_result),
+                development_case_count=len(split_result.development),
+                validating_case_count=len(split_result.validating),
+            )
+            requested = {
+                'development': (dataset_plan.requested_development_name, split_result.development),
+                'validating': (dataset_plan.requested_validating_name, split_result.validating),
+            }
+            for role, (dataset_name, case_ids) in requested.items():
+                content_uri = self.materialize_split_dataset(
+                    source_dataset=source_dataset,
+                    role=role,
+                    case_ids=case_ids,
+                    dataset_name=dataset_name,
+                    dataset_version=dataset_plan.requested_version,
+                )
+                result = self.create_or_adopt_dataset(
+                    operation_id=plan.operation_id,
+                    action_id=f'{action.action_id}:dataset:{role}',
+                    dataset_name=dataset_name,
+                    dataset_version=dataset_plan.requested_version,
+                    dataset_content_uri=content_uri,
+                    dataset_type=dataset_plan.dataset_type,
+                    connection_name=dataset_plan.connection_name,
+                )
+                dataset = _as_mapping(result['dataset'])
+                datasets[role] = DatasetFinalization(
+                    role=role,
+                    dataset_name=dataset_name,
+                    dataset_version=dataset_plan.requested_version,
+                    dataset_id=str(result['resource_id']),
+                    dataset_type=dataset_plan.dataset_type,
+                    case_count=len(case_ids),
+                    disposition='created' if result['created'] else 'adopted',
+                )
+                record(
+                    _ResourceDraft(
+                        suffix=f'dataset:{role}',
+                        resource_id=str(result['resource_id']),
+                        name=dataset_name,
+                        version=dataset_plan.requested_version,
+                        kind='dataset',
+                        disposition='created' if result['created'] else 'adopted',
+                        fingerprint=str(dataset.get('content_fingerprint')) if dataset.get('content_fingerprint') else None,
+                        resource_type=dataset_plan.dataset_type,
+                        ownership_token=str(result.get('ownership_token')) if result.get('ownership_token') else None,
+                    )
+                )
+        if split.development_case_count < bounds.minimum_development_cases or split.validating_case_count < bounds.minimum_validating_cases:
+            raise FoundryPrerequisiteError('deterministic split violates the approved 10/5 minimums', kind='prerequisite')
+        self._record_stage(
+            ledger,
+            'split',
+            {
+                'split_lineage_hash': split.split_lineage_hash,
+                'development_case_count': split.development_case_count,
+                'validating_case_count': split.validating_case_count,
+            },
+        )
+
+        # --- stage 4: evaluator -------------------------------------------------
+        evaluators: list[EvaluatorFinalization] = []
+        if evaluator_plan.reuse_evaluator_id is not None:
+            name, version = self._parse_evaluator_uri(evaluator_plan.reuse_evaluator_id)
+            existing = self.get_evaluator_version(name, version)
+            if existing is None or not existing.get('id'):
+                raise FoundryPrerequisiteError('reviewed reuse evaluator version does not exist', kind='prerequisite')
+            objective = EvaluatorFinalization(
+                role='objective',
+                evaluator_name=name,
+                evaluator_version=version,
+                evaluator_id=str(existing['id']),
+                evaluator_kind='custom',
+                provenance='reused_existing',
+                normalization=evaluator_plan.objective_normalization,
+                weight=evaluator_plan.objective_weight,
+                disposition='adopted',
+            )
+            record(_ResourceDraft(suffix='evaluator:objective', resource_id=str(existing['id']), name=name, version=version, kind='evaluator', disposition='adopted', resource_type='custom'))
+        else:
+            completed = self._completed_stage(ledger, 'evaluator')
+            existing = self.get_evaluator_version(evaluator_plan.requested_name, evaluator_plan.requested_version)
+            if existing is None:
+                handle = self._pending_handle(ledger, 'evaluator', job_kind='evaluator_generation')
+                if handle is None:
+                    handle = self.create_evaluator_generation_job(self._evaluator_generation_request(contract, datasets['development']))
+                job = self.poll_generation_job(
+                    handle,
+                    persist_before_poll=lambda pending: self._record_pending_handle(ledger, 'evaluator', pending),
+                )
+                saved = job.get('saved_evaluator')
+                if not isinstance(saved, Mapping) or not saved.get('name') or not saved.get('version'):
+                    raise FoundryPrerequisiteError('rubric generation produced no saved evaluator version', kind='prerequisite')
+                existing = self.get_evaluator_version(str(saved['name']), str(saved['version']))
+                if existing is None or not existing.get('id'):
+                    raise FoundryPrerequisiteError('generated evaluator version is not resolvable', kind='prerequisite')
+            if str(existing.get('generation_job_id') or '') != evaluator_plan.generation_job_id:
+                raise FoundryPrerequisiteError('generated evaluator lineage does not match the approved generation job', kind='prerequisite')
+            try:
+                validate_generated_rubric(self._generated_rubric_document(str(existing['name']), str(existing['version'])))
+            except BootstrapConfigError as exc:
+                raise FoundryPrerequisiteError(f'generated rubric failed structural validation: {exc}', kind='prerequisite') from None
+            objective = EvaluatorFinalization(
+                role='objective',
+                evaluator_name=str(existing['name']),
+                evaluator_version=str(existing['version']),
+                evaluator_id=str(existing['id']),
+                evaluator_kind='custom',
+                provenance='auto_generated_unreviewed',
+                generation_operation_id=evaluator_plan.generation_job_id,
+                normalization=evaluator_plan.objective_normalization,
+                weight=evaluator_plan.objective_weight,
+                disposition='created',
+            )
+            record(
+                _ResourceDraft(
+                    suffix='evaluator:objective',
+                    resource_id=str(existing['id']),
+                    name=str(existing['name']),
+                    version=str(existing['version']),
+                    kind='evaluator',
+                    disposition='created' if completed is None else 'adopted',
+                    fingerprint=evaluator_plan.generation_job_id,
+                    resource_type='custom',
+                )
+            )
+        safety_bundle = self.resolve_safety_bundle(evaluator_plan.required_safety_evaluators)
+        guardrails: list[EvaluatorFinalization] = []
+        for entry in safety_bundle:
+            safety_name = str(entry.get('safety_name') or '')
+            evaluator_id = str(entry.get('id') or '')
+            evaluator_name = str(entry.get('name') or safety_name)
+            if canonical_safety_name(evaluator_id, evaluator_name) != safety_name:
+                raise FoundryPrerequisiteError('resolved safety evaluator identity is inconsistent', kind='prerequisite')
+            guardrail = EvaluatorFinalization(
+                role='guardrail',
+                evaluator_name=evaluator_name,
+                evaluator_version=str(entry.get('version') or '1'),
+                evaluator_id=evaluator_id,
+                evaluator_kind='builtin',
+                provenance='reused_existing',
+                normalization=EvaluatorNormalization(kind='pass_fail'),
+                weight=1.0,
+                disposition='adopted',
+                safety_name=safety_name,
+            )
+            guardrails.append(guardrail)
+            record(
+                _ResourceDraft(
+                    suffix=f'evaluator:safety:{safety_name}',
+                    resource_id=guardrail.evaluator_id,
+                    name=guardrail.evaluator_name,
+                    version=guardrail.evaluator_version,
+                    kind='evaluator',
+                    disposition='adopted',
+                    resource_type='builtin',
+                )
+            )
+        try:
+            assert_required_safety_coverage(
+                [item.safety_name or '' for item in guardrails],
+                required=evaluator_plan.required_safety_evaluators,
+                field='resolved safety bundle',
+            )
+        except BootstrapConfigError as exc:
+            raise FoundryPrerequisiteError(str(exc), kind='prerequisite') from None
+        evaluators.append(objective)
+        evaluators.extend(guardrails)
+        self._record_stage(
+            ledger,
+            'evaluator',
+            {
+                'provenance': objective.provenance,
+                'evaluator_version': objective.evaluator_version,
+                'safety_bundle': ','.join(sorted(item.safety_name or '' for item in guardrails)),
+            },
+        )
+
+        # --- stage 5: definitions -----------------------------------------------
+        # Criterion names are the evaluator names the service knows: `builtin.violence` for
+        # safety, the custom evaluator name for the objective.
+        criteria: dict[str, dict[str, object]] = {
+            objective.evaluator_name: {
+                'evaluator_name': objective.evaluator_name,
+                'evaluator_version': objective.evaluator_version,
+                'evaluator_id': objective.evaluator_id,
+                'normalization_kind': objective.normalization.kind,
+                'source_min': objective.normalization.source_min,
+                'source_max': objective.normalization.source_max,
+                # AI-assisted evaluators are initialized with the judge deployment; built-in
+                # safety evaluators take no initialization parameters.
+                'initialization_parameters': {'deployment_name': contract.activation_plan.model_deployment},
+            },
+        }
+        for guardrail in guardrails:
+            criteria[guardrail.evaluator_name] = {
+                'evaluator_name': guardrail.evaluator_name,
+                'evaluator_version': guardrail.evaluator_version,
+                'evaluator_id': guardrail.evaluator_id,
+                'normalization_kind': 'pass_fail',
+                'source_min': None,
+                'source_max': None,
+            }
+        definitions: list[DefinitionFinalization] = []
+        definition_ids: dict[str, str] = {}
+        requested_definitions = {
+            'development': contract.definition_plan.requested_development_name,
+            'validating': contract.definition_plan.requested_validating_name,
+        }
+        for role, definition_name in requested_definitions.items():
+            result = self.create_or_adopt_onboarding_definition(role=role, definition_name=definition_name, dataset=datasets[role].model_dump(mode='json'), criteria=criteria)
+            resource_id = str(result['resource_id'])
+            definition_ids[role] = resource_id
+            definitions.append(
+                DefinitionFinalization(
+                    role=role,
+                    definition_name=definition_name,
+                    definition_id=resource_id,
+                    disposition='created' if result['created'] else 'adopted',
+                )
+            )
+            record(
+                _ResourceDraft(
+                    suffix=f'definition:{role}',
+                    resource_id=resource_id,
+                    name=definition_name,
+                    version=role,
+                    kind='evaluation_definition',
+                    disposition='created' if result['created'] else 'adopted',
+                )
+            )
+        self._record_stage(ledger, 'definitions', dict(definition_ids))
+
+        # --- stage 6: activation -------------------------------------------------
+        client = self._openai_client()
+        run_ids: dict[str, str] = {}
+        measurements: list[ActivationCaseFinalization] = []
+        try:
+            for role in _DEFINITION_ROLES:
+                dataset = datasets[role]
+                live_dataset = self.get_dataset(dataset.dataset_name, dataset.dataset_version)
+                if live_dataset is None:
+                    raise FoundryPrerequisiteError('activation dataset version is not resolvable', kind='prerequisite')
+                # Evaluate the immutable split dataset against the owned draft agent.
+                data_source = self._target_completion_data_source(
+                    dataset_file_id=str(live_dataset.get('id') or dataset.dataset_id),
+                    draft_agent_name=contract.activation_plan.draft_agent_name,
+                    draft_agent_version=contract.activation_plan.draft_agent_version,
+                )
+                try:
+                    run = client.evals.runs.create(eval_id=definition_ids[role], data_source=data_source, name=f'{role}-activation-smoke')
+                except Exception as exc:
+                    raise self._classify_error(exc) from exc
+                run_id = getattr(run, 'id', None)
+                if not isinstance(run_id, str) or not run_id:
+                    raise FoundryPrerequisiteError('activation run submission returned no id', kind='prerequisite')
+                run_ids[role] = run_id
+                record(_ResourceDraft(suffix=f'activation-run:{role}', resource_id=run_id, name=definition_ids[role], version=role, kind='activation_run', disposition='created'))
+                measurements.extend(self.activation_measurements(run_id=run_id, definition_id=definition_ids[role], phase=role, criteria=criteria))
+            self._assert_activation_gates(bounds, measurements)
+        finally:
+            # The owned draft is always cleaned up, whether or not the gates passed.
+            self.cleanup_activation_draft(
+                draft_agent_name=contract.activation_plan.draft_agent_name,
+                draft_agent_version=contract.activation_plan.draft_agent_version,
+            )
+        self._record_stage(ledger, 'activation', {'development_run_id': run_ids['development'], 'validating_run_id': run_ids['validating']})
+        self._record_stage(ledger, 'cleanup', {'completed': True})
+
+        activation = ActivationFinalization(
+            status='succeeded',
+            development_run_id=run_ids['development'],
+            validating_run_id=run_ids['validating'],
+            draft_agent_name=contract.activation_plan.draft_agent_name,
+            draft_agent_version=contract.activation_plan.draft_agent_version,
+            cases=tuple(measurements),
+            cleanup_completed=True,
+        )
+        objective_reference = ResolvedEvaluator(
+            reference=EvaluatorReference(evaluator_id=objective.evaluator_id, provenance=objective.provenance),
+            normalization=objective.normalization,
+            weight=objective.weight,
+        )
+        bundle_objective_hash = ResolvedWeightedObjective.create([objective_reference]).objective_hash
+        try:
+            finalization = EvaluationFinalization.create(
+                repo_agent_id=contract.repo_agent_id,
+                contract_hash=contract.contract_hash,
+                reuse_decision=reuse_decision,
+                dataset_strategy=dataset_strategy,
+                generated_sample_count=generated_sample_count,
+                generation_context_fingerprint=dataset_plan.source_fingerprint,
+                datasets=tuple(datasets[role] for role in _DEFINITION_ROLES),
+                split=split,
+                evaluators=tuple(evaluators),
+                definitions=tuple(definitions),
+                activation=activation,
+                bundle_objective_hash=bundle_objective_hash,
+            )
+            finalization.verify_against_contract(contract)
+        except BootstrapConfigError as exc:
+            raise FoundryPrerequisiteError(f'onboarding finalization failed the approved bounds: {exc}', kind='prerequisite') from None
+        except Exception as exc:
+            raise FoundryPrerequisiteError(f'onboarding finalization is invalid: {_short_reason(exc)}', kind='prerequisite') from None
+        ledger['finalization'] = finalization.model_dump(mode='json')
+        return {'finalization': finalization, 'resources': tuple(drafts), 'stages': dict(ledger.get('stages') or {})}
+
+    def _dataset_generation_request(self, contract: EvaluationOnboardingRequest) -> Mapping[str, object]:
+        assert contract.dataset_plan is not None and contract.telemetry_probe is not None
+        plan = contract.dataset_plan
+        if plan.generation_kind == 'dataset_trace':
+            sources = [{'type': 'traces', 'agent_name': plan.agent_name}]
+            options = {'type': 'traces', 'max_samples': contract.bounds.target_sample_count}
+        else:
+            sources = [{'type': 'agent', 'agent_name': plan.agent_name, 'agent_version': plan.agent_version}]
+            options = {'type': 'simple_qna', 'max_samples': contract.bounds.target_sample_count, 'model_options': {'model': plan.generation_model_deployment}}
+        return {
+            'operation_id': plan.generation_job_id,
+            'name': f'{contract.repo_agent_id}-dataset-generation',
+            'scenario': 'evaluation',
+            'sources': sources,
+            'options': options,
+        }
+
+    def _evaluator_generation_request(self, contract: EvaluationOnboardingRequest, development_dataset: DatasetFinalization) -> Mapping[str, object]:
+        assert contract.dataset_plan is not None and contract.evaluator_plan is not None
+        plan = contract.evaluator_plan
+        dataset_plan = contract.dataset_plan
+        # Traces are never the only rubric source: the agent and the prepared development
+        # dataset are always supplied as companion sources.
+        return {
+            'operation_id': plan.generation_job_id,
+            'name': f'{contract.repo_agent_id}-rubric-generation',
+            'sources': [
+                {'type': 'agent', 'agent_name': dataset_plan.agent_name, 'agent_version': dataset_plan.agent_version},
+                {'type': 'dataset', 'name': development_dataset.dataset_name, 'version': development_dataset.dataset_version},
+            ],
+            'model': dataset_plan.generation_model_deployment,
+            'evaluator_name': plan.requested_name,
+        }
+
     def _dataset_request_from_action(self, action: BootstrapAction) -> tuple[str, str, str, str]:
         payload = action.diagnostics
         if len(payload) != 4:
@@ -1106,8 +2469,18 @@ class FoundryAdapter:
         cases = tuple(self._parse_activation_case(item, index=index) for index, item in enumerate(raw_cases))
         if {case.phase for case in cases} != set(_DEFINITION_ROLES):
             raise FoundryPrerequisiteError('activation_run cases must cover both development and validating phases', kind='prerequisite')
-        if not any(case.phase == 'development' and case.evaluator_id == _CONTENT_SAFETY_ID for case in cases) or not any(case.phase == 'validating' and case.evaluator_id == _CONTENT_SAFETY_ID for case in cases):
-            raise FoundryPrerequisiteError('activation_run cases must include content safety results for both phases', kind='prerequisite')
+        safety_phases: dict[str, set[str]] = defaultdict(set)
+        for case in cases:
+            safety_name = canonical_safety_name(case.evaluator_id)
+            if safety_name is not None:
+                safety_phases[safety_name].add(case.phase)
+        covered = {name for name, phases in safety_phases.items() if phases == set(_DEFINITION_ROLES)}
+        try:
+            assert_required_safety_coverage(sorted(covered), field='activation_run safety cases')
+        except BootstrapConfigError as exc:
+            raise FoundryPrerequisiteError(
+                f'activation_run cases must include both-phase safety results: {exc}', kind='prerequisite'
+            ) from None
         guardrails = tuple(self._parse_activation_guardrail(item, index=index) for index, item in enumerate(raw_guardrails))
         return _ActivationActionRequest(
             development_definition_name=development_definition_name,
@@ -1210,6 +2583,7 @@ class FoundryAdapter:
             'binding_hash': hashlib.sha256(_canonical_json(self._binding_payload(receipt_hash=receipt.receipt_hash, operation_id=receipt.operation_id, repository_identity=receipt.repository_identity, plan_hash=receipt.plan_hash)).encode('utf-8')).hexdigest(),
             'resources': resource_state,
             'rollback_order': [item.resource_id for item in sorted((resource for resource in resources if resource.disposition == 'created' and resource.rollback_order is not None), key=lambda item: int(item.rollback_order or 0), reverse=True)],
+            'onboarding': {action_id: _plain(ledger) for action_id, ledger in sorted(self._onboarding.items())},
         }
         state['state_hash'] = self._state_hash(state)
         self._validate_state_document_bounds(state)
@@ -1220,6 +2594,15 @@ class FoundryAdapter:
         state = self._provider_state_from_receipt(receipt, resources)
         self._provider_state = state
         return state
+
+    def onboarding_finalizations(self) -> Mapping[str, Mapping[str, object]]:
+        """Return the receipt-derived onboarding finalizations recorded by this apply."""
+
+        return {
+            action_id: dict(ledger['finalization'])
+            for action_id, ledger in self._onboarding.items()
+            if isinstance(ledger.get('finalization'), Mapping)
+        }
 
     def _validate_provider_state_binding(self, receipt: BootstrapReceipt, state: Mapping[str, object]) -> None:
         if state.get('schema_version') != _PROVIDER_STATE_SCHEMA_VERSION:
@@ -1252,6 +2635,31 @@ class FoundryAdapter:
         self._validate_provider_state_binding(receipt, self._provider_state)
         return self._resource_records_from_state(self._provider_state)
 
+    def restore_checkpoint(self, mapping: Mapping[str, object]) -> None:
+        """Restore an in-flight onboarding ledger recorded before any receipt exists.
+
+        Checkpoints are written while a phase is still `applying`, so they cannot be receipt
+        bound. Only the stage ledger is accepted, and it is re-validated for shape and size.
+        """
+
+        state = json.loads(_canonical_json(mapping))
+        if state.get('schema_version') != _PROVIDER_STATE_SCHEMA_VERSION:
+            raise FoundryPrerequisiteError('checkpoint schema_version mismatch', kind='prerequisite')
+        onboarding = state.get('onboarding')
+        if not isinstance(onboarding, Mapping):
+            raise FoundryPrerequisiteError('checkpoint onboarding ledger is invalid', kind='prerequisite')
+        self._validate_state_document_bounds(state)
+        restored: dict[str, dict[str, object]] = {}
+        for action_id, ledger in onboarding.items():
+            if not isinstance(ledger, Mapping):
+                raise FoundryPrerequisiteError('checkpoint onboarding ledger entry is invalid', kind='prerequisite')
+            stages = ledger.get('stages')
+            restored[str(action_id)] = {
+                'stages': dict(stages) if isinstance(stages, Mapping) else {},
+                'finalization': ledger.get('finalization'),
+            }
+        self._onboarding = restored
+
     def restore_provider_state(self, mapping: Mapping[str, object]) -> None:
         encoded = _canonical_json(mapping).encode('utf-8')
         state = json.loads(encoded.decode('utf-8'))
@@ -1268,6 +2676,10 @@ class FoundryAdapter:
         if state.get('state_hash') != self._state_hash(state):
             raise FoundryPrerequisiteError('provider state hash mismatch', kind='prerequisite')
         self._validate_state_document_bounds(state)
+        onboarding = state.get('onboarding')
+        if onboarding is not None and not isinstance(onboarding, Mapping):
+            raise FoundryPrerequisiteError('provider state onboarding ledger is invalid', kind='prerequisite')
+        self._onboarding = {str(key): dict(value) for key, value in (onboarding or {}).items() if isinstance(value, Mapping)}
         self._provider_state = state
 
     def _get_live_resource(self, resource: _ResourceRecord) -> Mapping[str, object] | None:
@@ -1312,10 +2724,10 @@ class FoundryAdapter:
                 self._beta('evaluators').delete_version(resource.name, resource.version)
                 return True
             if resource.kind == 'evaluation_definition':
-                self._openai_client().evals.delete(resource.resource_id)
+                self._openai_client().evals.delete(eval_id=resource.resource_id)
                 return True
             if resource.kind == 'activation_run':
-                self._openai_client().evals.runs.delete(resource.resource_id, eval_id=resource.name)
+                self._openai_client().evals.runs.delete(run_id=resource.resource_id, eval_id=resource.name)
                 return True
         except Exception:
             return False
@@ -1335,7 +2747,40 @@ class FoundryAdapter:
         confirmed_activation_drafts: set[tuple[str, str]] = set()
         try:
             for action in self.plan_resources(plan):
-                if action.kind == 'dataset':
+                if action.kind == 'evaluation_onboarding':
+                    contract = self._onboarding_request_from_action(action)
+
+                    def _record_onboarding(draft: _ResourceDraft, action_id: str = action.action_id) -> None:
+                        record_action_id = f'{action_id}:{draft.suffix}'
+                        if draft.disposition == 'created':
+                            created.append(record_action_id)
+                            created_resource_ids.append(draft.resource_id)
+                            rollback_order = len(created_resource_ids)
+                        else:
+                            adopted.append(record_action_id)
+                            rollback_order = None
+                        resource_records.append(
+                            _ResourceRecord(
+                                action_id=record_action_id,
+                                resource_id=draft.resource_id,
+                                name=draft.name,
+                                version=draft.version,
+                                kind=draft.kind,
+                                disposition=draft.disposition,
+                                fingerprint=draft.fingerprint,
+                                rollback_order=rollback_order,
+                                resource_type=draft.resource_type,
+                                ownership_token=draft.ownership_token,
+                            )
+                        )
+                        if draft.kind == 'dataset':
+                            digest = draft.fingerprint or hashlib.sha256(draft.resource_id.encode('utf-8')).hexdigest()
+                            before_fingerprints.append(FingerprintRecord(label=f'{record_action_id}:before', sha256=digest))
+                            after_fingerprints.append(FingerprintRecord(label=f'{record_action_id}:after', sha256=digest))
+
+                    self.run_evaluation_onboarding(plan=plan, action=action, contract=contract, on_resource=_record_onboarding)
+                    changed.append(action.action_id)
+                elif action.kind == 'dataset':
                     dataset_name, dataset_version, dataset_uri, dataset_type = self._dataset_request_from_action(action)
                     result = self.create_or_adopt_dataset(operation_id=plan.operation_id, action_id=action.action_id, dataset_name=dataset_name, dataset_version=dataset_version, dataset_content_uri=dataset_uri, dataset_type=dataset_type)
                     dataset = result['dataset']

@@ -334,14 +334,42 @@ def _fingerprint_root(cache: _ScanCache, root: str) -> str:
     cached = cache.fingerprint_by_root.get(root)
     if cached is not None:
         return cached
-    payload = []
+    files: dict[str, str] = {}
     for file in cache.scan_root(root):
         if file.sha256 is None:
             raise BootstrapConfigError(f"fingerprint input exceeds size limit: {file.relative}")
-        payload.append({"path": file.relative, "sha256": file.sha256})
-    fingerprint = hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
+        files[file.relative] = file.sha256
+    fingerprint = fingerprint_files(files)
     cache.fingerprint_by_root[root] = fingerprint
     return fingerprint
+
+
+def fingerprint_files(files: Mapping[str, str]) -> str:
+    """Canonical content fingerprint over `{repository-relative path: sha256}`.
+
+    This is the single algorithm used for local discovery fingerprints and for observed
+    fingerprints derived from a downloaded immutable agent version, so the two are directly
+    comparable. Only paths and digests participate; file content never does.
+    """
+
+    payload = []
+    for path, digest in files.items():
+        relative = PurePosixPath(path)
+        if _validate_sha256(digest, field=f"fingerprint[{path!r}]") is None:
+            raise BootstrapConfigError(f"fingerprint[{path!r}] requires a sha256 digest")
+        payload.append({"path": relative.as_posix(), "sha256": digest})
+    payload.sort(key=lambda item: (PurePosixPath(item["path"]).parts, item["path"].casefold(), item["path"]))
+    return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
+
+
+def is_fingerprintable_path(relative: str) -> bool:
+    """True when discovery would include `relative` in a fingerprint."""
+
+    try:
+        candidate = PurePosixPath(validate_repository_relative_path(relative, field="fingerprint path"))
+    except Exception:
+        return False
+    return _is_allowed_relative(candidate)
 
 
 def _discover_runtime_candidate(relative: str, text: str, repository_root: Path) -> _Candidate:
@@ -483,13 +511,19 @@ def _normalize_selection(selected_agents: Sequence[Mapping[str, str] | str] | No
     return selection, True
 
 
+_BINDING_EVIDENCE_KEYS = frozenset({"project_endpoint", "agent_name", "agent_version", "expected_version", "version", "source_fingerprint", "package_fingerprint"})
+
+
 def _normalize_binding_evidence(payload: Mapping[str, str | None] | None, *, root: str) -> BindingEvidence:
     if payload is None:
         return BindingEvidence()
+    unknown = sorted(key for key in payload if key not in _BINDING_EVIDENCE_KEYS)
+    if unknown:
+        raise BootstrapConfigError(f"binding_evidence_by_root[{root!r}] has unsupported keys: {', '.join(unknown)}")
     return BindingEvidence(
         observed_project_endpoint=payload.get("project_endpoint"),
         observed_agent_name=payload.get("agent_name"),
-        observed_version=payload.get("expected_version") or payload.get("version"),
+        observed_version=payload.get("agent_version") or payload.get("expected_version") or payload.get("version"),
         observed_source_fingerprint=_validate_sha256(payload.get("source_fingerprint"), field=f"binding_evidence_by_root[{root!r}].source_fingerprint"),
         observed_package_fingerprint=_validate_sha256(payload.get("package_fingerprint"), field=f"binding_evidence_by_root[{root!r}].package_fingerprint"),
     )
@@ -500,6 +534,14 @@ def _assess_binding(repo_agent_id: str, runtime_facts: RuntimeFacts, expected: B
         if not runtime_facts.entrypoints:
             blockers = (DiscoveryBlocker(code="missing-entrypoint", detail="binding evidence exists but no supported entrypoint file was found"),)
             return BindingAssessment(agent_id=repo_agent_id, classification="bound-diverged", detail=blockers[0].detail), blockers
+        metadata_observed = any((observed.observed_project_endpoint, observed.observed_agent_name, observed.observed_version))
+        content_observed = observed.observed_source_fingerprint is not None and observed.observed_package_fingerprint is not None
+        if not content_observed:
+            # Metadata alone can never prove alignment: a deployed version may carry the
+            # expected endpoint/name/version while running different content.
+            if metadata_observed or observed.observed_source_fingerprint is not None or observed.observed_package_fingerprint is not None:
+                return BindingAssessment(agent_id=repo_agent_id, classification="bound-diverged", detail="observed binding evidence lacks both content fingerprints; metadata alone cannot prove alignment"), ()
+            return BindingAssessment(agent_id=repo_agent_id, classification="bound-unknown", detail="expected binding exists without observed evidence"), ()
         mismatches: list[str] = []
         if expected.expected_project_endpoint is not None and observed.observed_project_endpoint != expected.expected_project_endpoint:
             mismatches.append("project-endpoint")
@@ -513,9 +555,7 @@ def _assess_binding(repo_agent_id: str, runtime_facts: RuntimeFacts, expected: B
             mismatches.append("package-fingerprint")
         if not mismatches:
             return BindingAssessment(agent_id=repo_agent_id, classification="bound-aligned", detail="expected and observed binding evidence exactly match local fingerprints"), ()
-        if any((observed.observed_project_endpoint, observed.observed_agent_name, observed.observed_version, observed.observed_source_fingerprint, observed.observed_package_fingerprint)):
-            return BindingAssessment(agent_id=repo_agent_id, classification="bound-diverged", detail=f"binding mismatch: {', '.join(mismatches)}"), ()
-        return BindingAssessment(agent_id=repo_agent_id, classification="bound-unknown", detail="expected binding exists without observed evidence"), ()
+        return BindingAssessment(agent_id=repo_agent_id, classification="bound-diverged", detail=f"binding mismatch: {', '.join(mismatches)}"), ()
     if runtime_facts.ready:
         return BindingAssessment(agent_id=repo_agent_id, classification="ready-unbound", detail="runtime readiness found without binding evidence"), ()
     blockers = []
@@ -606,4 +646,4 @@ def discovery_result_json(result: DiscoveryResult) -> str:
     return json.dumps(result.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
 
 
-__all__ = ["DiscoveryBlocker", "DiscoveredAgent", "DiscoveryEvidence", "DiscoveryResult", "discover_repository_agents", "discovery_result_json"]
+__all__ = ["DiscoveryBlocker", "DiscoveredAgent", "DiscoveryEvidence", "DiscoveryResult", "discover_repository_agents", "discovery_result_json", "fingerprint_files", "is_fingerprintable_path"]

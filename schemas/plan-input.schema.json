@@ -1,5 +1,44 @@
 {
   "$defs": {
+    "ActivationPlan": {
+      "additionalProperties": false,
+      "properties": {
+        "draft_agent_name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "title": "Draft Agent Name",
+          "type": "string"
+        },
+        "draft_agent_version": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "title": "Draft Agent Version",
+          "type": "string"
+        },
+        "model_deployment": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "title": "Model Deployment",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "draft_agent_name",
+        "draft_agent_version",
+        "model_deployment"
+      ],
+      "title": "ActivationPlan",
+      "type": "object"
+    },
     "AgentRenderContext": {
       "additionalProperties": false,
       "properties": {
@@ -40,9 +79,56 @@
           "type": "string"
         },
         "role_definition_id": {
+          "description": "Azure built-in role definition id. Only the reviewed least-privilege matrix in docs/identity-rbac.md is accepted; Owner, Contributor, and Azure AI Project Manager are refused outright.",
           "pattern": "^/subscriptions/[0-9a-fA-F-]+/providers/Microsoft\\.Authorization/roleDefinitions/[0-9a-fA-F-]{36}$",
           "title": "Role Definition Id",
-          "type": "string"
+          "type": "string",
+          "x-approved-role-definitions": [
+            {
+              "display_name": "Foundry User",
+              "role_definition_guid": "53ca6127-db72-4b80-b1b0-d745d6d5456d",
+              "scope_kind": "foundry",
+              "slug": "foundry-user"
+            },
+            {
+              "display_name": "Foundry Project Runtime User",
+              "role_definition_guid": "142bfaed-a13f-4c2d-bed2-6db62c4a1009",
+              "scope_kind": "foundry",
+              "slug": "foundry-project-runtime-user"
+            },
+            {
+              "display_name": "Foundry Agent Consumer",
+              "role_definition_guid": "eed3b665-ab3a-47b6-8f48-c9382fb1dad6",
+              "scope_kind": "foundry",
+              "slug": "foundry-agent-consumer"
+            },
+            {
+              "display_name": "Monitoring Reader",
+              "role_definition_guid": "43d0d8ad-25c7-4714-9337-8ba259a9fe05",
+              "scope_kind": "telemetry",
+              "slug": "monitoring-reader"
+            },
+            {
+              "display_name": "Log Analytics Reader",
+              "role_definition_guid": "73c42c96-874c-492b-b04d-ab87d138a893",
+              "scope_kind": "telemetry",
+              "slug": "log-analytics-reader"
+            }
+          ],
+          "x-refused-role-definitions": [
+            {
+              "display_name": "Owner",
+              "role_definition_guid": "8e3af657-a8ff-443c-a75c-2fe8c4bcb635"
+            },
+            {
+              "display_name": "Contributor",
+              "role_definition_guid": "b24988ac-6180-42a0-ab88-20f7382dd24c"
+            },
+            {
+              "display_name": "Azure AI Project Manager",
+              "role_definition_guid": "eadc314b-1a2d-4efa-be10-5d325db5065e"
+            }
+          ]
         },
         "schema_version": {
           "const": 1,
@@ -194,6 +280,271 @@
       "title": "AzurePhaseInput",
       "type": "object"
     },
+    "BindingEvidenceInput": {
+      "additionalProperties": false,
+      "description": "Strict, non-secret binding evidence document consumed by discovery.",
+      "properties": {
+        "agents": {
+          "items": {
+            "$ref": "#/$defs/ObservedAgentBinding"
+          },
+          "title": "Agents",
+          "type": "array"
+        },
+        "evidence_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Evidence Version",
+          "type": "integer"
+        },
+        "repository_id": {
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+          "title": "Repository Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "repository_id",
+        "agents"
+      ],
+      "title": "BindingEvidenceInput",
+      "type": "object"
+    },
+    "DatasetPlan": {
+      "additionalProperties": false,
+      "description": "Deterministic dataset naming, reviewed reuse candidates, and the generation job id.",
+      "properties": {
+        "agent_name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "title": "Agent Name",
+          "type": "string"
+        },
+        "agent_version": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "title": "Agent Version",
+          "type": "string"
+        },
+        "connection_name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "title": "Connection Name",
+          "type": "string"
+        },
+        "dataset_type": {
+          "default": "uri_file",
+          "enum": [
+            "uri_file",
+            "uri_folder"
+          ],
+          "title": "Dataset Type",
+          "type": "string"
+        },
+        "generation_job_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Generation Job Id",
+          "type": "string"
+        },
+        "generation_kind": {
+          "enum": [
+            "dataset_trace",
+            "dataset_synthetic"
+          ],
+          "title": "Generation Kind",
+          "type": "string"
+        },
+        "generation_model_deployment": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "title": "Generation Model Deployment",
+          "type": "string"
+        },
+        "requested_development_name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "title": "Requested Development Name",
+          "type": "string"
+        },
+        "requested_validating_name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "title": "Requested Validating Name",
+          "type": "string"
+        },
+        "requested_version": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "title": "Requested Version",
+          "type": "string"
+        },
+        "reuse_development_dataset_id": {
+          "anyOf": [
+            {
+              "pattern": "^azureai://accounts/[^/]+/projects/[^/]+/data/[^/]+/versions/[^/]+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reuse Development Dataset Id"
+        },
+        "reuse_validating_dataset_id": {
+          "anyOf": [
+            {
+              "pattern": "^azureai://accounts/[^/]+/projects/[^/]+/data/[^/]+/versions/[^/]+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reuse Validating Dataset Id"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "source_fingerprint": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Source Fingerprint",
+          "type": "string"
+        }
+      },
+      "required": [
+        "requested_development_name",
+        "requested_validating_name",
+        "requested_version",
+        "connection_name",
+        "generation_kind",
+        "generation_job_id",
+        "source_fingerprint",
+        "agent_name",
+        "agent_version",
+        "generation_model_deployment"
+      ],
+      "title": "DatasetPlan",
+      "type": "object"
+    },
+    "DecisionPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "focused_cases_required": {
+          "title": "Focused Cases Required",
+          "type": "boolean"
+        },
+        "max_regressions": {
+          "title": "Max Regressions",
+          "type": "integer"
+        },
+        "minimum_aggregate_delta": {
+          "title": "Minimum Aggregate Delta",
+          "type": "number"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "minimum_aggregate_delta",
+        "focused_cases_required",
+        "max_regressions"
+      ],
+      "title": "DecisionPolicy",
+      "type": "object"
+    },
+    "DefinitionPlan": {
+      "additionalProperties": false,
+      "properties": {
+        "model_deployment": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "title": "Model Deployment",
+          "type": "string"
+        },
+        "requested_development_name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "title": "Requested Development Name",
+          "type": "string"
+        },
+        "requested_validating_name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "title": "Requested Validating Name",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "requested_development_name",
+        "requested_validating_name",
+        "model_deployment"
+      ],
+      "title": "DefinitionPlan",
+      "type": "object"
+    },
+    "DeploymentSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "environment": {
+          "title": "Environment",
+          "type": "string"
+        },
+        "require_aligned_binding": {
+          "title": "Require Aligned Binding",
+          "type": "boolean"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "environment",
+        "enabled",
+        "require_aligned_binding"
+      ],
+      "title": "DeploymentSettings",
+      "type": "object"
+    },
     "EvaluationAgentInput": {
       "additionalProperties": false,
       "properties": {
@@ -274,6 +625,17 @@
           "minLength": 1,
           "title": "Model Deployment",
           "type": "string"
+        },
+        "onboarding_contract": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvaluationOnboardingRequest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "project_endpoint": {
           "maxLength": 300,
@@ -361,6 +723,172 @@
       "title": "EvaluationGenerationSource",
       "type": "object"
     },
+    "EvaluationOnboardingRequest": {
+      "additionalProperties": false,
+      "description": "One approval-bound composite onboarding request for one selected agent.",
+      "properties": {
+        "activation_plan": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ActivationPlan"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "binding_classification": {
+          "enum": [
+            "bound-aligned",
+            "bound-diverged",
+            "bound-unknown",
+            "ready-unbound",
+            "not-ready"
+          ],
+          "title": "Binding Classification",
+          "type": "string"
+        },
+        "bounds": {
+          "$ref": "#/$defs/OnboardingBounds",
+          "default": {
+            "allowed_dataset_types": [
+              "uri_file"
+            ],
+            "allowed_provenance": [
+              "reused_existing",
+              "auto_generated_unreviewed"
+            ],
+            "maximum_evaluators": 8,
+            "maximum_generated_sample_count": 200,
+            "minimum_development_cases": 10,
+            "minimum_validating_cases": 5,
+            "require_measurable_headroom": true,
+            "required_safety_evaluators": [
+              "violence",
+              "sexual",
+              "self_harm",
+              "hate_unfairness",
+              "indirect_attack"
+            ],
+            "required_safety_pass_rate": 1.0,
+            "schema_version": 1,
+            "target_sample_count": 30,
+            "telemetry_minimum_samples": 15
+          }
+        },
+        "contract_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Contract Hash",
+          "type": "string"
+        },
+        "contract_version": {
+          "const": 3,
+          "default": 3,
+          "title": "Contract Version",
+          "type": "integer"
+        },
+        "dataset_plan": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DatasetPlan"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "definition_plan": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DefinitionPlan"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "evaluator_plan": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvaluatorPlan"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "replacement": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReplacementLineage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "repo_agent_id": {
+          "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$",
+          "title": "Repo Agent Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "sidecar_policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SidecarPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "stop_reason": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9 ._:/-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Stop Reason"
+        },
+        "telemetry_probe": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TelemetryProbe"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "repo_agent_id",
+        "binding_classification",
+        "contract_hash"
+      ],
+      "title": "EvaluationOnboardingRequest",
+      "type": "object"
+    },
     "EvaluationsPhaseInput": {
       "additionalProperties": false,
       "properties": {
@@ -382,6 +910,190 @@
         "agents"
       ],
       "title": "EvaluationsPhaseInput",
+      "type": "object"
+    },
+    "EvaluatorNormalization": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "pass_fail",
+            "scalar"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "source_max": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Max"
+        },
+        "source_min": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Min"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "EvaluatorNormalization",
+      "type": "object"
+    },
+    "EvaluatorPlan": {
+      "additionalProperties": false,
+      "description": "Deterministic evaluator naming plus the required built-in safety bundle.",
+      "properties": {
+        "generation_job_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Generation Job Id"
+        },
+        "objective_normalization": {
+          "$ref": "#/$defs/EvaluatorNormalization"
+        },
+        "objective_weight": {
+          "default": 1.0,
+          "title": "Objective Weight",
+          "type": "number"
+        },
+        "requested_name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "title": "Requested Name",
+          "type": "string"
+        },
+        "requested_version": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "title": "Requested Version",
+          "type": "string"
+        },
+        "required_safety_evaluators": {
+          "default": [
+            "violence",
+            "sexual",
+            "self_harm",
+            "hate_unfairness",
+            "indirect_attack"
+          ],
+          "items": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[a-z][a-z0-9_]*$",
+            "type": "string"
+          },
+          "title": "Required Safety Evaluators",
+          "type": "array"
+        },
+        "reuse_evaluator_id": {
+          "anyOf": [
+            {
+              "pattern": "^azureai://accounts/[^/]+/projects/[^/]+/evaluators/[^/]+/versions/[^/]+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reuse Evaluator Id"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "requested_name",
+        "requested_version",
+        "objective_normalization"
+      ],
+      "title": "EvaluatorPlan",
+      "type": "object"
+    },
+    "FoundryProjectSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "account_resource_id": {
+          "title": "Account Resource Id",
+          "type": "string"
+        },
+        "agent_name": {
+          "title": "Agent Name",
+          "type": "string"
+        },
+        "expected_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Version"
+        },
+        "model_deployment_aliases": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Model Deployment Aliases",
+          "type": "array"
+        },
+        "project_endpoint": {
+          "title": "Project Endpoint",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "project_endpoint",
+        "account_resource_id",
+        "agent_name"
+      ],
+      "title": "FoundryProjectSettings",
       "type": "object"
     },
     "GitHubPhaseInput": {
@@ -445,6 +1157,293 @@
         "default_branch_policy_intent"
       ],
       "title": "GitHubPhaseInput",
+      "type": "object"
+    },
+    "HardGuardrail": {
+      "additionalProperties": false,
+      "properties": {
+        "evaluator_name": {
+          "title": "Evaluator Name",
+          "type": "string"
+        },
+        "required": {
+          "default": true,
+          "title": "Required",
+          "type": "boolean"
+        },
+        "required_pass_rate": {
+          "title": "Required Pass Rate",
+          "type": "number"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "evaluator_name",
+        "required_pass_rate"
+      ],
+      "title": "HardGuardrail",
+      "type": "object"
+    },
+    "ObservedAgentBinding": {
+      "additionalProperties": false,
+      "description": "One reviewed, non-secret observation of a deployed immutable agent version.\n\nBoth content fingerprints are required: metadata alone (endpoint/name/version) can never\nprove that the deployed version runs the repository's current source, so an evidence\nrecord without content digests is refused rather than silently downgraded.",
+      "properties": {
+        "agent_name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Agent Name",
+          "type": "string"
+        },
+        "agent_version": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Agent Version",
+          "type": "string"
+        },
+        "code_content_hash": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Code Content Hash"
+        },
+        "code_content_hash_verified": {
+          "default": false,
+          "title": "Code Content Hash Verified",
+          "type": "boolean"
+        },
+        "evidence_provenance": {
+          "enum": [
+            "foundry_agent_code_download",
+            "reviewed_operator_attestation"
+          ],
+          "title": "Evidence Provenance",
+          "type": "string"
+        },
+        "observed_at": {
+          "anyOf": [
+            {
+              "maxLength": 32,
+              "minLength": 20,
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?Z$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Observed At"
+        },
+        "package_fingerprint": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Package Fingerprint",
+          "type": "string"
+        },
+        "project_endpoint": {
+          "maxLength": 300,
+          "pattern": "^https://[^\\s]+/api/projects/[^\\s/]+/?$",
+          "title": "Project Endpoint",
+          "type": "string"
+        },
+        "repo_agent_id": {
+          "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$",
+          "title": "Repo Agent Id",
+          "type": "string"
+        },
+        "root": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Root",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "source_fingerprint": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Source Fingerprint",
+          "type": "string"
+        }
+      },
+      "required": [
+        "root",
+        "repo_agent_id",
+        "project_endpoint",
+        "agent_name",
+        "agent_version",
+        "source_fingerprint",
+        "package_fingerprint",
+        "evidence_provenance"
+      ],
+      "title": "ObservedAgentBinding",
+      "type": "object"
+    },
+    "OnboardingBounds": {
+      "additionalProperties": false,
+      "description": "Reviewed, fail-closed bounds every dynamic onboarding output must satisfy.",
+      "properties": {
+        "allowed_dataset_types": {
+          "default": [
+            "uri_file"
+          ],
+          "items": {
+            "enum": [
+              "uri_file",
+              "uri_folder"
+            ],
+            "type": "string"
+          },
+          "title": "Allowed Dataset Types",
+          "type": "array"
+        },
+        "allowed_provenance": {
+          "default": [
+            "reused_existing",
+            "auto_generated_unreviewed"
+          ],
+          "items": {
+            "enum": [
+              "reused_existing",
+              "auto_generated_unreviewed",
+              "issue_supplied_existing"
+            ],
+            "type": "string"
+          },
+          "title": "Allowed Provenance",
+          "type": "array"
+        },
+        "maximum_evaluators": {
+          "default": 8,
+          "maximum": 8,
+          "minimum": 1,
+          "title": "Maximum Evaluators",
+          "type": "integer"
+        },
+        "maximum_generated_sample_count": {
+          "default": 200,
+          "maximum": 10000,
+          "minimum": 15,
+          "title": "Maximum Generated Sample Count",
+          "type": "integer"
+        },
+        "minimum_development_cases": {
+          "default": 10,
+          "maximum": 1000,
+          "minimum": 10,
+          "title": "Minimum Development Cases",
+          "type": "integer"
+        },
+        "minimum_validating_cases": {
+          "default": 5,
+          "maximum": 1000,
+          "minimum": 5,
+          "title": "Minimum Validating Cases",
+          "type": "integer"
+        },
+        "require_measurable_headroom": {
+          "default": true,
+          "title": "Require Measurable Headroom",
+          "type": "boolean"
+        },
+        "required_safety_evaluators": {
+          "default": [
+            "violence",
+            "sexual",
+            "self_harm",
+            "hate_unfairness",
+            "indirect_attack"
+          ],
+          "items": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[a-z][a-z0-9_]*$",
+            "type": "string"
+          },
+          "title": "Required Safety Evaluators",
+          "type": "array"
+        },
+        "required_safety_pass_rate": {
+          "default": 1.0,
+          "title": "Required Safety Pass Rate",
+          "type": "number"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "target_sample_count": {
+          "default": 30,
+          "maximum": 1000,
+          "minimum": 15,
+          "title": "Target Sample Count",
+          "type": "integer"
+        },
+        "telemetry_minimum_samples": {
+          "default": 15,
+          "maximum": 1000,
+          "minimum": 15,
+          "title": "Telemetry Minimum Samples",
+          "type": "integer"
+        }
+      },
+      "title": "OnboardingBounds",
+      "type": "object"
+    },
+    "ReplacementLineage": {
+      "additionalProperties": false,
+      "description": "Previous immutable contract retained until an explicit replacement activates.",
+      "properties": {
+        "previous_bundle_objective_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Previous Bundle Objective Hash",
+          "type": "string"
+        },
+        "previous_development_definition_id": {
+          "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9._-]*|azureai://accounts/[^/]+/projects/[^/]+/evaluationDefinitions/[^/]+/versions/[^/]+)$",
+          "title": "Previous Development Definition Id",
+          "type": "string"
+        },
+        "previous_sidecar_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Previous Sidecar Sha256",
+          "type": "string"
+        },
+        "previous_validating_definition_id": {
+          "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9._-]*|azureai://accounts/[^/]+/projects/[^/]+/evaluationDefinitions/[^/]+/versions/[^/]+)$",
+          "title": "Previous Validating Definition Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "previous_bundle_objective_hash",
+        "previous_sidecar_sha256",
+        "previous_development_definition_id",
+        "previous_validating_definition_id"
+      ],
+      "title": "ReplacementLineage",
       "type": "object"
     },
     "RepositoryIdentityInput": {
@@ -540,6 +1539,91 @@
       "title": "RepositoryPhaseInput",
       "type": "object"
     },
+    "RuntimeProtocolSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "cpu": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cpu"
+        },
+        "dependency_resolution": {
+          "title": "Dependency Resolution",
+          "type": "string"
+        },
+        "entrypoint": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Entrypoint",
+          "type": "array"
+        },
+        "kind": {
+          "const": "hosted",
+          "title": "Kind",
+          "type": "string"
+        },
+        "memory": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Memory"
+        },
+        "model_environment_variable": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Environment Variable"
+        },
+        "protocol_name": {
+          "title": "Protocol Name",
+          "type": "string"
+        },
+        "protocol_version": {
+          "title": "Protocol Version",
+          "type": "string"
+        },
+        "runtime": {
+          "title": "Runtime",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "runtime",
+        "entrypoint",
+        "dependency_resolution",
+        "protocol_name",
+        "protocol_version"
+      ],
+      "title": "RuntimeProtocolSettings",
+      "type": "object"
+    },
     "RuntimeProvenanceInput": {
       "additionalProperties": false,
       "properties": {
@@ -618,6 +1702,166 @@
       "title": "SelectedAgent",
       "type": "object"
     },
+    "SidecarPolicy": {
+      "additionalProperties": false,
+      "description": "Static, reviewed sidecar content; immutable ids and lineage are filled from the receipt.",
+      "properties": {
+        "allowed_models": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+            "type": "string"
+          },
+          "title": "Allowed Models",
+          "type": "array"
+        },
+        "baseline_model": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "title": "Baseline Model",
+          "type": "string"
+        },
+        "decision_policy": {
+          "$ref": "#/$defs/DecisionPolicy"
+        },
+        "deployment": {
+          "$ref": "#/$defs/DeploymentSettings"
+        },
+        "editable_paths": {
+          "items": {
+            "maxLength": 240,
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Editable Paths",
+          "type": "array"
+        },
+        "foundry_project": {
+          "$ref": "#/$defs/FoundryProjectSettings"
+        },
+        "hard_guardrails": {
+          "items": {
+            "$ref": "#/$defs/HardGuardrail"
+          },
+          "title": "Hard Guardrails",
+          "type": "array"
+        },
+        "max_candidates": {
+          "maximum": 64,
+          "minimum": 1,
+          "title": "Max Candidates",
+          "type": "integer"
+        },
+        "max_issue_evaluators": {
+          "default": 8,
+          "maximum": 8,
+          "minimum": 1,
+          "title": "Max Issue Evaluators",
+          "type": "integer"
+        },
+        "min_candidates": {
+          "maximum": 64,
+          "minimum": 1,
+          "title": "Min Candidates",
+          "type": "integer"
+        },
+        "package_root": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Package Root",
+          "type": "string"
+        },
+        "path": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "primary_metric": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Primary Metric",
+          "type": "string"
+        },
+        "runtime": {
+          "$ref": "#/$defs/RuntimeProtocolSettings"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "source_root": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Source Root",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "source_root",
+        "package_root",
+        "editable_paths",
+        "runtime",
+        "foundry_project",
+        "baseline_model",
+        "allowed_models",
+        "min_candidates",
+        "max_candidates",
+        "primary_metric",
+        "decision_policy",
+        "hard_guardrails",
+        "deployment"
+      ],
+      "title": "SidecarPolicy",
+      "type": "object"
+    },
+    "TelemetryProbe": {
+      "additionalProperties": false,
+      "description": "Reviewed trace-availability evidence: counts and a window identifier only.",
+      "properties": {
+        "eligible": {
+          "title": "Eligible",
+          "type": "boolean"
+        },
+        "prerequisites_available": {
+          "title": "Prerequisites Available",
+          "type": "boolean"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "telemetry_window": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9]+$",
+          "title": "Telemetry Window",
+          "type": "string"
+        },
+        "useful_sample_count": {
+          "maximum": 100000,
+          "minimum": 0,
+          "title": "Useful Sample Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "prerequisites_available",
+        "useful_sample_count",
+        "telemetry_window",
+        "eligible"
+      ],
+      "title": "TelemetryProbe",
+      "type": "object"
+    },
     "TemplateRenderValue": {
       "additionalProperties": false,
       "properties": {
@@ -666,6 +1910,17 @@
       "anyOf": [
         {
           "$ref": "#/$defs/AzurePhaseInput"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "binding_evidence": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BindingEvidenceInput"
         },
         {
           "type": "null"
