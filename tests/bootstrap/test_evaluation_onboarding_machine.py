@@ -470,6 +470,23 @@ def test_definitions_bind_real_azure_ai_evaluator_graders() -> None:
         assert all("initialization_parameters" not in by_name[f"builtin.{name}"] for name in REQUIRED_SAFETY_EVALUATORS)
 
 
+def test_custom_evaluator_initialization_uses_its_declared_schema() -> None:
+    assert FoundryAdapter._evaluator_initialization_parameters(
+        {
+            "raw": {
+                "definition": {
+                    "type": "rubric",
+                    "init_parameters": {
+                        "required": ["model"],
+                        "properties": {"model": {"type": "string"}},
+                    },
+                }
+            }
+        },
+        "baseline-model",
+    ) == {"model": "baseline-model"}
+
+
 def test_activation_runs_use_target_completions_against_the_split_datasets() -> None:
     contract = build_contract()
     adapter, fakes = build_fake_adapter()
