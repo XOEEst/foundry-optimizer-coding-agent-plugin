@@ -526,6 +526,16 @@ def test_generated_sample_count_falls_back_to_the_case_index_without_output_item
     assert _finalization(adapter, receipt).generated_sample_count == 30
 
 
+def test_generated_dataset_row_count_is_authoritative_over_run_output_count() -> None:
+    contract = build_contract()
+    adapter, fakes = build_fake_adapter(generated_samples=30)
+    fakes["runs"].synthetic_generated_samples = 22
+
+    receipt = adapter.apply_resources(_plan(contract, operation_id="op-partial-output-items"))
+
+    assert _finalization(adapter, receipt).generated_sample_count == 30
+
+
 def test_synthetic_run_without_an_output_dataset_id_fails_closed() -> None:
     contract = build_contract()
     adapter, fakes = build_fake_adapter()

@@ -2664,11 +2664,7 @@ class FoundryAdapter:
                         )
                     )
                     index = self.dataset_case_index(str(source_dataset.get('name') or ''), str(source_dataset.get('version') or ''))
-                    generated_sample_count = (
-                        int(outcome['generated_samples'])
-                        if isinstance(outcome.get('generated_samples'), int) and not isinstance(outcome.get('generated_samples'), bool)
-                        else len(index)
-                    )
+                    generated_sample_count = len(index)
                 else:
                     handle = self._pending_handle(ledger, 'generation', job_kind='dataset_generation')
                     if handle is None:
