@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import pytest
+
+from foundry_opt.bootstrap.errors import BootstrapPlanError
 from foundry_opt.bootstrap.input_contracts import BootstrapPlanInput, TrustedTemplateManifest
 from foundry_opt.bootstrap.plan_factory import build_phase_actions
 
@@ -16,6 +19,8 @@ def _plan_input(
     deployment_environment: str,
     client_id_variable_name: str = "AZURE_OPTIMIZER_CLIENT_ID",
     shared_client_id: str = _SHARED_CLIENT_ID,
+    branch_policy_intent: str = "preserve_repository_default",
+    default_branch: str = "main",
 ) -> BootstrapPlanInput:
     payload: dict[str, object] = {
         "schema_version": 1,
@@ -23,7 +28,7 @@ def _plan_input(
             "schema_version": 1,
             "repository_id": "example-org/example-repo",
             "repository_url": "https://github.com/example-org/example-repo.git",
-            "default_branch": "main",
+            "default_branch": default_branch,
             "root": ".",
             "selected_agents": [
                 {
@@ -62,7 +67,7 @@ def _plan_input(
             "deployment_environment": deployment_environment,
             "shared_client_id": shared_client_id,
             "client_id_variable_name": client_id_variable_name,
-            "default_branch_policy_intent": "preserve_repository_default",
+            "default_branch_policy_intent": branch_policy_intent,
         },
     }
     return BootstrapPlanInput.model_validate(payload)
@@ -93,3 +98,44 @@ def test_build_phase_actions_dedupes_identical_optimizer_and_deployment_environm
     assert len(variable_actions) == 1
     assert variable_actions[0].action_id == "github-variable-client-id-shared-env"
     assert variable_actions[0].diagnostics == ("shared-env", "AZURE_OPTIMIZER_CLIENT_ID", _SHARED_CLIENT_ID)
+
+
+def test_preserve_repository_default_does_not_create_environment_branch_policy() -> None:
+    actions = build_phase_actions(
+        _plan_input(
+            optimizer_environment="copilot",
+            deployment_environment="foundry-production",
+            branch_policy_intent="preserve_repository_default",
+        )
+    )
+
+    assert not any(action.kind == "github-branch-policy" for action in actions)
+
+
+def test_explicit_policy_intents_create_the_reviewed_branch_policy() -> None:
+    actions = build_phase_actions(
+        _plan_input(
+            optimizer_environment="copilot",
+            deployment_environment="foundry-production",
+            branch_policy_intent="require_explicit",
+            default_branch="release",
+        )
+    )
+    policy = next(action for action in actions if action.kind == "github-branch-policy")
+
+    assert policy.diagnostics == ("foundry-production", "release")
+
+
+def test_require_main_refuses_a_non_main_default_branch() -> None:
+    with pytest.raises(
+        BootstrapPlanError,
+        match="requires repository default_branch=main",
+    ):
+        build_phase_actions(
+            _plan_input(
+                optimizer_environment="copilot",
+                deployment_environment="foundry-production",
+                branch_policy_intent="require_main",
+                default_branch="release",
+            )
+        )

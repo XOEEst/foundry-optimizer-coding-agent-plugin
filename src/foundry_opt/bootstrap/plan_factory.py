@@ -205,9 +205,28 @@ def build_phase_actions(plan_input: BootstrapPlanInput, inventories: Mapping[str
             (
                 BootstrapAction(action_id=f"github-environment-{gh.optimizer_environment}", phase="github", stage="planned", kind="github-environment", diagnostics=(gh.optimizer_environment,)),
                 BootstrapAction(action_id=f"github-environment-{gh.deployment_environment}", phase="github", stage="planned", kind="github-environment", diagnostics=(gh.deployment_environment,)),
-                BootstrapAction(action_id="github-branch-policy", phase="github", stage="planned", kind="github-branch-policy", diagnostics=(gh.deployment_environment, plan_input.repository.default_branch)),
             )
         )
+        if gh.default_branch_policy_intent != "preserve_repository_default":
+            if (
+                gh.default_branch_policy_intent == "require_main"
+                and plan_input.repository.default_branch != "main"
+            ):
+                raise BootstrapPlanError(
+                    "require_main branch policy intent requires repository default_branch=main"
+                )
+            actions.append(
+                BootstrapAction(
+                    action_id="github-branch-policy",
+                    phase="github",
+                    stage="planned",
+                    kind="github-branch-policy",
+                    diagnostics=(
+                        gh.deployment_environment,
+                        plan_input.repository.default_branch,
+                    ),
+                )
+            )
         if gh.shared_client_id != "azure_identity_resolution_required":
             seen_environments: list[str] = []
             for environment in (gh.optimizer_environment, gh.deployment_environment):
