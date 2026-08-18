@@ -49,6 +49,40 @@ def registry_evaluator_id(name: str, version: str = SAFETY_CATALOG_VERSION) -> s
     return f"azureml://registries/azureml/evaluators/builtin.{name}/versions/{version}"
 
 
+def onboarding_definition_criteria(
+    *,
+    safety_names: Sequence[str] = SAFETY_EVALUATOR_NAMES,
+    objective_name: str = "quality-eval",
+    objective_version: str = "2",
+    model_deployment: str = "baseline-model",
+    safety_version: str = SAFETY_CATALOG_VERSION,
+) -> list[dict[str, object]]:
+    """The exact criteria the onboarding machine binds, for adoption-signature fixtures."""
+
+    mapping = {"query": "{{item.query}}", "response": "{{sample.output_text}}"}
+    criteria: list[dict[str, object]] = [
+        {
+            "type": "azure_ai_evaluator",
+            "name": objective_name,
+            "evaluator_name": objective_name,
+            "evaluator_version": objective_version,
+            "data_mapping": dict(mapping),
+            "initialization_parameters": {"deployment_name": model_deployment},
+        }
+    ]
+    for name in safety_names:
+        criteria.append(
+            {
+                "type": "azure_ai_evaluator",
+                "name": f"builtin.{name}",
+                "evaluator_name": f"builtin.{name}",
+                "evaluator_version": safety_version,
+                "data_mapping": dict(mapping),
+            }
+        )
+    return criteria
+
+
 def builtin_catalog(
     *,
     safety_names: Sequence[str] = SAFETY_EVALUATOR_NAMES,
@@ -353,9 +387,11 @@ class Deployments:
 
 
 class EvalObject:
-    def __init__(self, eval_id: str, name: str) -> None:
+    def __init__(self, eval_id: str, name: str, *, data_source_config: Mapping[str, object] | None = None, testing_criteria: Sequence[Mapping[str, object]] | None = None) -> None:
         self.id = eval_id
         self.name = name
+        self.data_source_config = dict(data_source_config) if data_source_config is not None else None
+        self.testing_criteria = [SdkObject(dict(item)) for item in (testing_criteria or ())]
 
 
 class RunObject:
@@ -452,7 +488,7 @@ class Evals:
     def create(self, *, data_source_config: Mapping[str, object], testing_criteria: list[Mapping[str, object]], name: str) -> EvalObject:
         self.create_calls.append({"data_source_config": data_source_config, "testing_criteria": testing_criteria, "name": name})
         self._next += 1
-        created = EvalObject(f"eval_{self._next}", name)
+        created = EvalObject(f"eval_{self._next}", name, data_source_config=data_source_config, testing_criteria=testing_criteria)
         self.items[created.id] = created
         return created
 
@@ -543,6 +579,8 @@ def build_fake_adapter(
     code_archive: bytes | None = None,
     code_content_hash: str | None = None,
     agent_versions: Mapping[tuple[str, str], Mapping[str, object]] | None = None,
+    existing_definition_criteria: Sequence[Mapping[str, object]] | None = None,
+    existing_definition_config: Mapping[str, object] | None = None,
 ) -> tuple[FoundryAdapter, dict[str, object]]:
     """Build a fully offline adapter wired for the staged onboarding machine."""
 
@@ -629,7 +667,15 @@ def build_fake_adapter(
         synthetic_generated_samples=generated_samples,
     )
     runs.fail_create = fail_run_create
-    existing_definitions = [EvalObject("eval_development", "dev-def"), EvalObject("eval_validating", "val-def")] if definitions_exist else []
+    if definitions_exist:
+        criteria = existing_definition_criteria if existing_definition_criteria is not None else onboarding_definition_criteria(safety_names=safety_names)
+        config = existing_definition_config if existing_definition_config is not None else {"type": "azure_ai_source", "scenario": "synthetic_data_gen_preview"}
+        existing_definitions = [
+            EvalObject("eval_development", "dev-def", data_source_config=config, testing_criteria=criteria),
+            EvalObject("eval_validating", "val-def", data_source_config=config, testing_criteria=criteria),
+        ]
+    else:
+        existing_definitions = []
     evals = Evals(existing_definitions, runs)
     agents = Agents(code_archive=code_archive, content_hash=code_content_hash, versions=agent_versions)
     client = Client(
@@ -696,5 +742,6 @@ __all__ = [
     "build_fake_adapter",
     "builtin_catalog",
     "fake_credential",
+    "onboarding_definition_criteria",
     "registry_evaluator_id",
 ]

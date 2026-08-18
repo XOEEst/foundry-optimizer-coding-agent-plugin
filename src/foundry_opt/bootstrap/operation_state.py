@@ -78,6 +78,51 @@ class EvaluatorLineage(BootstrapDocument):
     preserved_bundle_id: str | None = None
 
 
+class AgentEvaluatorLineage(EvaluatorLineage):
+    """Per-agent evaluator bundle lineage.
+
+    A repository may onboard several agents in one operation, each with its own bundle and
+    replacement lineage, so lineage is recorded per agent. The legacy single
+    `evaluator_replacement` field remains as a compatibility projection of the first agent.
+    """
+
+    repo_agent_id: AgentId
+    candidate_bundle_id: str | None = None
+    status: Literal["planned", "activated", "failed"] = "planned"
+    detail: str | None = None
+
+
+class EvaluationAgentReplacement(BootstrapDocument):
+    repo_agent_id: AgentId
+    active_bundle_id: str = Field(min_length=1, max_length=256)
+    candidate_bundle_id: str = Field(min_length=1, max_length=256)
+    preserved_bundle_id: str = Field(min_length=1, max_length=256)
+    lineage_hash: str = Field(min_length=1, max_length=128)
+    status: Literal["planned", "activated", "failed"]
+    detail: str | None = Field(default=None, max_length=4096)
+
+    def as_legacy_record(self) -> EvaluationReplacementRecord:
+        return EvaluationReplacementRecord(
+            active_bundle_id=self.active_bundle_id,
+            candidate_bundle_id=self.candidate_bundle_id,
+            preserved_bundle_id=self.preserved_bundle_id,
+            lineage_hash=self.lineage_hash,
+            status=self.status,
+            detail=self.detail,
+        )
+
+    def as_lineage(self) -> AgentEvaluatorLineage:
+        return AgentEvaluatorLineage(
+            repo_agent_id=self.repo_agent_id,
+            lineage_hash=self.lineage_hash,
+            active_bundle_id=self.candidate_bundle_id if self.status == "activated" else self.active_bundle_id,
+            preserved_bundle_id=self.preserved_bundle_id,
+            candidate_bundle_id=self.candidate_bundle_id,
+            status=self.status,
+            detail=self.detail,
+        )
+
+
 class OperationStatus(BootstrapDocument):
     operation_id: str
     repository_id: str
@@ -89,6 +134,7 @@ class OperationStatus(BootstrapDocument):
     binding_assessments: tuple[BindingAssessment, ...]
     evaluator_lineage: EvaluatorLineage
     deployment_eligible: bool
+    evaluator_lineages: tuple[AgentEvaluatorLineage, ...] = ()
 
 
 class OperationStatePayload(BootstrapDocument):
@@ -105,6 +151,7 @@ class OperationStatePayload(BootstrapDocument):
     approvals: tuple[ApprovalRecord, ...] = ()
     phase_receipts: tuple[PhaseReceipt, ...] = ()
     evaluator_replacement: EvaluationReplacementRecord | None = None
+    evaluator_replacements: tuple[EvaluationAgentReplacement, ...] = ()
 
 
 class OperationStateEnvelope(BootstrapDocument):
@@ -162,6 +209,10 @@ class OperationStateEnvelope(BootstrapDocument):
     @property
     def evaluator_replacement(self) -> EvaluationReplacementRecord | None:
         return self.payload.evaluator_replacement
+
+    @property
+    def evaluator_replacements(self) -> tuple[EvaluationAgentReplacement, ...]:
+        return self.payload.evaluator_replacements
 
     @field_validator("payload")
     @classmethod
@@ -310,6 +361,9 @@ def status_from_state(envelope: OperationStateEnvelope) -> OperationStatus:
         )
         if envelope.evaluator_replacement.status != "activated":
             deployment_eligible = False
+    lineages = tuple(sorted((item.as_lineage() for item in envelope.evaluator_replacements), key=lambda item: item.repo_agent_id))
+    if any(item.status != "activated" for item in envelope.evaluator_replacements):
+        deployment_eligible = False
     return OperationStatus(
         operation_id=envelope.operation_id,
         repository_id=envelope.repository_id,
@@ -321,4 +375,5 @@ def status_from_state(envelope: OperationStateEnvelope) -> OperationStatus:
         binding_assessments=envelope.selection_plan.binding_assessments,
         evaluator_lineage=lineage,
         deployment_eligible=deployment_eligible,
+        evaluator_lineages=lineages,
     )

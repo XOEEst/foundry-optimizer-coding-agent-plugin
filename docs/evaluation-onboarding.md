@@ -23,6 +23,13 @@ with typed codes (`20` config, `22` missing, `23` conflict, `24` stale, `25` app
 **Exactly one human approval** covers the whole onboarding run: the evaluations phase
 approval. A generated rubric is auto-adopted without a second prompt, but only because every
 dynamic output must satisfy the pre-approved bounds and fail-closed gates first.
+`evaluation activate` is the receipt-bound finalization of that same approval — it is not a
+second approval and never asks for one.
+
+Binding claims are re-derived from reviewed evidence on every planning, apply, and activation
+path (`bootstrap plan`, `bootstrap apply`, `evaluation plan`, `evaluation apply`,
+`evaluation activate`), so skipping a helper command cannot smuggle a false `bound-aligned`
+claim into an approved mutation.
 
 ## One approval-bound composite action per agent
 
@@ -169,6 +176,36 @@ Agents that fail any gate keep their previous sidecar and default evaluator bund
 explicit replacement additionally requires the reviewed previous sidecar digest and previous
 bundle objective hash to match what is on disk, so a failed replacement always retains the old
 contract.
+
+`evaluation activate` is a **finalization step, not a second approval**. It introduces no new
+human decision: it re-verifies the single evaluations-phase approval already recorded, refuses
+anything it cannot bind to that approval, and is idempotent — replaying it with unchanged
+bytes is a no-op, and an interrupted run is recoverable from the finalization journal. Until
+it succeeds, no repository sidecar, registry enablement, or lock advance exists, so `apply`
+alone can never enable an agent.
+
+Per-agent lineage is recorded per agent: `evaluator_replacements` in the operation state (and
+`replacements`/`bundles`/`lineages` in `evaluation status`/`inspect`) carries one bundle and
+lineage hash for every activated agent. The legacy single `evaluator_replacement` field is
+retained only as a compatibility projection of the first agent.
+
+## Multiple Foundry projects
+
+Agents in one repository may live in different Foundry projects. Every evaluation operation —
+binding observation, inventory, live fingerprints, apply, verify, provider state export and
+restore, and rollback — is routed to the project that owns the agent, and per-project receipts
+and state are aggregated deterministically under `provider_state.projects`. If one project
+fails after another already created resources, the successful project is compensated
+(created-only) before the failure surfaces, so a partially applied multi-project phase never
+leaves stray resources behind.
+
+## Restart safety
+
+Long-running dataset and evaluator generation jobs checkpoint their continuation into the
+durable operation state *before* the first poll, while the phase is still `applying`. A
+process crash mid-generation therefore resumes the recorded job instead of resubmitting it.
+Resuming is only permitted for the same approval whose interrupted attempt started from a
+non-drifted state; any other live drift between plan and apply still fails closed.
 
 ## Registry and deployment semantics
 

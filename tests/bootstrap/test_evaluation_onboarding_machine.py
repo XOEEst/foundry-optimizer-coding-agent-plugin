@@ -33,6 +33,7 @@ from tests.bootstrap.fakes.foundry_env import (
     SAFETY_EVALUATOR_NAMES,
     Credential,
     build_fake_adapter,
+    onboarding_definition_criteria,
     registry_evaluator_id,
 )
 
@@ -300,6 +301,60 @@ def test_restart_resumes_recorded_stages_without_repeating_generation() -> None:
     resumed.apply_resources(plan)
     # The recorded generation stage is reused instead of creating a second generation job.
     assert len(fakes["dataset_jobs"].create_calls) == generation_calls
+
+
+def test_matching_existing_definitions_are_adopted_instead_of_recreated() -> None:
+    contract = build_contract()
+    adapter, fakes = build_fake_adapter(definitions_exist=True)
+
+    receipt = adapter.apply_resources(_plan(contract, operation_id="op-adopt"))
+    finalization = _finalization(adapter, receipt)
+
+    assert _definition_creates(fakes) == []
+    assert finalization.definition_for("development").definition_id == "eval_development"
+    assert finalization.definition_for("validating").definition_id == "eval_validating"
+    assert finalization.definition_for("development").disposition == "adopted"
+
+
+@pytest.mark.parametrize(
+    "drift",
+    (
+        {"evaluator_version": "9"},
+        {"evaluator_name": "other-eval"},
+        {"data_mapping": {"query": "{{item.other}}", "response": "{{sample.output_text}}"}},
+        {"initialization_parameters": {"deployment_name": "other-model"}},
+    ),
+)
+def test_a_name_collision_with_different_bindings_fails_closed(drift: dict) -> None:
+    contract = build_contract()
+    criteria = onboarding_definition_criteria()
+    criteria[0] = {**criteria[0], **drift}
+    adapter, fakes = build_fake_adapter(definitions_exist=True, existing_definition_criteria=criteria)
+
+    with pytest.raises(FoundryPrerequisiteError, match="does not match the approved evaluator bindings"):
+        adapter.apply_resources(_plan(contract, operation_id="op-drifted-definition"))
+
+    assert _definition_creates(fakes) == []
+
+
+def test_a_definition_missing_a_safety_criterion_is_never_adopted() -> None:
+    contract = build_contract()
+    criteria = [item for item in onboarding_definition_criteria() if item["name"] != "builtin.violence"]
+    adapter, _fakes = build_fake_adapter(definitions_exist=True, existing_definition_criteria=criteria)
+
+    with pytest.raises(FoundryPrerequisiteError, match="does not match the approved evaluator bindings"):
+        adapter.apply_resources(_plan(contract, operation_id="op-missing-criterion"))
+
+
+def test_a_definition_with_a_different_data_source_scenario_is_never_adopted() -> None:
+    contract = build_contract()
+    adapter, _fakes = build_fake_adapter(
+        definitions_exist=True,
+        existing_definition_config={"type": "azure_ai_source", "scenario": "some_other_scenario"},
+    )
+
+    with pytest.raises(FoundryPrerequisiteError, match="does not match the approved evaluator bindings"):
+        adapter.apply_resources(_plan(contract, operation_id="op-drifted-config"))
 
 
 def test_created_only_rollback_preserves_adopted_assets() -> None:

@@ -62,12 +62,13 @@ from foundry_opt.bootstrap.evaluation.execution import (
 )
 from foundry_opt.bootstrap.input_contracts import BootstrapPlanInput
 from foundry_opt.bootstrap.operation_state import (
+    EvaluationAgentReplacement,
     OperationStateEnvelope,
     next_generation,
     operation_directory,
     write_operation_state,
 )
-from foundry_opt.bootstrap.receipts import EvaluationReplacementRecord, PhaseReceipt
+from foundry_opt.bootstrap.receipts import PhaseReceipt
 from foundry_opt.bootstrap.repository.engine import LOCK_PATH, atomic_write_bytes
 
 REGISTRY_PATH = ".foundry-opt/registry.yaml"
@@ -243,13 +244,36 @@ def _plan_input_matches(plan_input: BootstrapPlanInput, envelope: OperationState
 
 
 def _finalizations(receipt: PhaseReceipt) -> dict[str, EvaluationFinalization]:
-    """Read the receipt-bound onboarding finalizations out of recorded provider state."""
+    """Read the receipt-bound onboarding finalizations out of recorded provider state.
 
-    onboarding = receipt.provider_state.get("onboarding") if isinstance(receipt.provider_state, Mapping) else None
-    if not isinstance(onboarding, Mapping) or not onboarding:
+    Agents may be onboarded in different Foundry projects, in which case the phase provider
+    state aggregates one receipt-bound document per project.
+    """
+
+    state = receipt.provider_state if isinstance(receipt.provider_state, Mapping) else {}
+    ledgers: dict[str, object] = {}
+    if state.get("multi_project"):
+        projects = state.get("projects")
+        if not isinstance(projects, Mapping):
+            raise BootstrapApplyError("evaluations provider state carries no project entries")
+        for project in projects.values():
+            if not isinstance(project, Mapping):
+                raise BootstrapApplyError("evaluations provider state project entry is invalid")
+            project_state = project.get("provider_state")
+            onboarding = project_state.get("onboarding") if isinstance(project_state, Mapping) else None
+            if isinstance(onboarding, Mapping):
+                for action_id, ledger in onboarding.items():
+                    if str(action_id) in ledgers:
+                        raise BootstrapApplyError("onboarding action was recorded by more than one project")
+                    ledgers[str(action_id)] = ledger
+    else:
+        onboarding = state.get("onboarding")
+        if isinstance(onboarding, Mapping):
+            ledgers = {str(key): value for key, value in onboarding.items()}
+    if not ledgers:
         raise BootstrapApplyError("evaluations provider state carries no onboarding finalization")
     finalizations: dict[str, EvaluationFinalization] = {}
-    for action_id, ledger in onboarding.items():
+    for action_id, ledger in ledgers.items():
         if not isinstance(ledger, Mapping):
             raise BootstrapApplyError("onboarding provider state ledger is invalid")
         stages = ledger.get("stages")
@@ -702,16 +726,22 @@ def finalize_evaluation_activation(
         lock_sha256=_sha256_bytes(lock_bytes),
         enabled_agent_ids=enabled_ids,
     )
-    primary = prepared[0]
-    replacement = EvaluationReplacementRecord(
-        active_bundle_id=primary.activated_bundle_objective_hash or "",
-        candidate_bundle_id=primary.activated_bundle_objective_hash or "",
-        preserved_bundle_id=primary.retained_bundle_objective_hash or primary.activated_bundle_objective_hash or "",
-        lineage_hash=primary.lineage_hash,
-        status="activated",
-        detail=primary.lifecycle_status,
+    per_agent = tuple(
+        EvaluationAgentReplacement(
+            repo_agent_id=item.repo_agent_id,
+            active_bundle_id=item.activated_bundle_objective_hash or "",
+            candidate_bundle_id=item.activated_bundle_objective_hash or "",
+            preserved_bundle_id=item.retained_bundle_objective_hash or item.activated_bundle_objective_hash or "",
+            lineage_hash=item.lineage_hash,
+            status="activated",
+            detail=item.lifecycle_status,
+        )
+        for item in sorted(prepared, key=lambda entry: entry.repo_agent_id)
     )
-    updated = next_generation(envelope, evaluator_replacement=replacement)
+    # The legacy single record stays as a compatibility projection of the first agent; every
+    # agent's own bundle and lineage is recorded in `evaluator_replacements`.
+    replacement = per_agent[0].as_legacy_record()
+    updated = next_generation(envelope, evaluator_replacement=replacement, evaluator_replacements=per_agent)
     write_operation_state(updated, expected_generation=envelope.generation, state_root=state_root)
     return receipt
 

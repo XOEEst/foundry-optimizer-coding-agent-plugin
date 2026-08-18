@@ -230,6 +230,51 @@ def _fingerprint_dataset_content(dataset_content_uri: str, dataset_type: str) ->
     return hashlib.sha256(_canonical_json({'data_uri': dataset_content_uri, 'type': dataset_type}).encode('utf-8')).hexdigest()
 
 
+def _sdk_mapping(value: object) -> Mapping[str, object]:
+    """Normalize any SDK response value (TypedDict, azure model, pydantic model) to a mapping."""
+
+    if value is None:
+        return {}
+    if isinstance(value, Mapping):
+        return {str(key): _plain(item) for key, item in value.items()}
+    for accessor in ('model_dump', 'as_dict', 'to_dict', 'dict'):
+        method = getattr(value, accessor, None)
+        if callable(method):
+            try:
+                data = method(mode='json') if accessor == 'model_dump' else method()
+            except TypeError:
+                data = method()
+            if isinstance(data, Mapping):
+                return {str(key): _plain(item) for key, item in data.items()}
+    raise FoundryPrerequisiteError('evaluation definition response is not a readable mapping', kind='prerequisite')
+
+
+def _definition_signature(data_source_config: Mapping[str, object], testing_criteria: Sequence[Mapping[str, object]]) -> str:
+    """Canonical signature of a definition: data source config plus every grader binding.
+
+    Only the fields that decide what is measured participate, so a definition may only be
+    adopted when it measures exactly the approved evaluators the same way.
+    """
+
+    criteria = [
+        {
+            'type': str(item.get('type') or ''),
+            'name': str(item.get('name') or ''),
+            'evaluator_name': str(item.get('evaluator_name') or ''),
+            'evaluator_version': str(item.get('evaluator_version') or ''),
+            'data_mapping': {str(key): str(value) for key, value in (item.get('data_mapping') or {}).items()} if isinstance(item.get('data_mapping'), Mapping) else {},
+            'initialization_parameters': {str(key): _plain(value) for key, value in item.get('initialization_parameters').items()} if isinstance(item.get('initialization_parameters'), Mapping) else {},
+        }
+        for item in testing_criteria
+    ]
+    criteria.sort(key=lambda item: (item['name'], item['evaluator_name'], item['evaluator_version']))
+    payload = {
+        'data_source_config': {str(key): _plain(value) for key, value in data_source_config.items()},
+        'testing_criteria': criteria,
+    }
+    return hashlib.sha256(_canonical_json(payload).encode('utf-8')).hexdigest()
+
+
 def _repo_relative_archive_path(name: str, *, root: str) -> str | None:
     """Map an agent code archive entry onto its repository-relative path under `root`.
 
@@ -379,7 +424,7 @@ class FoundryCapabilityProbe(FrozenModel):
 
 
 class FoundryAdapter:
-    def __init__(self, project_endpoint: str, credential: TokenCredential, *, client: object | None = None, time_source: Callable[[], float] | None = None, sleep: Callable[[float], None] | None = None, default_poll_interval: float = 1.0, split_writer: Callable[..., str] | None = None) -> None:
+    def __init__(self, project_endpoint: str, credential: TokenCredential, *, client: object | None = None, time_source: Callable[[], float] | None = None, sleep: Callable[[float], None] | None = None, default_poll_interval: float = 1.0, split_writer: Callable[..., str] | None = None, checkpoint: Callable[[Mapping[str, object]], None] | None = None) -> None:
         self._project_endpoint = project_endpoint
         self._client = client if client is not None else AIProjectClient(project_endpoint, credential)
         self._time = time_source or time.monotonic
@@ -389,6 +434,73 @@ class FoundryAdapter:
         self._openai: object | None = None
         self._split_writer = split_writer
         self._onboarding: dict[str, dict[str, object]] = {}
+        self._checkpoint = checkpoint
+
+    @property
+    def project_endpoint(self) -> str:
+        return self._project_endpoint
+
+    def set_checkpoint(self, checkpoint: Callable[[Mapping[str, object]], None] | None) -> None:
+        """Install the durable sink used to persist in-flight generation handles."""
+
+        self._checkpoint = checkpoint
+
+    def onboarding_ledger_snapshot(self) -> Mapping[str, object]:
+        """Restart-relevant ledger of stages and in-flight generation handles."""
+
+        return json.loads(_canonical_json({'schema_version': _PROVIDER_STATE_SCHEMA_VERSION, 'onboarding': self._onboarding}))
+
+    def _publish_checkpoint(self) -> None:
+        if self._checkpoint is None:
+            return
+        self._checkpoint(self.onboarding_ledger_snapshot())
+
+    def _record_pending_handle(self, ledger: Mapping[str, object], stage: str, handle: 'FoundryOperationHandle') -> None:
+        """Persist an in-flight generation handle before the first poll.
+
+        A crash between job submission and completion must resume the recorded continuation
+        instead of resubmitting, so the handle is durably checkpointed first.
+        """
+
+        stages = ledger.get('stages')
+        if not isinstance(stages, dict):
+            stages = {}
+            ledger['stages'] = stages  # type: ignore[index]
+        entry = stages.get(stage)
+        detail = dict(entry) if isinstance(entry, Mapping) else {}
+        detail['status'] = 'in_flight'
+        detail['handle'] = {
+            'operation_id': handle.operation_id,
+            'job_kind': handle.job_kind,
+            'continuation_token': handle.continuation_token,
+            'polling_url': handle.polling_url,
+        }
+        stages[stage] = detail
+        self._publish_checkpoint()
+
+    def _pending_handle(self, ledger: Mapping[str, object], stage: str, *, job_kind: str) -> 'FoundryOperationHandle | None':
+        stages = ledger.get('stages')
+        if not isinstance(stages, Mapping):
+            return None
+        entry = stages.get(stage)
+        if not isinstance(entry, Mapping) or entry.get('status') == 'completed':
+            return None
+        handle = entry.get('handle')
+        if not isinstance(handle, Mapping):
+            return None
+        token = handle.get('continuation_token')
+        operation_id = handle.get('operation_id')
+        if not isinstance(token, str) or not token or not isinstance(operation_id, str) or not operation_id:
+            return None
+        if str(handle.get('job_kind') or '') != job_kind:
+            return None
+        return FoundryOperationHandle(
+            operation_id=operation_id,
+            job_kind=job_kind,
+            continuation_token=token,
+            polling_url=str(handle.get('polling_url')) if isinstance(handle.get('polling_url'), str) else None,
+            created=False,
+        )
 
     def _ownership_token(self, operation_id: str, action_id: str) -> str:
         return hashlib.sha256(_canonical_json({'operation_id': operation_id, 'action_id': action_id, 'project_endpoint': self._project_endpoint}).encode('utf-8')).hexdigest()[:32]
@@ -917,7 +1029,12 @@ class FoundryAdapter:
             return None
         except Exception as exc:
             raise self._classify_error(exc) from exc
-        return {'id': getattr(item, 'id', None), 'name': getattr(item, 'name', None)}
+        return {
+            'id': getattr(item, 'id', None),
+            'name': getattr(item, 'name', None),
+            'data_source_config': _sdk_mapping(getattr(item, 'data_source_config', None)),
+            'testing_criteria': [_sdk_mapping(entry) for entry in (getattr(item, 'testing_criteria', None) or ())],
+        }
 
     def create_or_adopt_evaluation_definition(self, request: _DefinitionActionRequest) -> Mapping[str, object]:
         """Create or adopt an immutable evaluation definition for the legacy granular action.
@@ -1480,16 +1597,16 @@ class FoundryAdapter:
         one `TestingCriterionAzureAIEvaluator` (`azure_ai_evaluator`) grader per approved
         evaluator, binding the immutable Foundry evaluator name/version directly instead of
         echoing precomputed numbers through a Python grader.
+
+        Adoption is strict: an existing definition with the requested name is retrieved and
+        may only be adopted when its canonical signature (data source config plus every
+        criterion's type/name/evaluator name/version/data mapping/initialization parameters)
+        equals the requested one. A name collision with different measurement semantics fails
+        closed instead of silently evaluating against the wrong definition.
         """
         if role not in _DEFINITION_ROLES:
             raise FoundryPrerequisiteError('evaluation definition role is invalid', kind='prerequisite')
         client = self._openai_client()
-        existing = next((item for item in self.list_evaluation_definitions() if item.get('name') == definition_name), None)
-        if existing is not None:
-            resource_id = existing.get('id')
-            if not isinstance(resource_id, str) or not resource_id:
-                raise FoundryPrerequisiteError('existing evaluation definition has no immutable identifier', kind='prerequisite')
-            return {'created': False, 'adopted': True, 'definition': existing, 'resource_id': resource_id}
         data_source_config: AzureAIDataSourceConfig = {'type': 'azure_ai_source', 'scenario': _EVAL_SCENARIO}
         testing_criteria: list[TestingCriterionAzureAIEvaluator] = []
         for name in sorted(criteria):
@@ -1507,6 +1624,29 @@ class FoundryAdapter:
             if isinstance(version, str) and version:
                 entry['evaluator_version'] = version
             testing_criteria.append(entry)
+        requested_signature = _definition_signature(data_source_config, testing_criteria)
+        existing = next((item for item in self.list_evaluation_definitions() if item.get('name') == definition_name), None)
+        if existing is not None:
+            resource_id = existing.get('id')
+            if not isinstance(resource_id, str) or not resource_id:
+                raise FoundryPrerequisiteError('existing evaluation definition has no immutable identifier', kind='prerequisite')
+            live = self.get_evaluation_definition(resource_id)
+            if live is None:
+                raise FoundryPrerequisiteError('existing evaluation definition could not be retrieved for adoption', kind='prerequisite')
+            live_criteria = live.get('testing_criteria')
+            if not isinstance(live_criteria, Sequence) or isinstance(live_criteria, (str, bytes, bytearray)) or not live_criteria:
+                raise FoundryPrerequisiteError('existing evaluation definition exposes no testing criteria', kind='prerequisite')
+            live_config = live.get('data_source_config')
+            existing_signature = _definition_signature(
+                live_config if isinstance(live_config, Mapping) else {},
+                [item for item in live_criteria if isinstance(item, Mapping)],
+            )
+            if existing_signature != requested_signature:
+                raise FoundryPrerequisiteError(
+                    f'existing evaluation definition {definition_name!r} does not match the approved evaluator bindings',
+                    kind='prerequisite',
+                )
+            return {'created': False, 'adopted': True, 'definition': {'id': resource_id, 'name': definition_name, 'signature': existing_signature}, 'resource_id': resource_id}
         try:
             created = client.evals.create(data_source_config=data_source_config, testing_criteria=testing_criteria, name=definition_name)
         except Exception as exc:
@@ -1515,7 +1655,7 @@ class FoundryAdapter:
         if not isinstance(created_id, str) or not created_id:
             raise FoundryPrerequisiteError('evaluation definition creation returned no id', kind='prerequisite')
         del dataset
-        return {'created': True, 'adopted': False, 'definition': {'id': created_id, 'name': definition_name}, 'resource_id': created_id}
+        return {'created': True, 'adopted': False, 'definition': {'id': created_id, 'name': definition_name, 'signature': requested_signature}, 'resource_id': created_id}
 
     def get_dataset_by_id(self, dataset_id: str) -> Mapping[str, object] | None:
         """Resolve a dataset version from an immutable `azureai://.../data/<name>/versions/<v>` id."""
@@ -1656,7 +1796,9 @@ class FoundryAdapter:
     def _record_stage(self, ledger: Mapping[str, object], stage: str, detail: Mapping[str, object]) -> None:
         stages = ledger.get('stages')
         if isinstance(stages, dict):
+            # A completed stage drops any in-flight handle: there is nothing left to resume.
             stages[stage] = {'status': 'completed', **{key: value for key, value in detail.items()}}
+            self._publish_checkpoint()
 
     def _completed_stage(self, ledger: Mapping[str, object], stage: str) -> Mapping[str, object] | None:
         stages = ledger.get('stages')
@@ -1813,8 +1955,13 @@ class FoundryAdapter:
                         else len(index)
                     )
                 else:
-                    handle = self.create_dataset_generation_job(self._dataset_generation_request(contract))
-                    job = self.poll_generation_job(handle)
+                    handle = self._pending_handle(ledger, 'generation', job_kind='dataset_generation')
+                    if handle is None:
+                        handle = self.create_dataset_generation_job(self._dataset_generation_request(contract))
+                    job = self.poll_generation_job(
+                        handle,
+                        persist_before_poll=lambda pending: self._record_pending_handle(ledger, 'generation', pending),
+                    )
                     generated = job.get('generated_samples')
                     if not isinstance(generated, int) or isinstance(generated, bool):
                         raise FoundryPrerequisiteError('dataset generation reported no sample count', kind='prerequisite')
@@ -1993,8 +2140,13 @@ class FoundryAdapter:
             completed = self._completed_stage(ledger, 'evaluator')
             existing = self.get_evaluator_version(evaluator_plan.requested_name, evaluator_plan.requested_version)
             if existing is None:
-                handle = self.create_evaluator_generation_job(self._evaluator_generation_request(contract, datasets['development']))
-                job = self.poll_generation_job(handle)
+                handle = self._pending_handle(ledger, 'evaluator', job_kind='evaluator_generation')
+                if handle is None:
+                    handle = self.create_evaluator_generation_job(self._evaluator_generation_request(contract, datasets['development']))
+                job = self.poll_generation_job(
+                    handle,
+                    persist_before_poll=lambda pending: self._record_pending_handle(ledger, 'evaluator', pending),
+                )
                 saved = job.get('saved_evaluator')
                 if not isinstance(saved, Mapping) or not saved.get('name') or not saved.get('version'):
                     raise FoundryPrerequisiteError('rubric generation produced no saved evaluator version', kind='prerequisite')
@@ -2482,6 +2634,31 @@ class FoundryAdapter:
             raise FoundryPrerequisiteError('provider state unavailable for receipt export', kind='prerequisite')
         self._validate_provider_state_binding(receipt, self._provider_state)
         return self._resource_records_from_state(self._provider_state)
+
+    def restore_checkpoint(self, mapping: Mapping[str, object]) -> None:
+        """Restore an in-flight onboarding ledger recorded before any receipt exists.
+
+        Checkpoints are written while a phase is still `applying`, so they cannot be receipt
+        bound. Only the stage ledger is accepted, and it is re-validated for shape and size.
+        """
+
+        state = json.loads(_canonical_json(mapping))
+        if state.get('schema_version') != _PROVIDER_STATE_SCHEMA_VERSION:
+            raise FoundryPrerequisiteError('checkpoint schema_version mismatch', kind='prerequisite')
+        onboarding = state.get('onboarding')
+        if not isinstance(onboarding, Mapping):
+            raise FoundryPrerequisiteError('checkpoint onboarding ledger is invalid', kind='prerequisite')
+        self._validate_state_document_bounds(state)
+        restored: dict[str, dict[str, object]] = {}
+        for action_id, ledger in onboarding.items():
+            if not isinstance(ledger, Mapping):
+                raise FoundryPrerequisiteError('checkpoint onboarding ledger entry is invalid', kind='prerequisite')
+            stages = ledger.get('stages')
+            restored[str(action_id)] = {
+                'stages': dict(stages) if isinstance(stages, Mapping) else {},
+                'finalization': ledger.get('finalization'),
+            }
+        self._onboarding = restored
 
     def restore_provider_state(self, mapping: Mapping[str, object]) -> None:
         encoded = _canonical_json(mapping).encode('utf-8')

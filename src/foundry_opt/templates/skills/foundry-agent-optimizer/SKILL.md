@@ -87,7 +87,10 @@ an agent optimize job.
    (staged inventory -> generation -> split -> evaluator -> definitions ->
    activation -> cleanup), then `bootstrap evaluation activate`. The repository
    phase never writes a sidecar; only the receipt-bound `activate` step writes
-   it and enables that agent in the registry.
+   it and enables that agent in the registry. `activate` is the finalization of
+   the same single approval — never a second approval — and is idempotent, so an
+   interrupted activation is safe to re-run. Agents may live in different
+   Foundry projects; each one is applied against its own project.
 10. Collect exactly one evaluations-phase approval. A generated rubric is
     auto-adopted without a second prompt, but only after structural, execution,
     headroom, activation, cleanup, and full safety-bundle gates pass against the
@@ -105,7 +108,8 @@ an agent optimize job.
 13. Use `bootstrap evaluation inspect|status|replace` for approved bounds,
     receipt finalization, resume state, and explicit replacement. There is no
     rubric editor in v1, and a failed replacement retains the previously active
-    bundle.
+    bundle. `status`/`inspect` report one bundle and lineage per agent; the
+    single legacy field is only a compatibility projection.
 14. Explain that issue objectives guide mutations, issue-supplied weighted
     evaluators select optimize winners, and repository defaults govern
     merge-time deployment.

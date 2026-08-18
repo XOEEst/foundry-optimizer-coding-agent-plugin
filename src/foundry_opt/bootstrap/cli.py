@@ -170,10 +170,12 @@ def _resolve_binding_evidence(
 def _verify_binding_claims(plan_input: BootstrapPlanInput, *, repo_root: Path) -> dict[str, str]:
     """Re-derive binding classifications from reviewed evidence and refuse false claims.
 
-    Verification runs only when the plan input carries binding evidence: without observed
-    content fingerprints there is nothing to check a claim against, and an agent is expected
-    to remain `bound-unknown`. When evidence is present, every reviewed onboarding contract
-    must claim exactly the classification discovery derives from that evidence.
+    Verification runs on every planning, apply, and activation path, not only the
+    `evaluation plan` helper, so an operator cannot reach an approved mutation by skipping a
+    command. It is a no-op only when the plan input carries no binding evidence: without
+    observed content fingerprints there is nothing to check a claim against, and an agent is
+    expected to remain `bound-unknown`. When evidence is present, every reviewed onboarding
+    contract must claim exactly the classification discovery derives from that evidence.
     """
 
     evidence = plan_input.binding_evidence
@@ -374,6 +376,7 @@ def register_bootstrap_commands(app: typer.Typer) -> None:
                 if candidate is None or key not in selected:
                     raise BootstrapCliError("binding-evidence-missing-agent", "evaluation agent was not discovered in the repository", exit_code=BootstrapExitCode.CONFIG, details={"repo_agent_id": agent.repo_agent_id})
                 observation = driver.observe_agent_binding(
+                    repo_agent_id=agent.repo_agent_id,
                     agent_name=agent.agent_name,
                     agent_version=agent.agent_version,
                     source_root=candidate.sourceRoot,
@@ -427,6 +430,7 @@ def register_bootstrap_commands(app: typer.Typer) -> None:
                     "plan input repository does not match --repository-id",
                     exit_code=BootstrapExitCode.CONFIG,
                 )
+            _verify_binding_claims(loaded, repo_root=repo_root)
             selected = tuple(
                 agent.repo_agent_id for agent in loaded.repository.selected_agents
             )
@@ -535,6 +539,7 @@ def register_bootstrap_commands(app: typer.Typer) -> None:
             payload = load_json_file(approval_file, subject="approval")
             if _APPROVAL_HASH_FIELD not in payload:
                 raise BootstrapCliError("approval-hash-required", "approval record hash is required", exit_code=BootstrapExitCode.CONFIG)
+            _verify_binding_claims(loaded, repo_root=repo_root)
             approval = ApprovalRecord.model_validate(payload)
             current = read_operation_state(repository_id, operation_id, state_root=state_root)
             resolved_commit = runtime_commit or loaded.runtime_provenance.runtime_commit
@@ -633,7 +638,9 @@ def register_bootstrap_commands(app: typer.Typer) -> None:
                 "assessments": assessments,
             }
             if live:
-                payload["inventory"] = EvaluationPhaseDriver(plan_input=loaded).inventory()
+                # One inventory per Foundry project: agents may live in different projects.
+                payload["inventory_by_project"] = EvaluationPhaseDriver(plan_input=loaded).inventory_by_project()
+                payload["inventory"] = next(iter(payload["inventory_by_project"].values()), {})
             emit_json(payload)
         except Exception as exc:
             _handle_error(exc)
@@ -704,6 +711,7 @@ def register_bootstrap_commands(app: typer.Typer) -> None:
                     "approval record hash is required",
                     exit_code=BootstrapExitCode.CONFIG,
                 )
+            _verify_binding_claims(loaded, repo_root=repo_root)
             approval = ApprovalRecord.model_validate(approval_payload)
             receipt = _build_orchestrator(
                 repo_root=repo_root,
@@ -747,6 +755,7 @@ def register_bootstrap_commands(app: typer.Typer) -> None:
     ) -> None:
         try:
             loaded = load_bootstrap_plan_input(plan_input)
+            _verify_binding_claims(loaded, repo_root=repo_root)
             current = read_operation_state(repository_id, operation_id, state_root=state_root)
             resolved_commit = runtime_commit or loaded.runtime_provenance.runtime_commit
             _require_exact_runtime(current.runtime_commit, resolved_commit)
@@ -806,6 +815,7 @@ def register_bootstrap_commands(app: typer.Typer) -> None:
                     "sidecar_activation_state": sidecar_state,
                     "activated": phase_state == "applied" and sidecar_state == "completed",
                     "replacement": current.evaluator_replacement.model_dump(mode="json") if current.evaluator_replacement else None,
+                    "replacements": [item.model_dump(mode="json") for item in current.evaluator_replacements],
                     "next_action": next_action,
                 }
             )
@@ -863,6 +873,8 @@ def register_bootstrap_commands(app: typer.Typer) -> None:
                     "runtime_commit": resolved_commit,
                     "bundle": state.evaluator_replacement.model_dump(mode="json") if state.evaluator_replacement else None,
                     "lineage": state.evaluator_replacement.lineage_hash if state.evaluator_replacement else None,
+                    "bundles": [item.model_dump(mode="json") for item in state.evaluator_replacements],
+                    "lineages": {item.repo_agent_id: item.lineage_hash for item in state.evaluator_replacements},
                     "contracts": contracts,
                     "human_rubric_editor": False,
                     "provenance": "repository default bundle; issue-scoped evaluators never replace it",

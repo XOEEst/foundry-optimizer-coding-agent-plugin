@@ -585,6 +585,47 @@ def test_discover_json_reports_blockers_for_unusable_roots(tmp_path: Path) -> No
     assert agent["blockers"] == [{"code": "missing-entrypoint", "detail": "binding evidence exists but no supported entrypoint file was found"}]
 
 
+def test_binding_verification_cannot_be_bypassed_by_skipping_evaluation_plan(tmp_path: Path) -> None:
+    """Every approved/apply path re-derives the claim, not just the `evaluation plan` helper."""
+
+    repo = _repo(tmp_path)
+    observation, _adapter, _fakes = _observe(repo)
+    (repo / "app" / "main.py").write_text("import fastapi\napp = fastapi.FastAPI()\n# drift\n", encoding="utf-8")
+    plan_input = _write_plan_input(tmp_path, _plan_input_payload(tmp_path, evidence=_document(observation)))
+    state_root = tmp_path / "state"
+    approval = tmp_path / "approval.json"
+    approval.write_text(json.dumps({"schema_version": 1, "parent_plan_hash": "b" * 64, "phase": "evaluations", "actor": "tester", "summary": "approve", "approval_hash": "c" * 64}), encoding="utf-8")
+
+    invocations = {
+        "plan": ["bootstrap", "plan", "--plan-input", str(plan_input), "--repository-id", "org/repo", "--repo-root", str(repo), "--operation-id", "op-bypass", "--state-root", str(state_root)],
+        "apply": ["bootstrap", "apply", "--repository-id", "org/repo", "--operation-id", "op-bypass", "--phase", "evaluations", "--approval-file", str(approval), "--plan-input", str(plan_input), "--repo-root", str(repo), "--state-root", str(state_root)],
+        "evaluation apply": ["bootstrap", "evaluation", "apply", "--repository-id", "org/repo", "--operation-id", "op-bypass", "--approval-file", str(approval), "--plan-input", str(plan_input), "--repo-root", str(repo), "--state-root", str(state_root)],
+        "evaluation activate": ["bootstrap", "evaluation", "activate", "--repository-id", "org/repo", "--operation-id", "op-bypass", "--plan-input", str(plan_input), "--repo-root", str(repo), "--state-root", str(state_root)],
+    }
+    for label, argv in invocations.items():
+        result = runner.invoke(app, argv)
+        assert result.exit_code != 0, f"{label} accepted a false bound-aligned claim"
+        assert json.loads(result.stdout)["error"]["code"] == "binding-classification-mismatch", label
+
+
+def test_verified_claims_do_not_block_the_generic_plan_path(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    observation, _adapter, _fakes = _observe(repo)
+    plan_input = _write_plan_input(tmp_path, _plan_input_payload(tmp_path, evidence=_document(observation)))
+    state_root = tmp_path / "state"
+    assert runner.invoke(
+        app,
+        ["bootstrap", "discover", "--repo-root", str(repo), "--repository-id", "org/repo", "--operation-id", "op-verified", "--state-root", str(state_root), "--plan-input", str(plan_input)],
+    ).exit_code == 0
+
+    planned = runner.invoke(
+        app,
+        ["bootstrap", "plan", "--plan-input", str(plan_input), "--repository-id", "org/repo", "--repo-root", str(repo), "--operation-id", "op-verified", "--state-root", str(state_root)],
+    )
+
+    assert planned.exit_code == 0, planned.stdout
+
+
 def test_persisted_evidence_carries_no_repository_content(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     observation, _adapter, _fakes = _observe(repo)
