@@ -28,7 +28,6 @@ from azure.ai.projects.models import (
     AgentDataGenerationJobSource,
     AgentEvaluatorGenerationJobSource,
     AzureAIAgentTargetParam,
-    AzureAIDataSourceConfig,
     CodeConfiguration,
     DataGenerationJob,
     DataGenerationJobInputs,
@@ -2496,7 +2495,19 @@ class FoundryAdapter:
         if role not in _DEFINITION_ROLES:
             raise FoundryPrerequisiteError('evaluation definition role is invalid', kind='prerequisite')
         client = self._openai_client()
-        data_source_config: AzureAIDataSourceConfig = {'type': 'azure_ai_source', 'scenario': _EVAL_SCENARIO}
+        data_source_config: Mapping[str, object]
+        if dataset:
+            data_source_config = {
+                'type': 'custom',
+                'item_schema': {
+                    'type': 'object',
+                    'properties': {'query': {'type': 'string'}},
+                    'required': ['query'],
+                },
+                'include_sample_schema': True,
+            }
+        else:
+            data_source_config = {'type': 'azure_ai_source', 'scenario': _EVAL_SCENARIO}
         testing_criteria: list[TestingCriterionAzureAIEvaluator] = []
         for name in sorted(criteria):
             criterion = criteria[name]
