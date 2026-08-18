@@ -3310,6 +3310,7 @@ class FoundryAdapter:
         else:
             completed = self._completed_stage(ledger, 'evaluator')
             existing = self.get_evaluator_version(evaluator_plan.requested_name, evaluator_plan.requested_version)
+            existed_before_apply = existing is not None
             if existing is None:
                 handle = self._pending_handle(ledger, 'evaluator', job_kind='evaluator_generation')
                 if handle is None:
@@ -3349,7 +3350,7 @@ class FoundryAdapter:
                     name=str(existing['name']),
                     version=str(existing['version']),
                     kind='evaluator',
-                    disposition='created' if completed is None else 'adopted',
+                    disposition='adopted' if existed_before_apply or completed is not None else 'created',
                     fingerprint=evaluator_plan.generation_job_id,
                     resource_type='custom',
                 )
