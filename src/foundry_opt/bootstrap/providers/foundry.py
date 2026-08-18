@@ -52,7 +52,7 @@ from azure.ai.projects.models import (
     TracesDataGenerationJobSource,
     TracesEvaluatorGenerationJobSource,
 )
-from azure.core.credentials import TokenCredential
+from azure.core.credentials import AccessToken, TokenCredential
 from azure.core.exceptions import ClientAuthenticationError, HttpResponseError, ResourceNotFoundError, ServiceRequestError
 import openai
 
@@ -521,19 +521,39 @@ class FoundryCapabilityProbe(FrozenModel):
     model_deployments: tuple[str, ...] = ()
 
 
+class _CachingTokenCredential:
+    """Thread-safe process-local token cache for the many short-lived live clients."""
+
+    def __init__(self, source: TokenCredential) -> None:
+        self._source = source
+        self._tokens: dict[tuple[tuple[str, ...], tuple[tuple[str, str], ...]], AccessToken] = {}
+        self._lock = threading.Lock()
+
+    def get_token(self, *scopes: str, **kwargs: object) -> AccessToken:
+        options = tuple(sorted((str(key), str(value)) for key, value in kwargs.items()))
+        key = (tuple(scopes), options)
+        with self._lock:
+            cached = self._tokens.get(key)
+            if cached is not None and cached.expires_on > time.time() + 300:
+                return cached
+            token = self._source.get_token(*scopes, **kwargs)
+            self._tokens[key] = token
+            return token
+
+
 class FoundryAdapter:
     def __init__(self, project_endpoint: str, credential: TokenCredential, *, client: object | None = None, time_source: Callable[[], float] | None = None, sleep: Callable[[float], None] | None = None, default_poll_interval: float = 1.0, split_writer: Callable[..., str] | None = None, checkpoint: Callable[[Mapping[str, object]], None] | None = None, download_timeout: float = 60.0, request_timeout: float = 120.0, operation_timeout: float = 1800.0) -> None:
         self._project_endpoint = project_endpoint
-        self._credential = credential
+        self._credential = credential if client is not None else _CachingTokenCredential(credential)
         self._injected_client = client is not None
-        self._client = client if client is not None else AIProjectClient(project_endpoint, credential)
+        self._client = client if client is not None else AIProjectClient(project_endpoint, self._credential)
         # A synchronous hosted-code upload can keep its client pipeline occupied after the
         # version is already active. Live observation uses an independent pipeline so the
         # bounded owner can see that exact version and continue.
         self._agent_observer_client = (
             client
             if client is not None
-            else AIProjectClient(project_endpoint, credential)
+            else AIProjectClient(project_endpoint, self._credential)
         )
         self._time = time_source or time.monotonic
         self._sleep = sleep or time.sleep
