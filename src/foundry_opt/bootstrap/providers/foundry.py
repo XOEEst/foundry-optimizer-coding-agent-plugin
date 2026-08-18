@@ -524,6 +524,8 @@ class FoundryCapabilityProbe(FrozenModel):
 class FoundryAdapter:
     def __init__(self, project_endpoint: str, credential: TokenCredential, *, client: object | None = None, time_source: Callable[[], float] | None = None, sleep: Callable[[float], None] | None = None, default_poll_interval: float = 1.0, split_writer: Callable[..., str] | None = None, checkpoint: Callable[[Mapping[str, object]], None] | None = None, download_timeout: float = 60.0, request_timeout: float = 120.0, operation_timeout: float = 1800.0) -> None:
         self._project_endpoint = project_endpoint
+        self._credential = credential
+        self._injected_client = client is not None
         self._client = client if client is not None else AIProjectClient(project_endpoint, credential)
         # A synchronous hosted-code upload can keep its client pipeline occupied after the
         # version is already active. Live observation uses an independent pipeline so the
@@ -538,6 +540,7 @@ class FoundryAdapter:
         self._default_poll_interval = default_poll_interval
         self._provider_state: dict[str, object] | None = None
         self._openai: object | None = None
+        self._openai_observer: object | None = None
         self._split_writer = split_writer
         self._onboarding: dict[str, dict[str, object]] = {}
         self._checkpoint = checkpoint
@@ -797,6 +800,36 @@ class FoundryAdapter:
             client = with_options(timeout=self._request_timeout, max_retries=2)
         self._openai = client
         return client
+
+    def _openai_observer_client(self) -> object:
+        if self._openai_observer is not None:
+            return self._openai_observer
+        getter = getattr(self._agent_observer_client, 'get_openai_client', None)
+        if not callable(getter):
+            raise FoundryUnsupportedCapabilityError('OpenAI-compatible evals observer unavailable', kind='unsupported_preview')
+        try:
+            client = getter()
+        except Exception as exc:
+            raise self._classify_error(exc) from exc
+        with_options = getattr(client, 'with_options', None)
+        if callable(with_options):
+            client = with_options(timeout=self._request_timeout, max_retries=2)
+        self._openai_observer = client
+        return client
+
+    def _new_openai_submission_client(self) -> object:
+        if self._injected_client:
+            return self._openai_client()
+        project = AIProjectClient(self._project_endpoint, self._credential)
+        getter = getattr(project, 'get_openai_client', None)
+        if not callable(getter):
+            raise FoundryUnsupportedCapabilityError('OpenAI-compatible evals submission unavailable', kind='unsupported_preview')
+        try:
+            client = getter()
+        except Exception as exc:
+            raise self._classify_error(exc) from exc
+        with_options = getattr(client, 'with_options', None)
+        return with_options(timeout=self._request_timeout, max_retries=2) if callable(with_options) else client
 
     def _classify_error(self, exc: BaseException) -> FoundryAdapterError:
         if isinstance(exc, FoundryAdapterError):
@@ -1269,7 +1302,7 @@ class FoundryAdapter:
         return {'created': True, 'adopted': False, 'definition': {'id': created_id, 'name': request.definition_name}, 'resource_id': created_id}
 
     def get_activation_run(self, run_id: str, definition_id: str) -> Mapping[str, object] | None:
-        client = self._openai_client()
+        client = self._openai_observer_client()
         try:
             item = client.evals.runs.retrieve(run_id=run_id, eval_id=definition_id)
         except openai.NotFoundError:
@@ -2283,7 +2316,7 @@ class FoundryAdapter:
         return rubric
 
     def _await_activation_run(self, run_id: str, definition_id: str, *, deadline_monotonic: float | None = None) -> Mapping[str, object]:
-        client = self._openai_client()
+        client = self._openai_observer_client()
         if deadline_monotonic is None:
             deadline_monotonic = self._time() + self._operation_timeout
         while True:
@@ -2490,7 +2523,6 @@ class FoundryAdapter:
         """
         if samples_count <= 0:
             raise FoundryPrerequisiteError('synthetic generation requires a positive sample count', kind='prerequisite')
-        client = self._openai_client()
         data_source = {
             'type': 'azure_ai_synthetic_data_gen_preview',
             'item_generation_params': {
@@ -2502,21 +2534,112 @@ class FoundryAdapter:
             },
             'target': {'type': 'azure_ai_agent', 'name': agent_name, 'version': agent_version},
         }
-        try:
-            run = client.evals.runs.create(eval_id=definition_id, data_source=data_source, name=run_name)
-        except Exception as exc:
-            raise self._classify_error(exc) from exc
-        run_id = getattr(run, 'id', None)
-        if not isinstance(run_id, str) or not run_id:
-            raise FoundryPrerequisiteError('synthetic generation run returned no id', kind='prerequisite')
-        if on_submitted is not None:
-            on_submitted(run_id)
+        run_id = self._submit_eval_run(
+            definition_id=definition_id,
+            data_source=data_source,
+            run_name=run_name,
+            on_submitted=on_submitted,
+        )
         payload = self._await_activation_run(run_id, definition_id, deadline_monotonic=deadline_monotonic)
         completed = payload.get('run') if 'run' in payload else payload
         output_dataset_id = self._synthetic_output_dataset_id(completed, payload)
         if not isinstance(output_dataset_id, str) or not output_dataset_id:
             raise FoundryPrerequisiteError('synthetic generation run returned no output dataset id', kind='prerequisite')
         return {'run_id': run_id, 'output_dataset_id': output_dataset_id, 'generated_samples': self.run_output_item_count(run_id=run_id, definition_id=definition_id)}
+
+    @staticmethod
+    def _operation_run_name(prefix: str, operation_id: str) -> str:
+        safe_prefix = re.sub(r'[^A-Za-z0-9._~-]+', '-', prefix).strip('-') or 'foundry-opt'
+        suffix = hashlib.sha256(operation_id.encode('utf-8')).hexdigest()[:12]
+        return f'{safe_prefix[:48]}-{suffix}'
+
+    def _submit_eval_run(
+        self,
+        *,
+        definition_id: str,
+        data_source: Mapping[str, object],
+        run_name: str,
+        on_submitted: Callable[[str], None] | None = None,
+    ) -> str:
+        """Submit without waiting for the service-held response, reconciling by unique name."""
+
+        observer = self._openai_observer_client()
+
+        def _matching_runs() -> list[object]:
+            try:
+                return [
+                    item
+                    for item in observer.evals.runs.list(eval_id=definition_id)
+                    if getattr(item, 'name', None) == run_name
+                ]
+            except Exception as exc:
+                raise self._classify_error(exc) from exc
+
+        existing = _matching_runs()
+        if len(existing) > 1:
+            raise FoundryPrerequisiteError('evaluation run name is ambiguous', kind='prerequisite')
+        if existing:
+            run_id = getattr(existing[0], 'id', None)
+            if not isinstance(run_id, str) or not run_id:
+                raise FoundryPrerequisiteError('existing evaluation run has no id', kind='prerequisite')
+            if on_submitted is not None:
+                on_submitted(run_id)
+            return run_id
+
+        outcome: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=1)
+        submission = self._new_openai_submission_client()
+
+        def _submit() -> None:
+            try:
+                created = submission.evals.runs.create(
+                    eval_id=definition_id,
+                    data_source=data_source,
+                    name=run_name,
+                )
+            except BaseException as exc:  # daemon submission reports to the bounded owner
+                outcome.put(('error', exc))
+            else:
+                outcome.put(('created', created))
+
+        threading.Thread(
+            target=_submit,
+            name=f'foundry-opt-eval-run-{run_name}',
+            daemon=True,
+        ).start()
+        deadline = self._time() + self._operation_timeout
+        while True:
+            try:
+                status, value = outcome.get_nowait()
+            except queue.Empty:
+                matches = _matching_runs()
+                if len(matches) > 1:
+                    raise FoundryPrerequisiteError('evaluation run name is ambiguous', kind='prerequisite')
+                if matches:
+                    run_id = getattr(matches[0], 'id', None)
+                    if isinstance(run_id, str) and run_id:
+                        if on_submitted is not None:
+                            on_submitted(run_id)
+                        return run_id
+                if self._time() >= deadline:
+                    raise FoundryOperationDeadlineError('evaluation run submission deadline exceeded', kind='deadline', retryable=True)
+                self._sleep(self._default_poll_interval)
+                continue
+            if status == 'created':
+                run_id = getattr(value, 'id', None)
+                if not isinstance(run_id, str) or not run_id:
+                    raise FoundryPrerequisiteError('evaluation run submission returned no id', kind='prerequisite')
+                if on_submitted is not None:
+                    on_submitted(run_id)
+                return run_id
+            matches = _matching_runs()
+            if len(matches) == 1:
+                run_id = getattr(matches[0], 'id', None)
+                if isinstance(run_id, str) and run_id:
+                    if on_submitted is not None:
+                        on_submitted(run_id)
+                    return run_id
+            assert isinstance(value, BaseException)
+            raise self._classify_error(value) from value
 
     def _synthetic_output_dataset_id(self, completed: object, payload: Mapping[str, object]) -> str | None:
         """Read `data_source.item_generation_params.output_dataset_id` from a completed run."""
@@ -2547,7 +2670,7 @@ class FoundryAdapter:
         caller can fall back to the resolved dataset's case index.
         """
 
-        client = self._openai_client()
+        client = self._openai_observer_client()
         runs = getattr(client.evals, 'runs', None)
         output_items = getattr(runs, 'output_items', None)
         lister = getattr(output_items, 'list', None)
@@ -2723,7 +2846,10 @@ class FoundryAdapter:
                         output_dataset_name=f'{dataset_plan.requested_development_name}-source',
                         agent_name=dataset_plan.agent_name,
                         agent_version=dataset_plan.agent_version,
-                        run_name=f'{contract.repo_agent_id}-synthetic-generation',
+                        run_name=self._operation_run_name(
+                            f'{contract.repo_agent_id}-synthetic',
+                            plan.operation_id,
+                        ),
                         on_submitted=lambda run_id: record(
                             _ResourceDraft(
                                 suffix='activation-run:generation',
@@ -3103,7 +3229,6 @@ class FoundryAdapter:
         self._record_stage(ledger, 'definitions', dict(definition_ids))
 
         # --- stage 6: activation -------------------------------------------------
-        client = self._openai_client()
         run_ids: dict[str, str] = {}
         measurements: list[ActivationCaseFinalization] = []
         package = self._agent_packages.get(contract.repo_agent_id)
@@ -3142,13 +3267,14 @@ class FoundryAdapter:
                     draft_agent_name=contract.activation_plan.draft_agent_name,
                     draft_agent_version=contract.activation_plan.draft_agent_version,
                 )
-                try:
-                    run = client.evals.runs.create(eval_id=definition_ids[role], data_source=data_source, name=f'{role}-activation-smoke')
-                except Exception as exc:
-                    raise self._classify_error(exc) from exc
-                run_id = getattr(run, 'id', None)
-                if not isinstance(run_id, str) or not run_id:
-                    raise FoundryPrerequisiteError('activation run submission returned no id', kind='prerequisite')
+                run_id = self._submit_eval_run(
+                    definition_id=definition_ids[role],
+                    data_source=data_source,
+                    run_name=self._operation_run_name(
+                        f'{role}-activation',
+                        plan.operation_id,
+                    ),
+                )
                 run_ids[role] = run_id
                 record(_ResourceDraft(suffix=f'activation-run:{role}', resource_id=run_id, name=definition_ids[role], version=role, kind='activation_run', disposition='created'))
                 measurements.extend(self.activation_measurements(run_id=run_id, definition_id=definition_ids[role], phase=role, criteria=criteria))
@@ -3593,10 +3719,10 @@ class FoundryAdapter:
                 self._beta('evaluators').delete_version(resource.name, resource.version)
                 return True
             if resource.kind == 'evaluation_definition':
-                self._openai_client().evals.delete(eval_id=resource.resource_id)
+                self._openai_observer_client().evals.delete(eval_id=resource.resource_id)
                 return True
             if resource.kind == 'activation_run':
-                self._openai_client().evals.runs.delete(run_id=resource.resource_id, eval_id=resource.name)
+                self._openai_observer_client().evals.runs.delete(run_id=resource.resource_id, eval_id=resource.name)
                 return True
             if resource.kind == 'agent_draft':
                 result = self.cleanup_activation_draft(draft_agent_name=resource.name, draft_agent_version=resource.version)

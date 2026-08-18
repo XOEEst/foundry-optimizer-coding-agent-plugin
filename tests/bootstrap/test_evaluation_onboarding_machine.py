@@ -7,6 +7,8 @@ driven entirely by the in-repository SDK fakes.
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from foundry_opt.bootstrap.contracts import BootstrapAction, BootstrapPlan
@@ -473,6 +475,27 @@ def test_activation_runs_use_target_completions_against_the_split_datasets() -> 
         assert data_source["source"]["type"] == "file_id"
         assert data_source["target"] == {"type": "azure_ai_agent", "name": "draft-agent", "version": "1"}
         assert data_source["input_messages"]["type"] == "item_reference"
+
+
+def test_activation_submission_reconciles_a_run_before_create_returns() -> None:
+    contract = build_contract()
+    adapter, fakes = build_fake_adapter()
+    original = fakes["runs"].create
+    release = threading.Event()
+
+    def _create_then_wait(eval_id, *, data_source, name=None):
+        result = original(eval_id, data_source=data_source, name=name)
+        if str(name or "").startswith("development-activation"):
+            release.wait(60)
+        return result
+
+    fakes["runs"].create = _create_then_wait
+
+    receipt = adapter.apply_resources(_plan(contract, operation_id="op-nonblocking-run"))
+    release.set()
+
+    assert receipt.error_info is None
+    assert _finalization(adapter, receipt).activation.status == "succeeded"
 
 
 def test_synthetic_generation_uses_the_real_agent_run_and_output_dataset_id() -> None:
