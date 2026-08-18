@@ -205,6 +205,9 @@ def test_agent_upload_timeout_recovers_exact_owned_active_version() -> None:
 
     def _create_then_wait(*args, **kwargs):
         original(*args, **kwargs)
+        record = fakes["agents"].created[("draft-agent", "1")]
+        configuration = record.pop("code_configuration")
+        record["definition"] = {"code_configuration": configuration}
         release.wait(60)
 
     fakes["agents"].create_version_from_code = _create_then_wait
