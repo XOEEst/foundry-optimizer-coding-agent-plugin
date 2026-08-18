@@ -2,16 +2,23 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
+import csv
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
 import io
 import json
 import math
+import os
 import re
+import tempfile
 import time
+from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 import zipfile
+
+import httpx
 
 from azure.ai.projects import AIProjectClient
 from azure.ai.projects.models import (
@@ -19,6 +26,7 @@ from azure.ai.projects.models import (
     AgentEvaluatorGenerationJobSource,
     AzureAIAgentTargetParam,
     AzureAIDataSourceConfig,
+    CodeConfiguration,
     DataGenerationJob,
     DataGenerationJobInputs,
     DataGenerationJobOutputOptions,
@@ -29,8 +37,10 @@ from azure.ai.projects.models import (
     FileDatasetVersion,
     FileDataGenerationJobSource,
     FolderDatasetVersion,
+    HostedAgentDefinition,
     PromptDataGenerationJobSource,
     PromptEvaluatorGenerationJobSource,
+    ProtocolVersionRecord,
     SimpleQnADataGenerationJobOptions,
     TargetCompletionEvalRunDataSource,
     TaskGenerationDataGenerationJobOptions,
@@ -101,6 +111,10 @@ _EVALUATOR_DATA_MAPPING = {'query': '{{item.query}}', 'response': '{{sample.outp
 _MAX_RUN_OUTPUT_ITEMS = 5000
 _MAX_AGENT_CODE_BYTES = 32 * 1024 * 1024
 _MAX_AGENT_CODE_ENTRIES = 2000
+_MAX_DATASET_BYTES = 32 * 1024 * 1024
+_MAX_DATASET_ROWS = 5000
+_DATASET_ROW_ID_FIELDS = ('row_id', 'rowId', 'id', 'case_id', 'caseId', 'sample_id', 'sampleId', 'item_id', 'itemId')
+_SUPPORTED_DATASET_SUFFIXES = ('.jsonl', '.ndjson', '.csv')
 
 # Evaluation-phase BootstrapAction.kind values and their fixed positional `diagnostics`
 # tuple[str, ...] layouts. Every element is a plain identifier/enum/number-as-string; no raw
@@ -179,6 +193,22 @@ class _ActivationActionRequest:
 class _CleanupActionRequest:
     draft_agent_name: str
     draft_agent_version: str
+
+
+@dataclass(frozen=True, slots=True)
+class AgentPackage:
+    """A deterministically packaged agent source tree awaiting draft creation.
+
+    Only the temporary archive path and its digests travel with this record; package bytes are
+    transient and never reach provider state, receipts, or logs.
+    """
+
+    repo_agent_id: str
+    zip_path: str
+    zip_sha256: str
+    tree_sha256: str
+    file_count: int
+    size_bytes: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,6 +301,68 @@ def _definition_signature(data_source_config: Mapping[str, object], testing_crit
     payload = {
         'data_source_config': {str(key): _plain(value) for key, value in data_source_config.items()},
         'testing_criteria': criteria,
+    }
+    return hashlib.sha256(_canonical_json(payload).encode('utf-8')).hexdigest()
+
+
+def _sdk_attribute(value: object, *names: str) -> object:
+    """Read one attribute from an SDK model, mapping, or serialized payload."""
+
+    if value is None:
+        return None
+    for name in names:
+        found = getattr(value, name, None)
+        if found is not None:
+            return found
+    if isinstance(value, Mapping):
+        for name in names:
+            if value.get(name) is not None:
+                return value[name]
+        return None
+    for accessor in ('as_dict', 'model_dump', 'to_dict'):
+        method = getattr(value, accessor, None)
+        if callable(method):
+            try:
+                data = method(mode='json') if accessor == 'model_dump' else method()
+            except TypeError:
+                data = method()
+            if isinstance(data, Mapping):
+                for name in names:
+                    if data.get(name) is not None:
+                        return data[name]
+    return None
+
+
+def _is_supported_blob_uri(uri: str) -> bool:
+    """Accept TLS blob endpoints, plus plain HTTP only against a loopback emulator."""
+
+    parsed = urlparse(uri)
+    if parsed.scheme == 'https':
+        return True
+    if parsed.scheme != 'http':
+        return False
+    return (parsed.hostname or '') in {'127.0.0.1', '::1', 'localhost'}
+
+
+def _stable_row_id(row: Mapping[str, object]) -> str:
+    """Prefer an existing safe identifier field, else a canonical digest of the row."""
+
+    for field in _DATASET_ROW_ID_FIELDS:
+        value = row.get(field)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, int) and not isinstance(value, bool):
+            return str(value)
+    return hashlib.sha256(_canonical_json(row).encode('utf-8')).hexdigest()
+
+
+def _split_content_fingerprint(*, source_dataset: Mapping[str, object], role: str, case_ids: Sequence[str]) -> str:
+    """Exact, content-free fingerprint of one materialized split."""
+
+    payload = {
+        'source_dataset_id': str(source_dataset.get('id') or ''),
+        'role': role,
+        'case_ids': [str(item) for item in case_ids],
     }
     return hashlib.sha256(_canonical_json(payload).encode('utf-8')).hexdigest()
 
@@ -424,7 +516,7 @@ class FoundryCapabilityProbe(FrozenModel):
 
 
 class FoundryAdapter:
-    def __init__(self, project_endpoint: str, credential: TokenCredential, *, client: object | None = None, time_source: Callable[[], float] | None = None, sleep: Callable[[float], None] | None = None, default_poll_interval: float = 1.0, split_writer: Callable[..., str] | None = None, checkpoint: Callable[[Mapping[str, object]], None] | None = None) -> None:
+    def __init__(self, project_endpoint: str, credential: TokenCredential, *, client: object | None = None, time_source: Callable[[], float] | None = None, sleep: Callable[[float], None] | None = None, default_poll_interval: float = 1.0, split_writer: Callable[..., str] | None = None, checkpoint: Callable[[Mapping[str, object]], None] | None = None, download_timeout: float = 60.0) -> None:
         self._project_endpoint = project_endpoint
         self._client = client if client is not None else AIProjectClient(project_endpoint, credential)
         self._time = time_source or time.monotonic
@@ -435,6 +527,12 @@ class FoundryAdapter:
         self._split_writer = split_writer
         self._onboarding: dict[str, dict[str, object]] = {}
         self._checkpoint = checkpoint
+        # Raw dataset rows are cached in memory for this operation only and never persisted.
+        self._dataset_row_cache: dict[tuple[str, str], tuple[Mapping[str, object], ...]] = {}
+        self._published_splits: dict[tuple[str, str], str] = {}
+        self._download_timeout = download_timeout
+        self._agent_packages: Mapping[str, AgentPackage] = {}
+        self._created_drafts: dict[tuple[str, str], str] = {}
 
     @property
     def project_endpoint(self) -> str:
@@ -454,6 +552,23 @@ class FoundryAdapter:
         if self._checkpoint is None:
             return
         self._checkpoint(self.onboarding_ledger_snapshot())
+
+    def _record_pending_split(self, ledger: Mapping[str, object], role: str, pending: Mapping[str, object]) -> None:
+        """Checkpoint an about-to-be-uploaded split so a restart adopts it instead of re-uploading."""
+
+        stages = ledger.get('stages')
+        if not isinstance(stages, dict):
+            stages = {}
+            ledger['stages'] = stages  # type: ignore[index]
+        entry = stages.get('split')
+        detail = dict(entry) if isinstance(entry, Mapping) else {}
+        pending_splits = dict(detail.get('pending_splits') or {}) if isinstance(detail.get('pending_splits'), Mapping) else {}
+        pending_splits[role] = {str(key): value for key, value in pending.items()}
+        detail['status'] = detail.get('status') if detail.get('status') == 'completed' else 'in_flight'
+        detail['pending_splits'] = pending_splits
+        stages['split'] = detail
+        self._published_splits[(str(pending.get('dataset_name') or ''), str(pending.get('dataset_version') or ''))] = str(pending.get('split_fingerprint') or '')
+        self._publish_checkpoint()
 
     def _record_pending_handle(self, ledger: Mapping[str, object], stage: str, handle: 'FoundryOperationHandle') -> None:
         """Persist an in-flight generation handle before the first poll.
@@ -1210,7 +1325,18 @@ class FoundryAdapter:
             runs.append(ActivationRun(phase=phase, evaluator_id=evaluator_id, executable=case.executable, score=case.score, normalization_kind=case.normalization_kind, source_min=case.source_min, source_max=case.source_max, passed=passed))
         return {'runs': runs, 'submitted_run_ids': submitted_run_ids, 'definition_ids': definition_ids}
 
-    def cleanup_activation_draft(self, *, draft_agent_name: str, draft_agent_version: str) -> Mapping[str, object]:
+    def cleanup_activation_draft(self, *, draft_agent_name: str, draft_agent_version: str, require_operation_created: bool = True) -> Mapping[str, object]:
+        """Delete the temporary draft.
+
+        On the composite onboarding path only a draft this operation created is ever deleted:
+        a pre-existing agent version with the same requested name/version is refused earlier,
+        and deleting it here would otherwise destroy a retained baseline. The deprecated
+        pre-v3 `activation_cleanup` action opts out, because there the caller owned the draft
+        lifecycle before this adapter existed.
+        """
+
+        if require_operation_created and (draft_agent_name, draft_agent_version) not in self._created_drafts:
+            return {'draft_agent_name': draft_agent_name, 'draft_agent_version': draft_agent_version, 'completed': False, 'skipped': 'draft was not created by this operation'}
         deleter = getattr(self._client.agents, 'delete_version', None)
         if not callable(deleter):
             raise FoundryUnsupportedCapabilityError('agent draft version deletion unavailable', kind='unsupported_preview')
@@ -1220,7 +1346,162 @@ class FoundryAdapter:
             pass
         except Exception as exc:
             raise self._classify_error(exc) from exc
+        self._created_drafts.pop((draft_agent_name, draft_agent_version), None)
         return {'draft_agent_name': draft_agent_name, 'draft_agent_version': draft_agent_version, 'completed': True}
+
+    def set_agent_packages(self, packages: Mapping[str, AgentPackage]) -> None:
+        """Install the deterministically packaged source trees for this apply.
+
+        The mapping is stored by reference and only ever read, so callers keep control of how
+        packages are resolved.
+        """
+
+        self._agent_packages = packages
+
+    def create_activation_draft(
+        self,
+        *,
+        contract: EvaluationOnboardingRequest,
+        package: AgentPackage,
+        operation_id: str,
+        action_id: str,
+        on_pending: Callable[[Mapping[str, object]], None] | None = None,
+    ) -> Mapping[str, object]:
+        """Create the temporary hosted draft the activation smoke run targets.
+
+        The reviewed repository source is uploaded as a new code-based agent version using the
+        approved runtime, entry point, protocol, cpu/memory, and model deployment. A version
+        that already exists under the requested name/version is a conflict, never an adoption:
+        the draft must be provably operation-created before any evaluation run targets it and
+        before cleanup is allowed to delete it.
+        """
+
+        assert contract.activation_plan is not None
+        policy = contract.sidecar_policy
+        if policy is None:
+            raise FoundryPrerequisiteError('activation draft creation requires the reviewed sidecar policy', kind='prerequisite')
+        plan = contract.activation_plan
+        name, version = plan.draft_agent_name, plan.draft_agent_version
+        existing = self._get_agent_version(name, version)
+        if existing is not None:
+            recorded = self._created_drafts.get((name, version))
+            content_hash = str(_sdk_attribute(_sdk_attribute(existing, 'code_configuration', 'codeConfiguration'), 'content_hash', 'contentHash') or '')
+            if recorded is None or recorded != package.zip_sha256 or content_hash.split(':')[-1].casefold() != package.zip_sha256:
+                raise FoundryPrerequisiteError(
+                    f'agent version {name}:{version} already exists and was not created by this operation',
+                    kind='conflict',
+                )
+            return {'created': False, 'replayed': True, 'draft_agent_name': name, 'draft_agent_version': version, 'code_digest': package.zip_sha256}
+        creator = getattr(self._client.agents, 'create_version_from_code', None)
+        if not callable(creator):
+            raise FoundryUnsupportedCapabilityError('code-based agent version creation is unavailable', kind='unsupported_preview')
+        if on_pending is not None:
+            on_pending({'draft_agent_name': name, 'draft_agent_version': version, 'zip_sha256': package.zip_sha256, 'tree_sha256': package.tree_sha256})
+        definition = self._hosted_draft_definition(policy=policy, model_deployment=plan.model_deployment)
+        archive = Path(package.zip_path)
+        if not archive.is_file():
+            raise FoundryPrerequisiteError('packaged agent source archive is missing', kind='prerequisite')
+        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+        if digest != package.zip_sha256:
+            raise FoundryPrerequisiteError('packaged agent source archive does not match its recorded digest', kind='prerequisite')
+        try:
+            with archive.open('rb') as stream:
+                created = creator(
+                    name,
+                    definition=definition,
+                    code=stream,
+                    code_zip_sha256=package.zip_sha256,
+                    metadata=self._with_ownership_tags(None, operation_id=operation_id, action_id=action_id),
+                )
+        except Exception as exc:
+            raise self._classify_error(exc) from exc
+        created_name = str(_sdk_attribute(created, 'name') or '')
+        created_version = str(_sdk_attribute(created, 'version') or '')
+        if created_name != name or created_version != version:
+            raise FoundryPrerequisiteError('created agent draft identity does not match the approved activation plan', kind='prerequisite')
+        content_hash = str(_sdk_attribute(_sdk_attribute(created, 'code_configuration', 'codeConfiguration'), 'content_hash', 'contentHash') or '')
+        if content_hash and content_hash.split(':')[-1].casefold() != package.zip_sha256:
+            raise FoundryPrerequisiteError('created agent draft content hash does not match the uploaded package', kind='prerequisite')
+        self._created_drafts[(name, version)] = package.zip_sha256
+        self._await_agent_version_active(name, version)
+        return {'created': True, 'replayed': False, 'draft_agent_name': name, 'draft_agent_version': version, 'code_digest': content_hash or package.zip_sha256}
+
+    def _hosted_draft_definition(self, *, policy: object, model_deployment: str) -> HostedAgentDefinition:
+        runtime = getattr(policy, 'runtime', None)
+        if runtime is None:
+            raise FoundryPrerequisiteError('sidecar policy carries no runtime settings', kind='prerequisite')
+        environment: dict[str, str] = {}
+        variable = getattr(runtime, 'model_environment_variable', None)
+        if isinstance(variable, str) and variable:
+            environment[variable] = model_deployment
+        project = getattr(policy, 'foundry_project', None)
+        endpoint = getattr(project, 'project_endpoint', None) if project is not None else None
+        if isinstance(endpoint, str) and endpoint:
+            environment['AZURE_AI_PROJECT_ENDPOINT'] = endpoint
+        return HostedAgentDefinition(
+            cpu=str(getattr(runtime, 'cpu', None) or '1'),
+            memory=str(getattr(runtime, 'memory', None) or '2Gi'),
+            environment_variables=environment,
+            protocol_versions=[ProtocolVersionRecord(protocol=str(runtime.protocol_name), version=str(runtime.protocol_version))],
+            code_configuration=CodeConfiguration(
+                runtime=str(runtime.runtime),
+                entry_point=[str(item) for item in runtime.entrypoint],
+                dependency_resolution=str(runtime.dependency_resolution),
+            ),
+        )
+
+    def _get_agent_version(self, agent_name: str, agent_version: str) -> object | None:
+        getter = getattr(self._client.agents, 'get_version', None)
+        if not callable(getter):
+            return None
+        try:
+            return getter(agent_name, agent_version)
+        except ResourceNotFoundError:
+            return None
+        except Exception as exc:
+            raise self._classify_error(exc) from exc
+
+    def _await_agent_version_active(self, agent_name: str, agent_version: str, *, deadline_monotonic: float | None = None) -> None:
+        """Wait until the created draft is servable, failing closed on terminal failures."""
+
+        while True:
+            version = self._get_agent_version(agent_name, agent_version)
+            if version is None:
+                raise FoundryPrerequisiteError('created agent draft disappeared before activation', kind='prerequisite')
+            status = str(_sdk_attribute(version, 'status', 'state', 'provisioning_state', 'provisioningState') or '').casefold()
+            if status in {'', 'active', 'succeeded', 'ready', 'running'}:
+                return
+            if status in {'failed', 'canceled', 'cancelled', 'error', 'deleting'}:
+                raise FoundryPrerequisiteError(f'created agent draft entered {status!r} instead of becoming active', kind='prerequisite')
+            if deadline_monotonic is not None and self._time() >= deadline_monotonic:
+                raise FoundryOperationDeadlineError('agent draft activation deadline exceeded', kind='deadline', retryable=True)
+            self._sleep(self._default_poll_interval)
+
+    def _record_pending_draft(self, ledger: Mapping[str, object], pending: Mapping[str, object]) -> None:
+        stages = ledger.get('stages')
+        if not isinstance(stages, dict):
+            stages = {}
+            ledger['stages'] = stages  # type: ignore[index]
+        entry = stages.get('activation')
+        detail = dict(entry) if isinstance(entry, Mapping) else {}
+        detail['status'] = detail.get('status') if detail.get('status') == 'completed' else 'in_flight'
+        detail['pending_draft'] = {str(key): value for key, value in pending.items()}
+        stages['activation'] = detail
+        self._created_drafts[(str(pending.get('draft_agent_name') or ''), str(pending.get('draft_agent_version') or ''))] = str(pending.get('zip_sha256') or '')
+        self._publish_checkpoint()
+
+    def _restore_created_drafts(self) -> None:
+        for ledger in self._onboarding.values():
+            stages = ledger.get('stages')
+            entry = stages.get('activation') if isinstance(stages, Mapping) else None
+            pending = entry.get('pending_draft') if isinstance(entry, Mapping) else None
+            if not isinstance(pending, Mapping):
+                continue
+            name = str(pending.get('draft_agent_name') or '')
+            version = str(pending.get('draft_agent_version') or '')
+            digest = str(pending.get('zip_sha256') or '')
+            if name and version and digest:
+                self._created_drafts[(name, version)] = digest
 
     def _operation_id(self, kind: str, payload: Mapping[str, object]) -> str:
         digest = hashlib.sha256(_canonical_json({'kind': kind, 'payload': payload}).encode('utf-8')).hexdigest()[:24]
@@ -1444,33 +1725,291 @@ class FoundryAdapter:
     def dataset_case_index(self, dataset_name: str, dataset_version: str) -> tuple[Mapping[str, object], ...]:
         """Return stable case identifiers for a dataset version.
 
-        NOTE (narrow adapter seam): only `row_id`, optional `group_id`, and optional `category`
-        are ever returned; no prompts, responses, or row content cross this boundary. A real
-        deployment satisfies this by streaming the registered JSONL's stable identifier fields.
-        Environments that cannot expose an index fail closed rather than guessing a split.
+        Only `row_id`, optional `group_id`, and optional `category` are ever returned; no
+        prompts, responses, or row content cross this boundary. The default live path reads
+        the registered blob through a short-lived dataset SAS credential, derives stable row
+        identifiers, and keeps the raw rows in memory for this operation only. A test/preview
+        `get_case_index` seam is honored when a client provides one.
         """
         getter = getattr(self._client.datasets, 'get_case_index', None)
-        if not callable(getter):
-            raise FoundryUnsupportedCapabilityError('dataset case index unavailable', kind='unsupported_preview')
-        try:
-            rows = getter(dataset_name, dataset_version)
-        except Exception as exc:
-            raise self._classify_error(exc) from exc
-        index: list[Mapping[str, object]] = []
-        for item in rows or ():
-            entry = _as_mapping(item)
-            row_id = entry.get('row_id') or entry.get('id')
-            if not isinstance(row_id, str) or not row_id:
-                raise FoundryPrerequisiteError('dataset case index entries require a stable row identifier', kind='prerequisite')
-            normalized: dict[str, object] = {'row_id': row_id}
-            for optional in ('group_id', 'category'):
-                value = entry.get(optional)
-                if isinstance(value, str) and value:
-                    normalized[optional] = value
-            index.append(normalized)
+        if callable(getter):
+            try:
+                rows = getter(dataset_name, dataset_version)
+            except Exception as exc:
+                raise self._classify_error(exc) from exc
+            index = [self._normalized_index_entry(_as_mapping(item)) for item in rows or ()]
+        else:
+            index = [self._normalized_index_entry(row) for row in self._dataset_rows(dataset_name, dataset_version)]
         if not index:
             raise FoundryPrerequisiteError('dataset case index is empty', kind='prerequisite')
         return tuple(index)
+
+    @staticmethod
+    def _normalized_index_entry(entry: Mapping[str, object]) -> Mapping[str, object]:
+        row_id = entry.get('row_id') or entry.get('id')
+        if not isinstance(row_id, str) or not row_id:
+            raise FoundryPrerequisiteError('dataset case index entries require a stable row identifier', kind='prerequisite')
+        normalized: dict[str, object] = {'row_id': row_id}
+        for optional in ('group_id', 'category'):
+            value = entry.get(optional)
+            if isinstance(value, str) and value:
+                normalized[optional] = value
+        return normalized
+
+    def _dataset_rows(self, dataset_name: str, dataset_version: str) -> tuple[Mapping[str, object], ...]:
+        """Download and parse a registered dataset version, caching rows in memory only.
+
+        Raw rows are never persisted: they live in this adapter instance for the duration of
+        the operation, are used solely to materialize the deterministic split, and are dropped
+        by `clear_dataset_cache`.
+        """
+
+        cached = self._dataset_row_cache.get((dataset_name, dataset_version))
+        if cached is not None:
+            return cached
+        sas_uri, blob_uri = self._dataset_blob_credential(dataset_name, dataset_version)
+        suffix = self._dataset_suffix(blob_uri or sas_uri)
+        payload = self._download_bounded(sas_uri)
+        rows = self._parse_dataset_payload(payload, suffix=suffix)
+        if not rows:
+            raise FoundryPrerequisiteError('dataset version contains no rows', kind='prerequisite')
+        self._dataset_row_cache[(dataset_name, dataset_version)] = rows
+        return rows
+
+    def _dataset_blob_credential(self, dataset_name: str, dataset_version: str) -> tuple[str, str]:
+        getter = getattr(self._client.datasets, 'get_credentials', None)
+        if not callable(getter):
+            raise FoundryUnsupportedCapabilityError('dataset credentials are unavailable', kind='unsupported_preview')
+        try:
+            credential = getter(dataset_name, dataset_version)
+        except ResourceNotFoundError as exc:
+            raise FoundryPrerequisiteError('dataset version does not exist', kind='prerequisite') from exc
+        except Exception as exc:
+            raise self._classify_error(exc) from exc
+        blob_reference = _sdk_attribute(credential, 'blob_reference', 'blobReference')
+        if blob_reference is None:
+            raise FoundryPrerequisiteError('dataset credential carries no blob reference', kind='prerequisite')
+        sas = _sdk_attribute(blob_reference, 'credential')
+        sas_uri = _sdk_attribute(sas, 'sas_uri', 'sasUri') if sas is not None else None
+        blob_uri = _sdk_attribute(blob_reference, 'blob_uri', 'blobUri')
+        if not isinstance(sas_uri, str) or not _is_supported_blob_uri(sas_uri):
+            raise FoundryPrerequisiteError('dataset credential carries no usable SAS uri', kind='prerequisite')
+        return sas_uri, blob_uri if isinstance(blob_uri, str) else ''
+
+    @staticmethod
+    def _dataset_suffix(uri: str) -> str:
+        path = urlparse(uri).path
+        name = path.rsplit('/', 1)[-1]
+        if not name or '.' not in name:
+            raise FoundryUnsupportedCapabilityError(
+                'folder or multi-file dataset layouts are not supported; register a single JSONL or CSV file',
+                kind='unsupported_preview',
+            )
+        suffix = f'.{name.rsplit(".", 1)[-1]}'.casefold()
+        if suffix not in _SUPPORTED_DATASET_SUFFIXES:
+            raise FoundryUnsupportedCapabilityError(f'unsupported dataset file type {suffix!r}', kind='unsupported_preview')
+        return suffix
+
+    def _download_bounded(self, sas_uri: str) -> bytes:
+        payload = bytearray()
+        try:
+            with httpx.stream('GET', sas_uri, timeout=self._download_timeout) as response:
+                response.raise_for_status()
+                for chunk in response.iter_bytes():
+                    payload.extend(chunk)
+                    if len(payload) > _MAX_DATASET_BYTES:
+                        raise FoundryPrerequisiteError('dataset content exceeds the supported size budget', kind='prerequisite')
+        except FoundryAdapterError:
+            raise
+        except httpx.HTTPStatusError as exc:
+            raise FoundryPermissionError('dataset content download was rejected', kind='permission', status_code=exc.response.status_code) from None
+        except httpx.HTTPError:
+            raise FoundryNetworkError('dataset content download failed', kind='network', retryable=True) from None
+        return bytes(payload)
+
+    @staticmethod
+    def _parse_dataset_payload(payload: bytes, *, suffix: str) -> tuple[Mapping[str, object], ...]:
+        try:
+            text = payload.decode('utf-8')
+        except UnicodeDecodeError:
+            raise FoundryPrerequisiteError('dataset content is not UTF-8', kind='prerequisite') from None
+        rows: list[Mapping[str, object]] = []
+        if suffix == '.csv':
+            reader = csv.DictReader(io.StringIO(text))
+            for entry in reader:
+                rows.append({str(key): value for key, value in entry.items() if key is not None})
+                if len(rows) > _MAX_DATASET_ROWS:
+                    raise FoundryPrerequisiteError('dataset row count exceeds the supported budget', kind='prerequisite')
+        else:
+            for line in text.splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    raise FoundryPrerequisiteError('dataset content is not valid JSONL', kind='prerequisite') from None
+                if not isinstance(entry, Mapping):
+                    raise FoundryPrerequisiteError('dataset rows must be JSON objects', kind='prerequisite')
+                rows.append({str(key): value for key, value in entry.items()})
+                if len(rows) > _MAX_DATASET_ROWS:
+                    raise FoundryPrerequisiteError('dataset row count exceeds the supported budget', kind='prerequisite')
+        identified: list[Mapping[str, object]] = []
+        seen: set[str] = set()
+        for entry in rows:
+            row_id = _stable_row_id(entry)
+            if row_id in seen:
+                raise FoundryPrerequisiteError('dataset contains duplicate stable row identifiers', kind='prerequisite')
+            seen.add(row_id)
+            identified.append({**entry, 'row_id': row_id})
+        return tuple(identified)
+
+    def clear_dataset_cache(self) -> None:
+        """Drop every cached raw row; called as soon as an onboarding run finishes."""
+
+        self._dataset_row_cache.clear()
+
+    def publish_split_dataset(
+        self,
+        *,
+        source_dataset: Mapping[str, object],
+        role: str,
+        case_ids: Sequence[str],
+        dataset_name: str,
+        dataset_version: str,
+        dataset_type: str,
+        connection_name: str | None,
+        operation_id: str,
+        action_id: str,
+        on_pending: Callable[[Mapping[str, object]], None] | None = None,
+    ) -> Mapping[str, object]:
+        """Publish one deterministic split as its own immutable dataset version.
+
+        The default live path writes the selected rows to a restrictive temporary JSONL file,
+        uploads it with `datasets.upload_file`, validates the returned immutable identity, and
+        deletes the temporary file immediately. An already published version is adopted when
+        its recorded split fingerprint matches, so a restart never uploads or registers twice;
+        a version that exists with a different fingerprint fails closed. An injected
+        `split_writer` seam keeps the previous URI-based behaviour for fakes and tests.
+        """
+
+        fingerprint = _split_content_fingerprint(source_dataset=source_dataset, role=role, case_ids=case_ids)
+        if self._split_writer is not None:
+            uri = self.materialize_split_dataset(
+                source_dataset=source_dataset,
+                role=role,
+                case_ids=case_ids,
+                dataset_name=dataset_name,
+                dataset_version=dataset_version,
+            )
+            result = self.create_or_adopt_dataset(
+                operation_id=operation_id,
+                action_id=action_id,
+                dataset_name=dataset_name,
+                dataset_version=dataset_version,
+                dataset_content_uri=uri,
+                dataset_type=dataset_type,
+                connection_name=connection_name,
+            )
+            return {**result, 'split_fingerprint': fingerprint}
+        existing = self.get_dataset(dataset_name, dataset_version)
+        if existing is not None:
+            recorded = self._published_splits.get((dataset_name, dataset_version))
+            if recorded != fingerprint:
+                raise FoundryPrerequisiteError(
+                    f'dataset version {dataset_name}:{dataset_version} already exists with different content',
+                    kind='prerequisite',
+                )
+            return {'created': False, 'adopted': True, 'replayed': True, 'dataset': existing, 'resource_id': str(existing['id']), 'split_fingerprint': fingerprint}
+        if on_pending is not None:
+            on_pending({'dataset_name': dataset_name, 'dataset_version': dataset_version, 'split_fingerprint': fingerprint, 'role': role})
+        rows = self._selected_rows(source_dataset, case_ids)
+        uploader = getattr(self._client.datasets, 'upload_file', None)
+        if not callable(uploader):
+            raise FoundryUnsupportedCapabilityError('dataset upload is unavailable', kind='unsupported_preview')
+        handle, temp_path = tempfile.mkstemp(prefix='foundry-opt-split-', suffix='.jsonl')
+        try:
+            with os.fdopen(handle, 'w', encoding='utf-8', newline='\n') as stream:
+                for row in rows:
+                    stream.write(json.dumps({key: value for key, value in row.items()}, ensure_ascii=True, sort_keys=True))
+                    stream.write('\n')
+            os.chmod(temp_path, 0o600)
+            try:
+                created = uploader(name=dataset_name, version=dataset_version, file_path=temp_path, connection_name=connection_name)
+            except Exception as exc:
+                raise self._classify_error(exc) from exc
+        finally:
+            # Raw split content never outlives the upload.
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+        dataset = self._normalize_dataset(created)
+        if str(dataset.get('name') or '') != dataset_name or str(dataset.get('version') or '') != dataset_version:
+            raise FoundryPrerequisiteError('uploaded dataset identity does not match the requested split version', kind='prerequisite')
+        uploaded_type = str(dataset.get('type') or '')
+        if dataset_type and uploaded_type and uploaded_type != dataset_type:
+            raise FoundryPrerequisiteError('uploaded dataset type does not match the approved dataset type', kind='prerequisite')
+        data_uri = str(dataset.get('data_uri') or '')
+        if not data_uri:
+            raise FoundryPrerequisiteError('uploaded dataset version exposes no content uri', kind='prerequisite')
+        ownership_token = self._ownership_token(operation_id, action_id)
+        owned = self._stamp_split_ownership(
+            dataset_name=dataset_name,
+            dataset_version=dataset_version,
+            data_uri=data_uri,
+            dataset_type=uploaded_type or dataset_type,
+            connection_name=connection_name,
+            operation_id=operation_id,
+            action_id=action_id,
+        )
+        self._published_splits[(dataset_name, dataset_version)] = fingerprint
+        return {
+            'created': True,
+            'adopted': False,
+            'replayed': False,
+            'dataset': owned,
+            'resource_id': str(owned['id']),
+            'ownership_token': ownership_token,
+            'split_fingerprint': fingerprint,
+        }
+
+    def _stamp_split_ownership(self, *, dataset_name: str, dataset_version: str, data_uri: str, dataset_type: str, connection_name: str | None, operation_id: str, action_id: str) -> Mapping[str, object]:
+        """Tag the just-uploaded version so created-only rollback can prove ownership.
+
+        This updates the metadata of the same immutable version (identical name, version, and
+        content uri); the blob itself is uploaded exactly once. Without a provable ownership
+        tag the adapter could never safely delete the version again, so a tagging failure
+        fails closed instead of leaving an uncompensatable resource behind.
+        """
+
+        payload_cls = FileDatasetVersion if dataset_type == 'uri_file' else FolderDatasetVersion
+        payload = payload_cls(
+            data_uri=data_uri,
+            type=dataset_type,
+            connection_name=connection_name,
+            tags=self._with_ownership_tags(None, operation_id=operation_id, action_id=action_id),
+        )
+        try:
+            tagged = self._client.datasets.create_or_update(dataset_name, dataset_version, payload)
+        except Exception as exc:
+            raise FoundryPrerequisiteError(
+                f'uploaded split {dataset_name}:{dataset_version} could not be tagged for ownership: {_short_reason(exc)}',
+                kind='prerequisite',
+            ) from None
+        return self._normalize_dataset(tagged, fingerprint=_fingerprint_dataset_content(data_uri, dataset_type))
+
+    def _selected_rows(self, source_dataset: Mapping[str, object], case_ids: Sequence[str]) -> tuple[Mapping[str, object], ...]:
+        rows = self._dataset_rows(str(source_dataset.get('name') or ''), str(source_dataset.get('version') or ''))
+        by_id = {str(row['row_id']): row for row in rows}
+        selected: list[Mapping[str, object]] = []
+        for case_id in case_ids:
+            row = by_id.get(str(case_id))
+            if row is None:
+                raise FoundryPrerequisiteError('split references a case that is not present in the source dataset', kind='prerequisite')
+            selected.append(row)
+        if not selected:
+            raise FoundryPrerequisiteError('split selection is empty', kind='prerequisite')
+        return tuple(selected)
 
     def materialize_split_dataset(self, *, source_dataset: Mapping[str, object], role: str, case_ids: Sequence[str], dataset_name: str, dataset_version: str) -> str:
         """Return the content URI of a materialized split of `source_dataset`.
@@ -2066,21 +2605,17 @@ class FoundryAdapter:
                 'validating': (dataset_plan.requested_validating_name, split_result.validating),
             }
             for role, (dataset_name, case_ids) in requested.items():
-                content_uri = self.materialize_split_dataset(
+                result = self.publish_split_dataset(
                     source_dataset=source_dataset,
                     role=role,
                     case_ids=case_ids,
                     dataset_name=dataset_name,
                     dataset_version=dataset_plan.requested_version,
-                )
-                result = self.create_or_adopt_dataset(
-                    operation_id=plan.operation_id,
-                    action_id=f'{action.action_id}:dataset:{role}',
-                    dataset_name=dataset_name,
-                    dataset_version=dataset_plan.requested_version,
-                    dataset_content_uri=content_uri,
                     dataset_type=dataset_plan.dataset_type,
                     connection_name=dataset_plan.connection_name,
+                    operation_id=plan.operation_id,
+                    action_id=f'{action.action_id}:dataset:{role}',
+                    on_pending=lambda pending, stage_role=role: self._record_pending_split(ledger, stage_role, pending),
                 )
                 dataset = _as_mapping(result['dataset'])
                 datasets[role] = DatasetFinalization(
@@ -2294,6 +2829,30 @@ class FoundryAdapter:
         client = self._openai_client()
         run_ids: dict[str, str] = {}
         measurements: list[ActivationCaseFinalization] = []
+        package = self._agent_packages.get(contract.repo_agent_id)
+        if package is None:
+            raise FoundryPrerequisiteError(
+                'activation requires the reviewed repository source packaged as an owned draft',
+                kind='prerequisite',
+            )
+        draft = self.create_activation_draft(
+            contract=contract,
+            package=package,
+            operation_id=plan.operation_id,
+            action_id=f'{action.action_id}:agent-draft',
+            on_pending=lambda pending: self._record_pending_draft(ledger, pending),
+        )
+        record(
+            _ResourceDraft(
+                suffix='agent-draft',
+                resource_id=f'{contract.activation_plan.draft_agent_name}:{contract.activation_plan.draft_agent_version}',
+                name=contract.activation_plan.draft_agent_name,
+                version=contract.activation_plan.draft_agent_version,
+                kind='agent_draft',
+                disposition='created',
+                fingerprint=package.zip_sha256,
+            )
+        )
         try:
             for role in _DEFINITION_ROLES:
                 dataset = datasets[role]
@@ -2318,12 +2877,13 @@ class FoundryAdapter:
                 measurements.extend(self.activation_measurements(run_id=run_id, definition_id=definition_ids[role], phase=role, criteria=criteria))
             self._assert_activation_gates(bounds, measurements)
         finally:
-            # The owned draft is always cleaned up, whether or not the gates passed.
+            # The owned draft is always cleaned up, whether or not the gates passed. Only a
+            # draft this operation created is ever deleted.
             self.cleanup_activation_draft(
                 draft_agent_name=contract.activation_plan.draft_agent_name,
                 draft_agent_version=contract.activation_plan.draft_agent_version,
             )
-        self._record_stage(ledger, 'activation', {'development_run_id': run_ids['development'], 'validating_run_id': run_ids['validating']})
+        self._record_stage(ledger, 'activation', {'development_run_id': run_ids['development'], 'validating_run_id': run_ids['validating'], 'draft_code_digest': str(draft['code_digest'])})
         self._record_stage(ledger, 'cleanup', {'completed': True})
 
         activation = ActivationFinalization(
@@ -2334,6 +2894,9 @@ class FoundryAdapter:
             draft_agent_version=contract.activation_plan.draft_agent_version,
             cases=tuple(measurements),
             cleanup_completed=True,
+            package_tree_sha256=package.tree_sha256,
+            package_zip_sha256=package.zip_sha256,
+            draft_code_digest=str(draft['code_digest']) if str(draft['code_digest']) else None,
         )
         objective_reference = ResolvedEvaluator(
             reference=EvaluatorReference(evaluator_id=objective.evaluator_id, provenance=objective.provenance),
@@ -2362,6 +2925,8 @@ class FoundryAdapter:
         except Exception as exc:
             raise FoundryPrerequisiteError(f'onboarding finalization is invalid: {_short_reason(exc)}', kind='prerequisite') from None
         ledger['finalization'] = finalization.model_dump(mode='json')
+        # Raw rows exist only for the duration of the run.
+        self.clear_dataset_cache()
         return {'finalization': finalization, 'resources': tuple(drafts), 'stages': dict(ledger.get('stages') or {})}
 
     def _dataset_generation_request(self, contract: EvaluationOnboardingRequest) -> Mapping[str, object]:
@@ -2659,6 +3224,26 @@ class FoundryAdapter:
                 'finalization': ledger.get('finalization'),
             }
         self._onboarding = restored
+        self._restore_published_splits()
+        self._restore_created_drafts()
+
+    def _restore_published_splits(self) -> None:
+        """Rebuild the uploaded-split fingerprints recorded before a crash."""
+
+        for ledger in self._onboarding.values():
+            stages = ledger.get('stages')
+            entry = stages.get('split') if isinstance(stages, Mapping) else None
+            pending = entry.get('pending_splits') if isinstance(entry, Mapping) else None
+            if not isinstance(pending, Mapping):
+                continue
+            for record in pending.values():
+                if not isinstance(record, Mapping):
+                    continue
+                name = str(record.get('dataset_name') or '')
+                version = str(record.get('dataset_version') or '')
+                fingerprint = str(record.get('split_fingerprint') or '')
+                if name and version and fingerprint:
+                    self._published_splits[(name, version)] = fingerprint
 
     def restore_provider_state(self, mapping: Mapping[str, object]) -> None:
         encoded = _canonical_json(mapping).encode('utf-8')
@@ -2680,6 +3265,8 @@ class FoundryAdapter:
         if onboarding is not None and not isinstance(onboarding, Mapping):
             raise FoundryPrerequisiteError('provider state onboarding ledger is invalid', kind='prerequisite')
         self._onboarding = {str(key): dict(value) for key, value in (onboarding or {}).items() if isinstance(value, Mapping)}
+        self._restore_published_splits()
+        self._restore_created_drafts()
         self._provider_state = state
 
     def _get_live_resource(self, resource: _ResourceRecord) -> Mapping[str, object] | None:
@@ -2696,6 +3283,11 @@ class FoundryAdapter:
             return self.get_evaluation_definition(resource.resource_id)
         if resource.kind == 'activation_run':
             return self.get_activation_run(resource.resource_id, resource.name)
+        if resource.kind == 'agent_draft':
+            version = self._get_agent_version(resource.name, resource.version)
+            if version is None:
+                return None
+            return {'id': resource.resource_id, 'name': resource.name, 'version': resource.version}
         return None
 
     def _live_matches(self, resource: _ResourceRecord, live: Mapping[str, object] | None, *, require_ownership: bool) -> bool:
@@ -2729,6 +3321,9 @@ class FoundryAdapter:
             if resource.kind == 'activation_run':
                 self._openai_client().evals.runs.delete(run_id=resource.resource_id, eval_id=resource.name)
                 return True
+            if resource.kind == 'agent_draft':
+                result = self.cleanup_activation_draft(draft_agent_name=resource.name, draft_agent_version=resource.version)
+                return bool(result.get('completed'))
         except Exception:
             return False
         return False
@@ -2845,7 +3440,8 @@ class FoundryAdapter:
                     cleanup_request = self._cleanup_request_from_action(action)
                     if (cleanup_request.draft_agent_name, cleanup_request.draft_agent_version) not in confirmed_activation_drafts:
                         raise FoundryPrerequisiteError('activation_cleanup references a draft with no preceding activation_run in this apply', kind='prerequisite')
-                    self.cleanup_activation_draft(draft_agent_name=cleanup_request.draft_agent_name, draft_agent_version=cleanup_request.draft_agent_version)
+                    # Deprecated pre-v3 surface: the caller owned the draft lifecycle there.
+                    self.cleanup_activation_draft(draft_agent_name=cleanup_request.draft_agent_name, draft_agent_version=cleanup_request.draft_agent_version, require_operation_created=False)
                     changed.append(action.action_id)
             receipt = BootstrapReceipt.create(operation_id=plan.operation_id, runtime_repository=plan.runtime_repository, runtime_commit=plan.runtime_commit, repository_identity=plan.repository_identity, plan_hash=plan.plan_hash, before_fingerprints=tuple(before_fingerprints), after_fingerprints=tuple(after_fingerprints), created_actions=tuple(created), adopted_actions=tuple(adopted), changed_actions=tuple(changed), skipped_actions=tuple(skipped), compensation_required_actions=tuple(created_resource_ids))
             self._provider_state = self._provider_state_from_receipt(receipt, resource_records)
@@ -2865,6 +3461,8 @@ class FoundryAdapter:
     def verify_resources(self, receipt: BootstrapReceipt) -> bool:
         resources = self._current_resource_records(receipt)
         for resource in resources:
+            if resource.kind == 'agent_draft':
+                continue  # the owned draft is intentionally ephemeral: cleanup removes it
             if resource.kind == 'dataset' and not resource.resource_id.startswith(_IMMUTABLE_DATASET_URI_PREFIX):
                 continue
             live = self._get_live_resource(resource)
@@ -2907,6 +3505,8 @@ class FoundryAdapter:
         for resource in resources:
             if resource.disposition == 'created':
                 if resource.kind == 'evaluator' and resource.resource_type == 'builtin':
+                    continue
+                if resource.kind == 'agent_draft' and self._get_agent_version(resource.name, resource.version) is None:
                     continue
                 live = self._get_live_resource(resource)
                 if live is not None:

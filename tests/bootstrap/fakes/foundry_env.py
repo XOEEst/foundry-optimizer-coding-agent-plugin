@@ -7,16 +7,21 @@ definitions and runs with per-criterion measurements, and agent draft cleanup.
 
 from __future__ import annotations
 
+import atexit
 from collections.abc import Mapping, Sequence
+import hashlib
 import io
 from pathlib import Path
+import shutil
+import tempfile
 import zipfile
 
 import httpx
 import openai
 from azure.core.exceptions import ResourceNotFoundError
 
-from foundry_opt.bootstrap.providers.foundry import FoundryAdapter
+from foundry_opt.bootstrap.providers.foundry import AgentPackage, FoundryAdapter
+from foundry_opt.packaging import build_deterministic_zip
 
 PROJECT_ENDPOINT = "https://example.services.ai.azure.com/api/projects/example"
 RUBRIC_JOB_ID = "foundry-evalgen-rubric-000000000000000000000001"
@@ -334,12 +339,17 @@ class Beta:
 
 
 class Agents:
-    def __init__(self, *, code_archive: bytes | None = None, content_hash: str | None = None, versions: Mapping[tuple[str, str], Mapping[str, object]] | None = None) -> None:
+    def __init__(self, *, code_archive: bytes | None = None, content_hash: str | None = None, versions: Mapping[tuple[str, str], Mapping[str, object]] | None = None, existing_drafts: Sequence[tuple[str, str]] = ()) -> None:
         self.delete_version_calls: list[tuple[str, str]] = []
         self.download_calls: list[tuple[str, str | None]] = []
+        self.create_from_code_calls: list[dict[str, object]] = []
         self._code_archive = code_archive
         self._content_hash = content_hash
         self._versions = dict(versions or {})
+        self.created: dict[tuple[str, str], dict[str, object]] = {
+            (name, version): {"name": name, "version": version, "status": "active", "code_configuration": {}}
+            for name, version in existing_drafts
+        }
 
     def list(self, **kwargs: object) -> list[object]:
         del kwargs
@@ -349,17 +359,45 @@ class Agents:
         del agent_name, kwargs
         return []
 
+    def create_version_from_code(self, agent_name: str, *, definition: object, code, code_zip_sha256: str | None = None, description: str | None = None, metadata: Mapping[str, str] | None = None, **kwargs: object) -> object:
+        del kwargs
+        payload = code.read()
+        digest = hashlib.sha256(payload).hexdigest()
+        version = str(len([key for key in self.created if key[0] == agent_name]) + 1)
+        self.create_from_code_calls.append(
+            {
+                "agent_name": agent_name,
+                "definition": definition,
+                "code_zip_sha256": code_zip_sha256,
+                "observed_zip_sha256": digest,
+                "metadata": dict(metadata or {}),
+                "size_bytes": len(payload),
+                "code_name": getattr(code, "name", None),
+            }
+        )
+        record = {
+            "name": agent_name,
+            "version": version,
+            "status": "active",
+            "code_configuration": {"content_hash": code_zip_sha256 or digest},
+        }
+        self.created[(agent_name, version)] = record
+        return SdkObject(record)
+
     def get_version(self, agent_name: str, agent_version: str, **kwargs: object) -> object:
         del kwargs
         override = self._versions.get((agent_name, agent_version))
         if override is not None:
-            return SdkValue(dict(override))
+            return SdkObject(dict(override))
+        created = self.created.get((agent_name, agent_version))
+        if created is not None:
+            return SdkObject(dict(created))
         if self._code_archive is None:
             raise ResourceNotFoundError("agent version not found")
         code_configuration: dict[str, object] = {}
         if self._content_hash is not None:
             code_configuration["content_hash"] = self._content_hash
-        return SdkValue({"name": agent_name, "version": agent_version, "code_configuration": code_configuration})
+        return SdkObject({"name": agent_name, "version": agent_version, "status": "active", "code_configuration": code_configuration})
 
     def download_code(self, agent_name: str, *, agent_version: str | None = None, **kwargs: object):
         del kwargs
@@ -372,6 +410,7 @@ class Agents:
     def delete_version(self, agent_name: str, agent_version: str, **kwargs: object) -> None:
         del kwargs
         self.delete_version_calls.append((agent_name, agent_version))
+        self.created.pop((agent_name, agent_version), None)
 
 
 class Connections:
@@ -581,6 +620,8 @@ def build_fake_adapter(
     agent_versions: Mapping[tuple[str, str], Mapping[str, object]] | None = None,
     existing_definition_criteria: Sequence[Mapping[str, object]] | None = None,
     existing_definition_config: Mapping[str, object] | None = None,
+    existing_drafts: Sequence[tuple[str, str]] = (),
+    agent_packages: Mapping[str, "AgentPackage"] | None = None,
 ) -> tuple[FoundryAdapter, dict[str, object]]:
     """Build a fully offline adapter wired for the staged onboarding machine."""
 
@@ -677,7 +718,7 @@ def build_fake_adapter(
     else:
         existing_definitions = []
     evals = Evals(existing_definitions, runs)
-    agents = Agents(code_archive=code_archive, content_hash=code_content_hash, versions=agent_versions)
+    agents = Agents(code_archive=code_archive, content_hash=code_content_hash, versions=agent_versions, existing_drafts=existing_drafts)
     client = Client(
         beta=Beta(dataset_jobs, evaluator_jobs),
         datasets=datasets,
@@ -696,12 +737,15 @@ def build_fake_adapter(
         split_writer=_split_writer if split_writer_available else None,
         sleep=lambda _seconds: None,
     )
+    default_package = fake_agent_package()
+    adapter.set_agent_packages(_DefaultingPackages(default_package, **{key: value for key, value in (agent_packages or {}).items()}))
     return adapter, {
         "datasets": datasets,
         "dataset_jobs": dataset_jobs,
         "evaluator_jobs": evaluator_jobs,
         "evals": evals,
         "runs": runs,
+        "package": default_package,
         "agents": agents,
         "client": client,
         "split_writer": _split_writer,
@@ -710,6 +754,55 @@ def build_fake_adapter(
 
 def fake_credential() -> Credential:
     return Credential()
+
+
+_PACKAGE_CACHE: dict[str, "AgentPackage"] = {}
+
+
+def fake_agent_package(repo_agent_id: str = "app", *, marker: str = "print('agent')\n") -> "AgentPackage":
+    """Build a real deterministic archive for the owned-draft creation path."""
+
+    key = f"{repo_agent_id}-{hashlib.sha256(marker.encode('utf-8')).hexdigest()[:12]}"
+    cached = _PACKAGE_CACHE.get(key)
+    if cached is not None:
+        return cached
+    root = Path(_package_root()) / key
+    source = root / "src"
+    source.mkdir(parents=True, exist_ok=True)
+    (source / "main.py").write_text(marker, encoding="utf-8")
+    result = build_deterministic_zip(source, root / "package.zip", includes=("**/*",), excludes=(), check_deadline=lambda: None)
+    package = AgentPackage(
+        repo_agent_id=repo_agent_id,
+        zip_path=str(result.zip_path),
+        zip_sha256=result.zip_sha256,
+        tree_sha256=result.tree_sha256,
+        file_count=len(result.entries),
+        size_bytes=result.size_bytes,
+    )
+    _PACKAGE_CACHE[key] = package
+    return package
+
+
+def _package_root() -> str:
+    global _PACKAGE_ROOT
+    if _PACKAGE_ROOT is None:
+        _PACKAGE_ROOT = tempfile.mkdtemp(prefix="foundry-opt-fake-packages-")
+        atexit.register(shutil.rmtree, _PACKAGE_ROOT, True)
+    return _PACKAGE_ROOT
+
+
+_PACKAGE_ROOT: str | None = None
+
+
+class _DefaultingPackages(dict):
+    """Test seam: every agent id resolves to a package unless one is registered."""
+
+    def __init__(self, default: "AgentPackage", **entries: "AgentPackage") -> None:
+        super().__init__(entries)
+        self._default = default
+
+    def get(self, key, default=None):  # type: ignore[override]
+        return super().get(key, self._default)
 
 
 def build_code_archive(root: Path, *, extra: Mapping[str, bytes] | None = None) -> bytes:

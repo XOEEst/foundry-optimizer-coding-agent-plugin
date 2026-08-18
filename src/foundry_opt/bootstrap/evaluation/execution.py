@@ -542,6 +542,10 @@ class ActivationFinalization(BootstrapDocument):
     draft_agent_version: ResourceVersion
     cases: tuple[ActivationCaseFinalization, ...]
     cleanup_completed: StrictBool
+    draft_disposition: Literal["created"] = "created"
+    package_tree_sha256: Sha256 | None = None
+    package_zip_sha256: Sha256 | None = None
+    draft_code_digest: Sha256 | None = None
 
     @model_validator(mode="after")
     def _validate_activation(self) -> Self:
