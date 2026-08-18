@@ -240,6 +240,7 @@ def test_fingerprint_helpers_are_stable_and_path_filtered() -> None:
     files = {"app/main.py": "a" * 64, "app/.foundry/agent-metadata.yaml": "b" * 64}
     assert fingerprint_files(files) == fingerprint_files(dict(reversed(list(files.items()))))
     assert is_fingerprintable_path("app/main.py") is True
+    assert is_fingerprintable_path("app/.foundry/agent-metadata.yaml") is False
     assert is_fingerprintable_path("app/__pycache__/main.pyc") is False
     assert is_fingerprintable_path("../escape.py") is False
     with pytest.raises(BootstrapConfigError):
@@ -376,15 +377,6 @@ def test_observation_maps_archive_entries_from_package_root(tmp_path: Path) -> N
             ).hexdigest(),
             "agents/example/pyproject.toml": hashlib.sha256(
                 (repo / "agents" / "example" / "pyproject.toml").read_bytes()
-            ).hexdigest(),
-            "agents/example/.foundry/agent-metadata.yaml": hashlib.sha256(
-                (
-                    repo
-                    / "agents"
-                    / "example"
-                    / ".foundry"
-                    / "agent-metadata.yaml"
-                ).read_bytes()
             ).hexdigest(),
         }
     )

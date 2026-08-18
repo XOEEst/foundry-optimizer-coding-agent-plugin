@@ -336,6 +336,8 @@ def _fingerprint_root(cache: _ScanCache, root: str) -> str:
         return cached
     files: dict[str, str] = {}
     for file in cache.scan_root(root):
+        if not is_fingerprintable_path(file.relative):
+            continue
         if file.sha256 is None:
             raise BootstrapConfigError(f"fingerprint input exceeds size limit: {file.relative}")
         files[file.relative] = file.sha256
@@ -368,6 +370,11 @@ def is_fingerprintable_path(relative: str) -> bool:
     try:
         candidate = PurePosixPath(validate_repository_relative_path(relative, field="fingerprint path"))
     except Exception:
+        return False
+    if any(
+        part.casefold() in {".foundry", ".foundry-opt", ".github"}
+        for part in candidate.parts
+    ):
         return False
     return _is_allowed_relative(candidate)
 
