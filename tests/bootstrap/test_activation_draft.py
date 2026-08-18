@@ -13,6 +13,7 @@ from pathlib import Path
 import threading
 
 import pytest
+from azure.core.credentials import AccessToken
 
 from foundry_opt.bootstrap.contracts import BootstrapPlan
 from foundry_opt.bootstrap.drivers import EvaluationPhaseDriver
@@ -266,6 +267,34 @@ def test_live_adapter_uses_a_separate_agent_observer_pipeline(monkeypatch) -> No
     assert adapter._client is not adapter._agent_observer_client
     assert adapter._get_agent_version("draft", "1") is not None
     assert len(created_clients) == 3
+
+
+def test_live_clients_share_a_thread_safe_token_cache(monkeypatch) -> None:
+    class _TokenCredential:
+        def __init__(self):
+            self.calls = 0
+
+        def get_token(self, *scopes, **kwargs):
+            self.calls += 1
+            return AccessToken("token", 4102444800)
+
+    class _Client:
+        def __init__(self, endpoint, credential):
+            self.agents = object()
+
+    source = _TokenCredential()
+    monkeypatch.setattr(
+        "foundry_opt.bootstrap.providers.foundry.AIProjectClient",
+        _Client,
+    )
+    adapter = FoundryAdapter(
+        "https://example.services.ai.azure.com/api/projects/example",
+        source,
+    )
+
+    assert adapter._credential.get_token("scope").token == "token"
+    assert adapter._credential.get_token("scope").token == "token"
+    assert source.calls == 1
 
 
 def test_a_failed_safety_gate_still_deletes_the_owned_draft() -> None:
