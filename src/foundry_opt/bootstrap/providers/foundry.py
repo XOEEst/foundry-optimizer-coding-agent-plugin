@@ -1867,7 +1867,28 @@ class FoundryAdapter:
                     recovered = self._reconcile_generation_job(handle)
                     if recovered is not None:
                         return self._normalize_job_result(handle.job_kind, recovered)
-                    raise self._classify_error(exc) from None
+                    classified = self._classify_error(exc)
+                    if isinstance(classified, FoundryPlatformError):
+                        if self._time() >= deadline_monotonic:
+                            raise FoundryOperationDeadlineError('polling deadline exceeded', kind='deadline', retryable=True) from None
+                        self._sleep(poll_interval)
+                        while True:
+                            try:
+                                poller = beta_group.begin_create_generation_job(
+                                    None,
+                                    continuation_token=handle.continuation_token,
+                                    operation_id=handle.operation_id,
+                                )
+                                break
+                            except Exception as resume_exc:
+                                resume_error = self._classify_error(resume_exc)
+                                if not isinstance(resume_error, FoundryPlatformError):
+                                    raise resume_error from None
+                                if self._time() >= deadline_monotonic:
+                                    raise FoundryOperationDeadlineError('polling deadline exceeded', kind='deadline', retryable=True) from None
+                                self._sleep(poll_interval)
+                        continue
+                    raise classified from None
                 return self._normalize_job_result(handle.job_kind, _as_mapping(job))
             if deadline_monotonic is not None and self._time() >= deadline_monotonic:
                 raise FoundryOperationDeadlineError('polling deadline exceeded', kind='deadline', retryable=True)

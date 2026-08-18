@@ -454,6 +454,51 @@ def test_evaluator_poll_recovers_succeeded_job_by_operation_id() -> None:
     assert result["saved_evaluator"]["version"] == "1"
 
 
+def test_generation_poll_retries_transient_continuation_result_errors() -> None:
+    failed = _Poller(
+        [RuntimeError("continuation not ready")],
+        continuation="resume-evaluator",
+        done_sequence=[True],
+    )
+    succeeded = _Poller(
+        [
+            _SdkValue(
+                {
+                    "id": "evaluatorgen-1",
+                    "status": "succeeded",
+                    "result": {
+                        "id": "azureai://accounts/a/projects/p/evaluators/quality/versions/1",
+                        "name": "quality",
+                        "version": "1",
+                    },
+                }
+            )
+        ],
+        continuation="resume-evaluator",
+        done_sequence=[True],
+    )
+    jobs = _Jobs(create_results=[failed, succeeded])
+    adapter = FoundryAdapter(
+        "https://account.services.ai.azure.com/api/projects/demo",
+        _Cred(),
+        client=_Client(beta=_Beta(datasets=_Jobs(), evaluators=jobs)),
+        sleep=lambda _seconds: None,
+    )
+
+    result = adapter.poll_generation_job(
+        FoundryOperationHandle(
+            operation_id="rubric-operation-1",
+            job_kind="evaluator_generation",
+            continuation_token="resume-evaluator",
+            polling_url="https://poll/evaluator",
+            created=True,
+        )
+    )
+
+    assert result["saved_evaluator"]["name"] == "quality"
+    assert len(jobs.create_calls) == 2
+
+
 def test_dataset_create_or_update_and_adopt_verification() -> None:
     existing = _SdkValue({'name': 'dataset-a', 'version': '1', 'id': 'azureai://accounts/a/projects/p/data/dataset-a/versions/1', 'type': 'uri_file', 'dataUri': 'https://blob/data.jsonl'})
     datasets = _Datasets([], gets={('dataset-a', '1'): existing})
