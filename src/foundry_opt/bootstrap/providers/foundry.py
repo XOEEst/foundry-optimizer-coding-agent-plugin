@@ -1851,6 +1851,11 @@ class FoundryAdapter:
             poller = self._beta('evaluators').begin_create_generation_job(self._build_evaluator_generation_job(request), operation_id=operation_id)
         except Exception as exc:
             reconciled = self._find_evaluator_generation_job(request)
+            if reconciled is None and not self._injected_client:
+                visibility_deadline = self._time() + self._request_timeout
+                while reconciled is None and self._time() < visibility_deadline:
+                    self._sleep(self._default_poll_interval)
+                    reconciled = self._find_evaluator_generation_job(request)
             if reconciled is not None:
                 return FoundryOperationHandle(
                     operation_id=operation_id,

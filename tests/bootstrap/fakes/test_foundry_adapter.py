@@ -552,6 +552,26 @@ def test_evaluator_submission_reconciles_a_job_without_a_continuation_token() ->
     assert jobs.create_calls == []
 
 
+def test_injected_submission_errors_do_not_wait_for_live_visibility() -> None:
+    jobs = _Jobs(create_results=[RuntimeError("invalid request")])
+    adapter = FoundryAdapter(
+        "https://account.services.ai.azure.com/api/projects/demo",
+        _Cred(),
+        client=_Client(beta=_Beta(datasets=_Jobs(), evaluators=jobs)),
+        sleep=lambda _seconds: pytest.fail("injected clients must not wait"),
+    )
+
+    with pytest.raises(Exception):
+        adapter.create_evaluator_generation_job(
+            {
+                "operation_id": "rubric-operation-1",
+                "sources": [{"type": "agent", "agent_name": "agent"}],
+                "model": "gpt-4.1",
+                "evaluator_name": "quality",
+            }
+        )
+
+
 def test_dataset_create_or_update_and_adopt_verification() -> None:
     existing = _SdkValue({'name': 'dataset-a', 'version': '1', 'id': 'azureai://accounts/a/projects/p/data/dataset-a/versions/1', 'type': 'uri_file', 'dataUri': 'https://blob/data.jsonl'})
     datasets = _Datasets([], gets={('dataset-a', '1'): existing})
