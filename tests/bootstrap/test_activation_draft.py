@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 import threading
 
+import httpx
 import pytest
 from azure.core.credentials import AccessToken
 
@@ -265,8 +266,6 @@ def test_live_adapter_uses_a_separate_agent_observer_pipeline(monkeypatch) -> No
 
     assert len(created_clients) == 2
     assert adapter._client is not adapter._agent_observer_client
-    assert adapter._get_agent_version("draft", "1") is not None
-    assert len(created_clients) == 3
 
 
 def test_live_clients_share_a_thread_safe_token_cache(monkeypatch) -> None:
@@ -295,6 +294,57 @@ def test_live_clients_share_a_thread_safe_token_cache(monkeypatch) -> None:
     assert adapter._credential.get_token("scope").token == "token"
     assert adapter._credential.get_token("scope").token == "token"
     assert source.calls == 1
+
+
+def test_live_agent_status_uses_timeout_bound_httpx(monkeypatch) -> None:
+    class _TokenCredential:
+        def get_token(self, *scopes, **kwargs):
+            return AccessToken("token", 4102444800)
+
+    class _Client:
+        def __init__(self, endpoint, credential):
+            self.agents = object()
+
+    observed = {}
+
+    def _get(url, **kwargs):
+        observed["url"] = url
+        observed.update(kwargs)
+        return httpx.Response(
+            200,
+            request=httpx.Request("GET", url),
+            json={
+                "name": "draft",
+                "version": "1",
+                "status": "active",
+                "definition": {
+                    "code_configuration": {
+                        "content_hash": "a" * 64,
+                    }
+                },
+            },
+        )
+
+    monkeypatch.setattr(
+        "foundry_opt.bootstrap.providers.foundry.AIProjectClient",
+        _Client,
+    )
+    monkeypatch.setattr(
+        "foundry_opt.bootstrap.providers.foundry.httpx.get",
+        _get,
+    )
+    adapter = FoundryAdapter(
+        "https://example.services.ai.azure.com/api/projects/example",
+        _TokenCredential(),
+        request_timeout=42,
+    )
+
+    version = adapter._get_agent_version("draft", "1")
+
+    assert version["status"] == "active"
+    assert observed["timeout"] == 42
+    assert observed["headers"]["Accept-Encoding"] == "identity"
+    assert observed["headers"]["Authorization"] == "Bearer token"
 
 
 def test_a_failed_safety_gate_still_deletes_the_owned_draft() -> None:

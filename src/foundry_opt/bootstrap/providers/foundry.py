@@ -1635,25 +1635,52 @@ class FoundryAdapter:
         )
 
     def _get_agent_version(self, agent_name: str, agent_version: str) -> object | None:
-        agent_client = (
-            self._agent_observer_client
-            if self._injected_client
-            else AIProjectClient(self._project_endpoint, self._credential)
+        if self._injected_client:
+            getter = getattr(self._agent_observer_client.agents, 'get_version', None)
+            if not callable(getter):
+                return None
+            try:
+                return getter(agent_name, agent_version)
+            except ResourceNotFoundError:
+                return None
+            except Exception as exc:
+                raise self._classify_error(exc) from exc
+        token = self._credential.get_token('https://ai.azure.com/.default')
+        url = (
+            f"{self._project_endpoint.rstrip('/')}/agents/"
+            f"{quote(agent_name, safe='')}/versions/{quote(agent_version, safe='')}"
         )
-        getter = getattr(agent_client.agents, 'get_version', None)
-        if not callable(getter):
-            return None
         try:
-            return getter(
-                agent_name,
-                agent_version,
-                connection_timeout=self._request_timeout,
-                read_timeout=self._request_timeout,
+            response = httpx.get(
+                url,
+                params={'api-version': 'v1'},
+                headers={
+                    'Authorization': f'Bearer {token.token}',
+                    'Accept': 'application/json',
+                    'Accept-Encoding': 'identity',
+                },
+                timeout=self._request_timeout,
             )
-        except ResourceNotFoundError:
+        except httpx.HTTPError:
+            raise FoundryNetworkError('agent version status request failed', kind='network', retryable=True) from None
+        if response.status_code == 404:
             return None
-        except Exception as exc:
-            raise self._classify_error(exc) from exc
+        if response.status_code in {401, 403}:
+            raise FoundryPermissionError('agent version status request was rejected', kind='permission', status_code=response.status_code)
+        if response.status_code >= 400:
+            raise FoundryPlatformError(
+                'agent version status request failed',
+                kind='platform',
+                retryable=response.status_code >= 500,
+                status_code=response.status_code,
+            )
+        try:
+            payload = response.json()
+        except ValueError:
+            raise FoundryPlatformError('agent version status response was invalid', kind='platform') from None
+        if not isinstance(payload, Mapping):
+            raise FoundryPlatformError('agent version status response was invalid', kind='platform')
+        return payload
 
     def _await_agent_version_active(self, agent_name: str, agent_version: str, *, deadline_monotonic: float | None = None) -> None:
         """Wait until the created draft is servable, failing closed on terminal failures."""
