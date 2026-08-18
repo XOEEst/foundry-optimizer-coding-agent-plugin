@@ -95,8 +95,10 @@ _OWNERSHIP_TAG = 'foundry_opt_operation'
 # graders, `azure_ai_target_completions` runs over immutable split datasets, and
 # `azure_ai_synthetic_data_gen_preview` runs for synthetic dataset generation.
 _EVAL_SCENARIO = 'synthetic_data_gen_preview'
+_SYNTHETIC_ITEM_GENERATION_TYPE = 'synthetic_data_gen_preview'
 _ITEM_QUERY_REFERENCE = 'item.query'
 _EVALUATOR_DATA_MAPPING = {'query': '{{item.query}}', 'response': '{{sample.output_text}}'}
+_MAX_RUN_OUTPUT_ITEMS = 5000
 _MAX_AGENT_CODE_BYTES = 32 * 1024 * 1024
 _MAX_AGENT_CODE_ENTRIES = 2000
 
@@ -968,7 +970,7 @@ class FoundryAdapter:
     def get_activation_run(self, run_id: str, definition_id: str) -> Mapping[str, object] | None:
         client = self._openai_client()
         try:
-            item = client.evals.runs.retrieve(run_id, eval_id=definition_id)
+            item = client.evals.runs.retrieve(run_id=run_id, eval_id=definition_id)
         except openai.NotFoundError:
             return None
         except Exception as exc:
@@ -1066,7 +1068,7 @@ class FoundryAdapter:
             ]
             data_source = {'type': 'jsonl', 'source': {'type': 'file_content', 'content': content}}
             try:
-                run = client.evals.runs.create(definition_id, data_source=data_source, name=f'{phase}-activation-smoke')
+                run = client.evals.runs.create(eval_id=definition_id, data_source=data_source, name=f'{phase}-activation-smoke')
             except Exception as exc:
                 raise self._classify_error(exc) from exc
             run_id = getattr(run, 'id', None)
@@ -1392,7 +1394,7 @@ class FoundryAdapter:
         client = self._openai_client()
         while True:
             try:
-                run = client.evals.runs.retrieve(run_id, eval_id=definition_id)
+                run = client.evals.runs.retrieve(run_id=run_id, eval_id=definition_id)
             except Exception as exc:
                 raise self._classify_error(exc) from exc
             status = str(getattr(run, 'status', '') or '')
@@ -1498,6 +1500,9 @@ class FoundryAdapter:
                 'evaluator_name': str(criterion['evaluator_name']),
                 'data_mapping': dict(_EVALUATOR_DATA_MAPPING),
             }
+            initialization = criterion.get('initialization_parameters')
+            if isinstance(initialization, Mapping) and initialization:
+                entry['initialization_parameters'] = {str(key): value for key, value in initialization.items()}
             version = criterion.get('evaluator_version')
             if isinstance(version, str) and version:
                 entry['evaluator_version'] = version
@@ -1558,9 +1563,12 @@ class FoundryAdapter:
     ) -> Mapping[str, object]:
         """Generate a synthetic dataset by running the agent through the cloud-eval API.
 
-        Uses the documented `azure_ai_synthetic_data_gen_preview` run data source (not yet in
-        the SDK's typed surface, so it is sent as an explicit, validated mapping) and returns
-        the immutable `output_dataset_id` the service produced.
+        Mirrors the official `sample_synthetic_data_agent_evaluation.py` flow: an
+        `azure_ai_synthetic_data_gen_preview` run data source with
+        `item_generation_params` (`synthetic_data_gen_preview`) and an `azure_ai_agent`
+        target, polled through `evals.runs.retrieve`. The immutable output dataset id is read
+        back from `run.data_source.item_generation_params.output_dataset_id`, and the accepted
+        sample count from the run's output items.
         """
         if samples_count <= 0:
             raise FoundryPrerequisiteError('synthetic generation requires a positive sample count', kind='prerequisite')
@@ -1568,7 +1576,7 @@ class FoundryAdapter:
         data_source = {
             'type': 'azure_ai_synthetic_data_gen_preview',
             'item_generation_params': {
-                'type': 'synthetic_data_gen',
+                'type': _SYNTHETIC_ITEM_GENERATION_TYPE,
                 'samples_count': int(samples_count),
                 'prompt': prompt,
                 'model_deployment_name': model_deployment_name,
@@ -1577,7 +1585,7 @@ class FoundryAdapter:
             'target': {'type': 'azure_ai_agent', 'name': agent_name, 'version': agent_version},
         }
         try:
-            run = client.evals.runs.create(definition_id, data_source=data_source, name=run_name)
+            run = client.evals.runs.create(eval_id=definition_id, data_source=data_source, name=run_name)
         except Exception as exc:
             raise self._classify_error(exc) from exc
         run_id = getattr(run, 'id', None)
@@ -1585,15 +1593,58 @@ class FoundryAdapter:
             raise FoundryPrerequisiteError('synthetic generation run returned no id', kind='prerequisite')
         payload = self._await_activation_run(run_id, definition_id, deadline_monotonic=deadline_monotonic)
         completed = payload.get('run') if 'run' in payload else payload
-        output_dataset_id = getattr(completed, 'output_dataset_id', None)
-        if output_dataset_id is None and isinstance(payload, Mapping):
-            output_dataset_id = payload.get('output_dataset_id')
+        output_dataset_id = self._synthetic_output_dataset_id(completed, payload)
         if not isinstance(output_dataset_id, str) or not output_dataset_id:
             raise FoundryPrerequisiteError('synthetic generation run returned no output dataset id', kind='prerequisite')
-        generated = getattr(completed, 'generated_samples', None)
-        if generated is None and isinstance(payload, Mapping):
-            generated = payload.get('generated_samples')
-        return {'run_id': run_id, 'output_dataset_id': output_dataset_id, 'generated_samples': generated}
+        return {'run_id': run_id, 'output_dataset_id': output_dataset_id, 'generated_samples': self.run_output_item_count(run_id=run_id, definition_id=definition_id)}
+
+    def _synthetic_output_dataset_id(self, completed: object, payload: Mapping[str, object]) -> str | None:
+        """Read `data_source.item_generation_params.output_dataset_id` from a completed run."""
+
+        candidates: list[object] = [getattr(completed, 'data_source', None)]
+        if isinstance(payload, Mapping):
+            candidates.append(payload.get('data_source'))
+        for source in candidates:
+            if source is None:
+                continue
+            params = getattr(source, 'item_generation_params', None)
+            if params is None and isinstance(source, Mapping):
+                params = source.get('item_generation_params')
+            if params is None and callable(getattr(source, 'as_dict', None)):
+                params = _as_mapping(source).get('item_generation_params')
+            if isinstance(params, Mapping):
+                value = params.get('output_dataset_id')
+            else:
+                value = getattr(params, 'output_dataset_id', None)
+            if isinstance(value, str) and value:
+                return value
+        return None
+
+    def run_output_item_count(self, *, run_id: str, definition_id: str) -> int | None:
+        """Count a run's output items, the real per-generated-sample records.
+
+        Returns `None` when the project's client does not expose the output-items API, so the
+        caller can fall back to the resolved dataset's case index.
+        """
+
+        client = self._openai_client()
+        runs = getattr(client.evals, 'runs', None)
+        output_items = getattr(runs, 'output_items', None)
+        lister = getattr(output_items, 'list', None)
+        if not callable(lister):
+            return None
+        try:
+            items = lister(run_id=run_id, eval_id=definition_id)
+            count = 0
+            for _item in items:
+                count += 1
+                if count > _MAX_RUN_OUTPUT_ITEMS:
+                    raise FoundryPrerequisiteError('evaluation run reported more output items than the supported budget', kind='prerequisite')
+        except FoundryAdapterError:
+            raise
+        except Exception as exc:
+            raise self._classify_error(exc) from exc
+        return count
 
     def _stage_ledger(self, action_id: str) -> dict[str, object]:
         ledger = self._onboarding.get(action_id)
@@ -2043,6 +2094,9 @@ class FoundryAdapter:
                 'normalization_kind': objective.normalization.kind,
                 'source_min': objective.normalization.source_min,
                 'source_max': objective.normalization.source_max,
+                # AI-assisted evaluators are initialized with the judge deployment; built-in
+                # safety evaluators take no initialization parameters.
+                'initialization_parameters': {'deployment_name': contract.activation_plan.model_deployment},
             },
         }
         for guardrail in guardrails:
@@ -2101,7 +2155,7 @@ class FoundryAdapter:
                     draft_agent_version=contract.activation_plan.draft_agent_version,
                 )
                 try:
-                    run = client.evals.runs.create(definition_ids[role], data_source=data_source, name=f'{role}-activation-smoke')
+                    run = client.evals.runs.create(eval_id=definition_ids[role], data_source=data_source, name=f'{role}-activation-smoke')
                 except Exception as exc:
                     raise self._classify_error(exc) from exc
                 run_id = getattr(run, 'id', None)
@@ -2493,10 +2547,10 @@ class FoundryAdapter:
                 self._beta('evaluators').delete_version(resource.name, resource.version)
                 return True
             if resource.kind == 'evaluation_definition':
-                self._openai_client().evals.delete(resource.resource_id)
+                self._openai_client().evals.delete(eval_id=resource.resource_id)
                 return True
             if resource.kind == 'activation_run':
-                self._openai_client().evals.runs.delete(resource.resource_id, eval_id=resource.name)
+                self._openai_client().evals.runs.delete(run_id=resource.resource_id, eval_id=resource.name)
                 return True
         except Exception:
             return False

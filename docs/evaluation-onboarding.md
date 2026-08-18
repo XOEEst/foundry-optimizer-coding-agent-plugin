@@ -80,22 +80,27 @@ surface rather than a local approximation:
 
 | Stage | Call | Shape |
 | --- | --- | --- |
-| definitions | `evals.create` | `data_source_config={"type": "azure_ai_source", "scenario": "synthetic_data_gen_preview"}` with one `TestingCriterionAzureAIEvaluator` (`{"type": "azure_ai_evaluator", "name", "evaluator_name", "evaluator_version", "data_mapping"}`) per approved evaluator |
-| generation (synthetic) | `evals.runs.create` | `data_source.type = "azure_ai_synthetic_data_gen_preview"` with `item_generation_params(samples_count, prompt, model_deployment_name, output_dataset_name)` and `target={"type": "azure_ai_agent", "name", "version"}`; the run returns the immutable `output_dataset_id` that is then split |
+| definitions | `evals.create` | `data_source_config={"type": "azure_ai_source", "scenario": "synthetic_data_gen_preview"}` with one `TestingCriterionAzureAIEvaluator` (`{"type": "azure_ai_evaluator", "name", "evaluator_name", "evaluator_version", "initialization_parameters", "data_mapping"}`) per approved evaluator |
+| generation (synthetic) | `evals.runs.create` | `data_source.type = "azure_ai_synthetic_data_gen_preview"` with `item_generation_params(type="synthetic_data_gen_preview", samples_count, prompt, model_deployment_name, output_dataset_name)` and `target={"type": "azure_ai_agent", "name", "version"}` |
 | generation (traces) | `beta.datasets.create_generation_job` | agent/dataset sources, unchanged |
 | activation | `evals.runs.create` | `TargetCompletionEvalRunDataSource` — `{"type": "azure_ai_target_completions", "source": {"type": "file_id", "id": <immutable split dataset id>}, "target": {"type": "azure_ai_agent", ...}}` |
+| polling | `evals.runs.retrieve` | `retrieve(run_id=..., eval_id=...)` until `completed`/`failed` |
+| results | `evals.runs.output_items.list` | one item per generated/evaluated sample; the count is the accepted generated sample count |
 
 Every criterion binds an immutable evaluator id and maps `query` to `{{item.query}}` and
 `response` to `{{sample.output_text}}`, so the service performs the scoring and the adapter
-only reads back per-criterion `passed`/`failed`/`errored` counts. No Python-grader passthrough
-remains on the onboarding path; the pre-v3 granular `evaluation_definition`/`activation_run`
-action kinds keep their structural audit behaviour purely so older plans can be resumed and
-rolled back.
+only reads back per-criterion `passed`/`failed`/`errored` counts. AI-assisted (objective)
+evaluators are initialized with `initialization_parameters={"deployment_name": <model
+deployment>}`; built-in safety evaluators take none. The synthetic run's immutable output
+dataset is read from `run.data_source.item_generation_params.output_dataset_id` and is what the
+deterministic split consumes. No Python-grader passthrough remains on the onboarding path; the
+pre-v3 granular `evaluation_definition`/`activation_run` action kinds keep their structural
+audit behaviour purely so older plans can be resumed and rolled back.
 
-Honest caveat: `azure_ai_synthetic_data_gen_preview` has no typed dict in
-`azure-ai-projects` 2.4.0b/`openai` 2.53.0, so its body is built as an explicitly validated
-mapping. The literal `item_generation_params.type = "synthetic_data_gen"` is taken from the
-documented preview shape and has not been confirmed against a live run.
+These shapes match the official `sample_synthetic_data_agent_evaluation.py` sample in
+`Azure/azure-sdk-for-python` (`sdk/ai/azure-ai-projects/samples/evaluations/`). The synthetic
+data source has no typed dict in `azure-ai-projects` 2.4.0b/`openai` 2.53.0, so its body is
+built as an explicitly validated mapping; the sample passes the same untyped mapping.
 
 ## Required built-in safety bundle
 

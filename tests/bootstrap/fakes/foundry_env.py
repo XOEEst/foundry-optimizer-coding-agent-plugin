@@ -125,6 +125,16 @@ class SdkValue:
         return dict(self._payload)
 
 
+class SdkObject(SdkValue):
+    """SDK response model shape: attribute access plus `as_dict`."""
+
+    def __getattr__(self, item: str) -> object:
+        try:
+            return self._payload[item]
+        except KeyError:
+            raise AttributeError(item) from None
+
+
 class Poller:
     def __init__(self, result: object) -> None:
         self._result = result
@@ -349,20 +359,35 @@ class EvalObject:
 
 
 class RunObject:
+    """Shaped like `RunCreateResponse`/`RunRetrieveResponse`: the synthetic generation run
+    echoes its data source back, and the output dataset id lands in
+    `data_source.item_generation_params.output_dataset_id`."""
+
     def __init__(
         self,
         run_id: str,
         status: str,
         measurements: Sequence[Mapping[str, object]],
         *,
-        output_dataset_id: str | None = None,
-        generated_samples: int | None = None,
+        data_source: Mapping[str, object] | None = None,
     ) -> None:
         self.id = run_id
         self.status = status
         self.per_testing_criteria_results = [dict(item) for item in measurements]
-        self.output_dataset_id = output_dataset_id
-        self.generated_samples = generated_samples
+        self.data_source = SdkObject(dict(data_source)) if data_source is not None else None
+
+
+class OutputItems:
+    """`client.evals.runs.output_items` — one item per generated/evaluated sample."""
+
+    def __init__(self, counts: dict[str, int]) -> None:
+        self.counts = counts
+        self.list_calls: list[tuple[str, str]] = []
+
+    def list(self, run_id: str, *, eval_id: str, **kwargs: object) -> list[Mapping[str, object]]:
+        del kwargs
+        self.list_calls.append((run_id, eval_id))
+        return [{"id": f"{run_id}-item-{index}", "status": "pass"} for index in range(self.counts.get(run_id, 0))]
 
 
 class Runs:
@@ -382,6 +407,7 @@ class Runs:
         self.status = "completed"
         self.synthetic_dataset_id = synthetic_dataset_id
         self.synthetic_generated_samples = synthetic_generated_samples
+        self.output_items = OutputItems({})
 
     def create(self, eval_id: str, *, data_source: Mapping[str, object], name: str | None = None) -> RunObject:
         if self.fail_create:
@@ -390,16 +416,14 @@ class Runs:
         self._next += 1
         source_type = str(data_source.get("type") or "")
         if source_type == "azure_ai_synthetic_data_gen_preview":
-            run = RunObject(
-                f"run-{self._next}",
-                self.status,
-                [],
-                output_dataset_id=self.synthetic_dataset_id,
-                generated_samples=self.synthetic_generated_samples,
-            )
+            params = dict(data_source.get("item_generation_params") or {})
+            params["output_dataset_id"] = self.synthetic_dataset_id
+            run = RunObject(f"run-{self._next}", self.status, [], data_source={**data_source, "item_generation_params": params})
+            if self.synthetic_generated_samples is not None:
+                self.output_items.counts[run.id] = self.synthetic_generated_samples
         else:
             phase = "development" if str(name or "").startswith("development") else "validating"
-            run = RunObject(f"run-{self._next}", self.status, self.measurements.get(phase, []))
+            run = RunObject(f"run-{self._next}", self.status, self.measurements.get(phase, []), data_source=data_source)
         self.items[run.id] = run
         return run
 

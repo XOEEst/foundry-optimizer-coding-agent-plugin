@@ -351,6 +351,10 @@ def test_definitions_bind_real_azure_ai_evaluator_graders() -> None:
         objective = by_name["quality-eval"]
         assert objective["evaluator_name"] == "quality-eval"
         assert objective["evaluator_version"] == "2"
+        # AI-assisted evaluators are initialized with the judge deployment; safety built-ins
+        # take no initialization parameters (matches the official SDK sample).
+        assert objective["initialization_parameters"] == {"deployment_name": "baseline-model"}
+        assert all("initialization_parameters" not in by_name[f"builtin.{name}"] for name in REQUIRED_SAFETY_EVALUATORS)
 
 
 def test_activation_runs_use_target_completions_against_the_split_datasets() -> None:
@@ -382,12 +386,17 @@ def test_synthetic_generation_uses_the_real_agent_run_and_output_dataset_id() ->
     synthetic = [call for call in fakes["runs"].create_calls if call[1]["type"] == "azure_ai_synthetic_data_gen_preview"]
     assert len(synthetic) == 1
     params = synthetic[0][1]["item_generation_params"]
+    assert params["type"] == "synthetic_data_gen_preview"
     assert params["samples_count"] == 30
     assert params["model_deployment_name"] == "baseline-model"
     assert params["output_dataset_name"] == "dev-set-source"
     assert params["prompt"]
     assert synthetic[0][1]["target"] == {"type": "azure_ai_agent", "name": "example-agent", "version": "1"}
-    # The service-produced `output_dataset_id` is what gets split.
+    # The immutable id is read back from data_source.item_generation_params.output_dataset_id,
+    # and the accepted sample count from the run's output items.
+    generation_run_id = next(run_id for run_id, count in fakes["runs"].output_items.counts.items() if count == 30)
+    assert (generation_run_id, "eval_1") in fakes["runs"].output_items.list_calls
+    assert fakes["runs"].items[generation_run_id].data_source.item_generation_params["output_dataset_id"].endswith("/data/generated-set/versions/1")
     assert finalization.generated_sample_count == 30
     assert (finalization.split.development_case_count, finalization.split.validating_case_count) == (20, 10)
 
@@ -400,3 +409,28 @@ def test_trace_strategy_still_uses_the_beta_generation_job() -> None:
 
     assert len(fakes["dataset_jobs"].create_calls) >= 1
     assert not [call for call in fakes["runs"].create_calls if call[1]["type"] == "azure_ai_synthetic_data_gen_preview"]
+
+
+def test_generated_sample_count_falls_back_to_the_case_index_without_output_items() -> None:
+    contract = build_contract()
+    adapter, fakes = build_fake_adapter()
+
+    class _NoOutputItemsApi:
+        """A project whose client does not expose evals.runs.output_items.list."""
+
+        counts: dict[str, int] = {}
+
+    fakes["runs"].output_items = _NoOutputItemsApi()
+
+    receipt = adapter.apply_resources(_plan(contract, operation_id="op-no-output-items"))
+
+    assert _finalization(adapter, receipt).generated_sample_count == 30
+
+
+def test_synthetic_run_without_an_output_dataset_id_fails_closed() -> None:
+    contract = build_contract()
+    adapter, fakes = build_fake_adapter()
+    fakes["runs"].synthetic_dataset_id = None
+
+    with pytest.raises(FoundryPrerequisiteError, match="no output dataset id"):
+        adapter.apply_resources(_plan(contract, operation_id="op-no-output-dataset"))
