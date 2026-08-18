@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from foundry_opt.bootstrap.contracts import BootstrapPlan
+from foundry_opt.bootstrap.drivers import AzurePhaseDriver
 from foundry_opt.bootstrap.errors import BootstrapConfigError
 from foundry_opt.bootstrap.input_contracts import (
     AzureIdentityInput,
@@ -221,3 +223,54 @@ def test_identity_diagnostics_stay_json_safe_and_bounded() -> None:
     encoded = json.dumps(action.model_dump(mode="json"))
     assert "pilot-foundry-opt" in encoded
     assert all("=" in entry for entry in action.diagnostics)
+
+
+def test_fresh_apply_process_restores_approved_role_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan_input = _plan_input(
+        {
+            "identity_kind": "user_assigned_managed_identity",
+            "existing_resource_id": _resource_id("pilot-identity"),
+            "create_if_missing": True,
+        }
+    )
+    captured: dict[str, str] = {}
+
+    class _Provider:
+        def __init__(
+            self,
+            *,
+            token_provider,
+            approved_role_definitions,
+        ) -> None:
+            del token_provider
+            captured.update(approved_role_definitions)
+
+        def apply_bindings(self, plan: BootstrapPlan) -> BootstrapPlan:
+            return plan
+
+    monkeypatch.setattr(
+        "foundry_opt.bootstrap.drivers.AzureArmRestProvider",
+        _Provider,
+    )
+    driver = AzurePhaseDriver(plan_input=plan_input)
+    phase_plan = BootstrapPlan.create(
+        operation_id="apply-in-new-process",
+        runtime_repository=(
+            "https://github.com/XOEEst/"
+            "foundry-optimizer-coding-agent-plugin.git"
+        ),
+        runtime_commit="a" * 40,
+        repository_identity="org/repo",
+        actions=(),
+    )
+
+    assert driver.apply(phase_plan) is phase_plan
+    assert captured == {
+        "foundry-user": (
+            f"/subscriptions/{SUBSCRIPTION}/providers/"
+            "Microsoft.Authorization/roleDefinitions/"
+            "53ca6127-db72-4b80-b1b0-d745d6d5456d"
+        )
+    }
