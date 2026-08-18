@@ -2478,6 +2478,43 @@ class FoundryAdapter:
             raise FoundryPrerequisiteError('generated rubric structure is unavailable for validation', kind='prerequisite')
         return rubric
 
+    @staticmethod
+    def _evaluator_initialization_parameters(
+        evaluator: Mapping[str, object],
+        model_deployment: str,
+    ) -> Mapping[str, object]:
+        raw = evaluator.get('raw')
+        definition = (
+            raw.get('definition') or raw.get('rubric')
+            if isinstance(raw, Mapping)
+            else None
+        )
+        initialization = (
+            definition.get('init_parameters')
+            or definition.get('initParameters')
+            or definition.get('initialization_parameters')
+            if isinstance(definition, Mapping)
+            else None
+        )
+        properties = initialization.get('properties') if isinstance(initialization, Mapping) else None
+        required = initialization.get('required') if isinstance(initialization, Mapping) else None
+        property_names = set(properties) if isinstance(properties, Mapping) else set()
+        required_names = {
+            str(item)
+            for item in required or ()
+            if isinstance(item, str) and item
+        } if isinstance(required, Sequence) and not isinstance(required, (str, bytes, bytearray)) else set()
+        if 'model' in property_names or 'model' in required_names:
+            return {'model': model_deployment}
+        if 'deployment_name' in property_names or 'deployment_name' in required_names:
+            return {'deployment_name': model_deployment}
+        if required_names:
+            raise FoundryPrerequisiteError(
+                'custom evaluator requires unsupported initialization parameters',
+                kind='prerequisite',
+            )
+        return {'deployment_name': model_deployment}
+
     def _await_activation_run(self, run_id: str, definition_id: str, *, deadline_monotonic: float | None = None) -> Mapping[str, object]:
         client = self._openai_observer_client()
         if deadline_monotonic is None:
@@ -3377,7 +3414,10 @@ class FoundryAdapter:
                 'source_max': objective.normalization.source_max,
                 # AI-assisted evaluators are initialized with the judge deployment; built-in
                 # safety evaluators take no initialization parameters.
-                'initialization_parameters': {'deployment_name': contract.activation_plan.model_deployment},
+                'initialization_parameters': self._evaluator_initialization_parameters(
+                    existing,
+                    contract.activation_plan.model_deployment,
+                ),
                 'data_mapping': dict(_OBJECTIVE_DATA_MAPPING),
             },
         }
