@@ -89,6 +89,25 @@ def test_generated_path_runs_every_stage_and_records_dynamic_ids(tmp_path) -> No
     assert finalization.activation.status == "succeeded"
     assert finalization.activation.cleanup_completed is True
     assert fakes["agents"].delete_version_calls == [("draft-agent", "1")]
+    generation_definition = next(
+        call
+        for call in fakes["evals"].create_calls
+        if call["name"] == "app-synthetic-generation"
+    )
+    assert generation_definition["testing_criteria"] == [
+        {
+            "type": "azure_ai_evaluator",
+            "name": "coherence",
+            "evaluator_name": "builtin.coherence",
+            "initialization_parameters": {
+                "deployment_name": "baseline-model",
+            },
+            "data_mapping": {
+                "query": "{{item.query}}",
+                "response": "{{sample.output_text}}",
+            },
+        }
+    ]
     finalization.verify_against_contract(contract)
     # The immutable ids exist only in the receipt/provider state, never in the approved plan.
     approved_payload = contract.composite_action()[0].diagnostics[2]

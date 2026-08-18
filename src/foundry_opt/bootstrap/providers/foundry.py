@@ -2467,9 +2467,11 @@ class FoundryAdapter:
                         definition_name=f'{contract.repo_agent_id}-synthetic-generation',
                         dataset={},
                         criteria={
-                            evaluator_plan.requested_name: {
-                                'evaluator_name': evaluator_plan.requested_name,
-                                'evaluator_version': evaluator_plan.requested_version,
+                            'coherence': {
+                                'evaluator_name': 'builtin.coherence',
+                                'initialization_parameters': {
+                                    'deployment_name': dataset_plan.generation_model_deployment,
+                                },
                             }
                         },
                     )
