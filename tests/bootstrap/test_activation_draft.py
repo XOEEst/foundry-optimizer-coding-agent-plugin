@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import threading
 
 import pytest
 
@@ -200,12 +201,13 @@ def test_agent_upload_timeout_recovers_exact_owned_active_version() -> None:
     contract = build_contract()
     adapter, fakes = build_fake_adapter()
     original = fakes["agents"].create_version_from_code
+    release = threading.Event()
 
-    def _create_then_timeout(*args, **kwargs):
+    def _create_then_wait(*args, **kwargs):
         original(*args, **kwargs)
-        raise TimeoutError("agent upload response timed out")
+        release.wait(60)
 
-    fakes["agents"].create_version_from_code = _create_then_timeout
+    fakes["agents"].create_version_from_code = _create_then_wait
 
     result = adapter.create_activation_draft(
         contract=contract,
@@ -217,6 +219,7 @@ def test_agent_upload_timeout_recovers_exact_owned_active_version() -> None:
     assert result["created"] is True
     assert result["draft_agent_name"] == "draft-agent"
     assert result["draft_agent_version"] == "1"
+    release.set()
     assert fakes["agents"].create_from_code_calls[0]["metadata"][
         "foundry_opt_operation"
     ] == adapter._ownership_token(
