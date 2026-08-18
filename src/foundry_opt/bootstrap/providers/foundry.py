@@ -10,8 +10,10 @@ import io
 import json
 import math
 import os
+import queue
 import re
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -1444,13 +1446,42 @@ class FoundryAdapter:
         archive = Path(package.zip_path)
         if not archive.is_file():
             raise FoundryPrerequisiteError('packaged agent source archive is missing', kind='prerequisite')
-        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+        archive_bytes = archive.read_bytes()
+        digest = hashlib.sha256(archive_bytes).hexdigest()
         if digest != package.zip_sha256:
             raise FoundryPrerequisiteError('packaged agent source archive does not match its recorded digest', kind='prerequisite')
         ownership = self._with_ownership_tags(None, operation_id=operation_id, action_id=action_id)
-        try:
-            with archive.open('rb') as stream:
-                created = creator(
+
+        def _owned_created_version() -> object | None:
+            observed = self._get_agent_version(name, version)
+            if observed is None:
+                return None
+            observed_metadata = _sdk_attribute(observed, 'metadata')
+            observed_configuration = (
+                _sdk_attribute(observed, 'code_configuration', 'codeConfiguration')
+            )
+            observed_hash = str(
+                _sdk_attribute(observed_configuration, 'content_hash', 'contentHash') or ''
+            )
+            if not isinstance(observed_metadata, Mapping) or observed_metadata.get(_OWNERSHIP_TAG) != ownership[_OWNERSHIP_TAG]:
+                raise FoundryPrerequisiteError(
+                    f'agent version {name}:{version} appeared with foreign ownership during upload',
+                    kind='conflict',
+                )
+            if observed_hash and observed_hash.split(':')[-1].casefold() != package.zip_sha256:
+                raise FoundryPrerequisiteError(
+                    f'agent version {name}:{version} appeared with different uploaded content',
+                    kind='conflict',
+                )
+            return observed if observed_hash else None
+
+        outcome: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=1)
+
+        def _submit() -> None:
+            stream = io.BytesIO(archive_bytes)
+            stream.name = str(archive)
+            try:
+                created_version = creator(
                     name,
                     definition=definition,
                     code=stream,
@@ -1459,25 +1490,43 @@ class FoundryAdapter:
                     connection_timeout=self._request_timeout,
                     read_timeout=self._request_timeout,
                 )
-        except Exception as exc:
-            observed = self._get_agent_version(name, version)
-            observed_metadata = _sdk_attribute(observed, 'metadata') if observed is not None else None
-            observed_configuration = (
-                _sdk_attribute(observed, 'code_configuration', 'codeConfiguration')
-                if observed is not None
-                else None
-            )
-            observed_hash = str(
-                _sdk_attribute(observed_configuration, 'content_hash', 'contentHash') or ''
-            )
-            if (
-                observed is None
-                or not isinstance(observed_metadata, Mapping)
-                or observed_metadata.get(_OWNERSHIP_TAG) != ownership[_OWNERSHIP_TAG]
-                or observed_hash.split(':')[-1].casefold() != package.zip_sha256
-            ):
-                raise self._classify_error(exc) from exc
+            except BaseException as exc:  # daemon submission reports back to the bounded owner
+                outcome.put(('error', exc))
+            else:
+                outcome.put(('created', created_version))
+
+        upload = threading.Thread(
+            target=_submit,
+            name=f'foundry-opt-upload-{name}-{version}',
+            daemon=True,
+        )
+        upload.start()
+        deadline = self._time() + self._operation_timeout
+        while True:
+            try:
+                status, value = outcome.get_nowait()
+            except queue.Empty:
+                observed = _owned_created_version()
+                if observed is not None:
+                    created = observed
+                    break
+                if self._time() >= deadline:
+                    raise FoundryOperationDeadlineError(
+                        'agent draft upload deadline exceeded',
+                        kind='deadline',
+                        retryable=True,
+                    )
+                self._sleep(self._default_poll_interval)
+                continue
+            if status == 'created':
+                created = value
+                break
+            observed = _owned_created_version()
+            if observed is None:
+                assert isinstance(value, BaseException)
+                raise self._classify_error(value) from value
             created = observed
+            break
         created_name = str(_sdk_attribute(created, 'name') or '')
         created_version = str(_sdk_attribute(created, 'version') or '')
         if created_name != name or created_version != version:
