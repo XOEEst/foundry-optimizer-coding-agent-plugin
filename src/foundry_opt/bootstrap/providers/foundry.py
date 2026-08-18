@@ -1838,12 +1838,76 @@ class FoundryAdapter:
         request.setdefault('scenario', 'evaluation')
         request.setdefault('name', request.get('job_name') or 'foundry-opt-data-generation')
         operation_id = str(request.get('operation_id') or self._operation_id('evaluator-generation', request))
+        reconciled = self._find_evaluator_generation_job(request)
+        if reconciled is not None:
+            return FoundryOperationHandle(
+                operation_id=operation_id,
+                job_kind='evaluator_generation',
+                continuation_token=f"job-id:{reconciled['id']}",
+                polling_url=None,
+                created=False,
+            )
         try:
             poller = self._beta('evaluators').begin_create_generation_job(self._build_evaluator_generation_job(request), operation_id=operation_id)
         except Exception as exc:
+            reconciled = self._find_evaluator_generation_job(request)
+            if reconciled is not None:
+                return FoundryOperationHandle(
+                    operation_id=operation_id,
+                    job_kind='evaluator_generation',
+                    continuation_token=f"job-id:{reconciled['id']}",
+                    polling_url=None,
+                    created=True,
+                )
             raise self._classify_error(exc) from exc
         token, url = self._poller_seam(poller)
         return FoundryOperationHandle(operation_id=operation_id, job_kind='evaluator_generation', continuation_token=token, polling_url=url, created=True)
+
+    def _find_evaluator_generation_job(self, request: Mapping[str, object]) -> Mapping[str, object] | None:
+        lister = getattr(self._beta('evaluators'), 'list_generation_jobs', None)
+        if not callable(lister):
+            return None
+        expected_name = str(request.get('evaluator_name') or '')
+        expected_model = str(request.get('model') or '')
+        expected_sources = {
+            (
+                str(item.get('type') or ''),
+                str(item.get('agent_name') or item.get('name') or ''),
+                str(item.get('agent_version') or item.get('version') or ''),
+            )
+            for item in request.get('sources', ())
+            if isinstance(item, Mapping)
+        }
+        try:
+            matches = []
+            for item in lister(limit=100):
+                job = _as_mapping(item)
+                inputs = job.get('inputs')
+                if not isinstance(inputs, Mapping):
+                    continue
+                sources = inputs.get('sources')
+                live_sources = {
+                    (
+                        str(source.get('type') or ''),
+                        str(source.get('agent_name') or source.get('name') or ''),
+                        str(source.get('agent_version') or source.get('version') or ''),
+                    )
+                    for source in sources or ()
+                    if isinstance(source, Mapping)
+                }
+                if (
+                    str(inputs.get('evaluator_name') or '') == expected_name
+                    and str(inputs.get('model') or '') == expected_model
+                    and live_sources == expected_sources
+                    and str(job.get('status') or '') in {'in_progress', 'running', 'succeeded', 'completed'}
+                    and isinstance(job.get('id'), str)
+                ):
+                    matches.append(job)
+        except Exception:
+            return None
+        if len(matches) > 1:
+            raise FoundryPrerequisiteError('evaluator generation job reconciliation is ambiguous', kind='prerequisite')
+        return matches[0] if matches else None
 
     def poll_generation_job(self, handle: FoundryOperationHandle, *, persist_before_poll: Callable[[FoundryOperationHandle], None] | None = None, deadline_monotonic: float | None = None, poll_interval: float | None = None) -> Mapping[str, object]:
         if persist_before_poll is not None:
@@ -1854,6 +1918,27 @@ class FoundryAdapter:
         beta_group = self._beta('datasets') if handle.job_kind == 'dataset_generation' else self._beta('evaluators')
         if not handle.continuation_token:
             raise FoundryPrerequisiteError('continuation token required to resume generation job', kind='prerequisite')
+        if handle.continuation_token.startswith('job-id:'):
+            job_id = handle.continuation_token.removeprefix('job-id:')
+            getter = getattr(beta_group, 'get_generation_job', None)
+            if not callable(getter) or not job_id:
+                raise FoundryPrerequisiteError('generation job reconciliation is unavailable', kind='prerequisite')
+            while True:
+                try:
+                    job = _as_mapping(getter(job_id))
+                except Exception as exc:
+                    classified = self._classify_error(exc)
+                    if not isinstance(classified, FoundryPlatformError):
+                        raise classified from None
+                    job = {}
+                status = str(job.get('status') or '')
+                if status in {'completed', 'succeeded'}:
+                    return self._normalize_job_result(handle.job_kind, job)
+                if status in {'failed', 'canceled', 'cancelled', 'error'}:
+                    raise FoundryPrerequisiteError('generation job did not complete successfully', kind='prerequisite')
+                if self._time() >= deadline_monotonic:
+                    raise FoundryOperationDeadlineError('polling deadline exceeded', kind='deadline', retryable=True)
+                self._sleep(poll_interval)
         try:
             poller = beta_group.begin_create_generation_job(None, continuation_token=handle.continuation_token, operation_id=handle.operation_id)
         except Exception as exc:

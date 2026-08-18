@@ -101,6 +101,14 @@ class _Jobs:
         del kwargs
         return list(self.generation_jobs)
 
+    def get_generation_job(self, job_id: str, **kwargs: object) -> object:
+        del kwargs
+        for item in self.generation_jobs:
+            payload = item.as_dict() if hasattr(item, "as_dict") else item
+            if isinstance(payload, Mapping) and payload.get("id") == job_id:
+                return item
+        raise ResourceNotFoundError(message="generation job not found")
+
     def get_version(self, name: str, version: str, **kwargs: object) -> object:
         del kwargs
         if (name, version) not in self.versions:
@@ -497,6 +505,51 @@ def test_generation_poll_retries_transient_continuation_result_errors() -> None:
 
     assert result["saved_evaluator"]["name"] == "quality"
     assert len(jobs.create_calls) == 2
+
+
+def test_evaluator_submission_reconciles_a_job_without_a_continuation_token() -> None:
+    generation_job = _SdkValue(
+        {
+            "id": "evaluatorgen-1",
+            "status": "succeeded",
+            "inputs": {
+                "model": "gpt-4.1",
+                "evaluator_name": "quality",
+                "sources": [
+                    {"type": "agent", "agent_name": "agent", "agent_version": "1"},
+                    {"type": "dataset", "name": "dev", "version": "1"},
+                ],
+            },
+            "result": {
+                "id": "azureai://accounts/a/projects/p/evaluators/quality/versions/1",
+                "name": "quality",
+                "version": "1",
+            },
+        }
+    )
+    jobs = _Jobs(generation_jobs=[generation_job])
+    adapter = FoundryAdapter(
+        "https://account.services.ai.azure.com/api/projects/demo",
+        _Cred(),
+        client=_Client(beta=_Beta(datasets=_Jobs(), evaluators=jobs)),
+        sleep=lambda _seconds: None,
+    )
+    request = {
+        "operation_id": "rubric-operation-1",
+        "sources": [
+            {"type": "agent", "agent_name": "agent", "agent_version": "1"},
+            {"type": "dataset", "name": "dev", "version": "1"},
+        ],
+        "model": "gpt-4.1",
+        "evaluator_name": "quality",
+    }
+
+    handle = adapter.create_evaluator_generation_job(request)
+    result = adapter.poll_generation_job(handle)
+
+    assert handle.continuation_token == "job-id:evaluatorgen-1"
+    assert result["saved_evaluator"]["version"] == "1"
+    assert jobs.create_calls == []
 
 
 def test_dataset_create_or_update_and_adopt_verification() -> None:
