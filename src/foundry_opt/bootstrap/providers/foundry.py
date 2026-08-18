@@ -1615,11 +1615,21 @@ class FoundryAdapter:
         )
 
     def _get_agent_version(self, agent_name: str, agent_version: str) -> object | None:
-        getter = getattr(self._agent_observer_client.agents, 'get_version', None)
+        agent_client = (
+            self._agent_observer_client
+            if self._injected_client
+            else AIProjectClient(self._project_endpoint, self._credential)
+        )
+        getter = getattr(agent_client.agents, 'get_version', None)
         if not callable(getter):
             return None
         try:
-            return getter(agent_name, agent_version)
+            return getter(
+                agent_name,
+                agent_version,
+                connection_timeout=self._request_timeout,
+                read_timeout=self._request_timeout,
+            )
         except ResourceNotFoundError:
             return None
         except Exception as exc:
