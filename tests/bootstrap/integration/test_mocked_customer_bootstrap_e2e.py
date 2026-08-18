@@ -33,8 +33,9 @@ from foundry_opt.bootstrap.evaluation.execution import ReplacementLineage
 from foundry_opt.bootstrap.input_contracts import BootstrapPlanInput, TrustedTemplateManifest
 from foundry_opt.bootstrap.operation_state import SelectionPlan, read_operation_state
 from foundry_opt.bootstrap.orchestrator import BootstrapOrchestrator
+from foundry_opt.bootstrap.packaging_policy import PACKAGE_EXCLUDES
 from foundry_opt.bootstrap.providers.azure import AzureArmRestProvider
-from foundry_opt.bootstrap.providers.foundry import FoundryAdapter
+from foundry_opt.bootstrap.providers.foundry import AgentPackage, FoundryAdapter
 from foundry_opt.bootstrap.providers.github import GitHubBootstrapProvider
 from foundry_opt.bootstrap.receipts import ApprovalRecord
 from foundry_opt.bootstrap.workflow_integration import (
@@ -42,9 +43,11 @@ from foundry_opt.bootstrap.workflow_integration import (
     build_registered_deployment_plan,
     resolve_registry_selection,
 )
+from foundry_opt.packaging import build_deterministic_zip
 from tests.bootstrap.fakes import AzureTransportRecorder
 from tests.bootstrap.fakes.evaluation_contract import build_contract, evaluation_agent_payload
-from tests.bootstrap.fakes.foundry_env import build_code_archive, build_fake_adapter
+from tests.bootstrap.fakes.foundry_env import build_code_archive, build_fake_adapter, fake_agent_package
+from tests.bootstrap.fakes.live_dataset_blob import install_live_datasets, synthetic_rows
 
 # ---------------------------------------------------------------------------
 # Reviewed provenance pins, exactly as specified by the bootstrap acceptance
@@ -463,8 +466,8 @@ class _RoutingDriver(EvaluationPhaseDriver):
     Foundry projects, so a single adapter is never shared across endpoints.
     """
 
-    def __init__(self, *, plan_input: BootstrapPlanInput, adapters: dict[str, FoundryAdapter]) -> None:
-        super().__init__(plan_input=plan_input)
+    def __init__(self, *, plan_input: BootstrapPlanInput, adapters: dict[str, FoundryAdapter], repository_root: Path | None = None) -> None:
+        super().__init__(plan_input=plan_input, repository_root=repository_root)
         self._adapters = adapters
 
     def _client_for(self, endpoint: str) -> FoundryAdapter:
@@ -519,7 +522,7 @@ def _plan_for(
 # ---------------------------------------------------------------------------
 
 
-def test_mocked_customer_bootstrap_end_to_end(tmp_path: Path) -> None:
+def test_mocked_customer_bootstrap_end_to_end(tmp_path: Path, request: pytest.FixtureRequest) -> None:
     """One state-tracing acceptance run across every phase of customer bootstrap.
 
     Everything below only ever talks to (1) a throwaway `git clone` of the read-only
@@ -564,11 +567,28 @@ def test_mocked_customer_bootstrap_end_to_end(tmp_path: Path) -> None:
         required_phases=["repository", "github", "azure", "evaluations"],
     )
 
-    aligned_adapter, aligned_fakes = build_fake_adapter()
-    unknown_adapter, unknown_fakes = build_fake_adapter()
+    # Both onboarded agents are wired for the *real* default materialization path: no
+    # `split_writer` short-circuit, and a loopback HTTP "blob" server standing in for the
+    # SAS-protected dataset endpoint, so `dataset_case_index`/`publish_split_dataset`
+    # genuinely download and re-upload content through `get_credentials`/`upload_file`
+    # rather than the `get_case_index` preview seam. Draft creation is likewise wired to the
+    # real deterministic-packaging path (`repository_root=repo`) instead of the fakes'
+    # injected default package, so the created draft is provably built from the cloned
+    # pilot's own reviewed source.
+    aligned_adapter, aligned_fakes = build_fake_adapter(split_writer_available=False)
+    unknown_adapter, unknown_fakes = build_fake_adapter(split_writer_available=False)
+    aligned_blob_server, aligned_live_datasets = install_live_datasets(
+        aligned_adapter, aligned_fakes, dataset_name="generated-set", rows=synthetic_rows(30)
+    )
+    unknown_blob_server, unknown_live_datasets = install_live_datasets(
+        unknown_adapter, unknown_fakes, dataset_name="generated-set", rows=synthetic_rows(30)
+    )
+    request.addfinalizer(aligned_blob_server.close)
+    request.addfinalizer(unknown_blob_server.close)
     evaluations_driver = _RoutingDriver(
         plan_input=loaded,
         adapters={ALIGNED_EXPECTED_PROJECT_ENDPOINT: aligned_adapter, SECOND_PROJECT_ENDPOINT: unknown_adapter},
+        repository_root=repo,
     )
 
     github_state = _github_state()
@@ -688,6 +708,45 @@ def test_mocked_customer_bootstrap_end_to_end(tmp_path: Path) -> None:
     evaluations_actions = [action for action in envelope_initial.bootstrap_plan.actions if action.phase == "evaluations"]
     assert {action.action_id.split(":")[1] for action in evaluations_actions} == {ALIGNED_ID, UNKNOWN_ID}
     assert aligned_fakes["evaluator_jobs"].create_calls, "synthetic-only onboarding must generate a rubric"
+
+    # -- 7a. The activation draft is genuinely built from the cloned pilot's own reviewed --
+    # source by the driver's real deterministic-packaging path (`repository_root=repo`),
+    # never the fakes' injected default package -- proving the draft is created, not
+    # pre-seeded, from this operation's own repository content.
+    expected_aligned_zip = build_deterministic_zip(
+        repo / ALIGNED_ROOT, tmp_path / "verify-aligned-package.zip", includes=("**/*",), excludes=PACKAGE_EXCLUDES, check_deadline=lambda: None
+    )
+    expected_unknown_zip = build_deterministic_zip(
+        repo / UNKNOWN_ROOT, tmp_path / "verify-unknown-package.zip", includes=("**/*",), excludes=PACKAGE_EXCLUDES, check_deadline=lambda: None
+    )
+    default_package_sha256 = fake_agent_package().zip_sha256
+    aligned_draft_creates = aligned_fakes["agents"].create_from_code_calls
+    unknown_draft_creates = unknown_fakes["agents"].create_from_code_calls
+    assert len(aligned_draft_creates) == 1
+    assert len(unknown_draft_creates) == 1
+    for creates, expected in ((aligned_draft_creates, expected_aligned_zip), (unknown_draft_creates, expected_unknown_zip)):
+        assert creates[0]["code_zip_sha256"] == expected.zip_sha256
+        # The fake independently hashes the bytes it actually streamed in, so this proves the
+        # claimed digest matches genuinely-uploaded content, not just a label.
+        assert creates[0]["observed_zip_sha256"] == expected.zip_sha256
+        assert creates[0]["code_zip_sha256"] != default_package_sha256
+
+    # -- 7b. The generated dataset is genuinely downloaded through a SAS credential and each --
+    # split is genuinely re-uploaded through `upload_file` -- the default live materialization
+    # path, never the injected `split_writer`/`get_case_index` preview shortcuts.
+    assert aligned_adapter._split_writer is None
+    assert unknown_adapter._split_writer is None
+    assert not hasattr(aligned_live_datasets, "get_case_index")
+    assert ("generated-set", "1") in aligned_live_datasets.get_credentials_calls
+    assert ("generated-set", "1") in unknown_live_datasets.get_credentials_calls
+    for live_datasets in (aligned_live_datasets, unknown_live_datasets):
+        assert sorted(call["name"] for call in live_datasets.upload_calls) == ["dev-set", "val-set"]
+        assert (len(live_datasets.uploaded_rows["dev-set"]), len(live_datasets.uploaded_rows["val-set"])) == (20, 10)
+        # The real content actually round-tripped through the split (not merely identifiers).
+        assert all(row["query"].startswith("question ") for row in live_datasets.uploaded_rows["dev-set"])
+        # Temporary split files are written 0600 and removed immediately after upload.
+        assert live_datasets.observed_temp_paths
+        assert all(not Path(path).exists() for path in live_datasets.observed_temp_paths)
 
     aligned_sidecar_path = repo / ALIGNED_ROOT / ".foundry" / "foundry-opt.yaml"
     unknown_sidecar_path = repo / UNKNOWN_ROOT / ".foundry" / "foundry-opt.yaml"
