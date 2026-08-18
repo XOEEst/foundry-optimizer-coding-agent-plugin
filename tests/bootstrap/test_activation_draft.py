@@ -234,10 +234,23 @@ def test_agent_upload_timeout_recovers_exact_owned_active_version() -> None:
 def test_live_adapter_uses_a_separate_agent_observer_pipeline(monkeypatch) -> None:
     created_clients = []
 
+    class _Agents:
+        def get_version(self, agent_name, agent_version, **kwargs):
+            return {
+                "name": agent_name,
+                "version": agent_version,
+                "status": "active",
+                "definition": {
+                    "code_configuration": {
+                        "content_hash": "a" * 64,
+                    }
+                },
+            }
+
     class _Client:
         def __init__(self, endpoint, credential):
             created_clients.append((endpoint, credential))
-            self.agents = object()
+            self.agents = _Agents()
 
     monkeypatch.setattr(
         "foundry_opt.bootstrap.providers.foundry.AIProjectClient",
@@ -251,6 +264,8 @@ def test_live_adapter_uses_a_separate_agent_observer_pipeline(monkeypatch) -> No
 
     assert len(created_clients) == 2
     assert adapter._client is not adapter._agent_observer_client
+    assert adapter._get_agent_version("draft", "1") is not None
+    assert len(created_clients) == 3
 
 
 def test_a_failed_safety_gate_still_deletes_the_owned_draft() -> None:
