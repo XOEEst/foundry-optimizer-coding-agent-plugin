@@ -19,7 +19,8 @@ ISSUE_FORM_PATH = CUSTOMER_TEMPLATE_ROOT / ".github" / "ISSUE_TEMPLATE" / "found
 WORKFLOW_ROOT = CUSTOMER_TEMPLATE_ROOT / ".github" / "workflows"
 EXPECTED_WORKFLOWS = {"agent-ci.yml", "copilot-setup-steps.yml", "foundry-opt-validation.yml", "foundry-opt-deploy.yml"}
 FIXTURE_ROOT = REPOSITORY_ROOT / "tests" / "bootstrap" / "fixtures" / "templates"
-RUNTIME_SHA = "c899b718f3baebcfd08209ee5184d0cf61d8153d"
+RUNTIME_SHA = "3e47ec5cd54f0aaa3702ed38cc6c4d995a310ba4"
+LEGACY_RUNTIME_SHA = "c899b718f3baebcfd08209ee5184d0cf61d8153d"
 FORBIDDEN_STRINGS = ("FOUNDRY_OPT_SHARED_REPO_SSH_KEY", "git@github.com", "known_hosts", "StrictHostKeyChecking")
 
 
@@ -73,7 +74,7 @@ def test_customer_templates_do_not_ship_the_legacy_shared_pin() -> None:
 
 
 def test_legacy_single_agent_files_exist_only_as_migration_fixtures() -> None:
-    assert f"commit: {RUNTIME_SHA}" in _read(FIXTURE_ROOT / "legacy-single-agent-foundry-opt.lock.yml")
+    assert f"commit: {LEGACY_RUNTIME_SHA}" in _read(FIXTURE_ROOT / "legacy-single-agent-foundry-opt.lock.yml")
     proposal = import_legacy_single_agent_documents(
         lock_document=_read(FIXTURE_ROOT / "legacy-single-agent-foundry-opt.lock.yml"),
         policy_document=_read(FIXTURE_ROOT / "legacy-single-agent-foundry-optimizer.yaml"),
