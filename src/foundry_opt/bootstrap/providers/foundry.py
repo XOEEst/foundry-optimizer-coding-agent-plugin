@@ -881,6 +881,22 @@ class FoundryAdapter:
         except Exception as exc:
             raise self._classify_error(exc) from exc
 
+    @staticmethod
+    def _agent_code_content_hash(version: object) -> str:
+        details = _sdk_mapping(version)
+        definition = _sdk_mapping(details.get('definition'))
+        configuration = _sdk_mapping(
+            definition.get('code_configuration')
+            or definition.get('codeConfiguration')
+            or details.get('code_configuration')
+            or details.get('codeConfiguration')
+        )
+        return str(
+            configuration.get('content_hash')
+            or configuration.get('contentHash')
+            or ''
+        )
+
     def observe_agent_binding(self, *, agent_name: str, agent_version: str, source_root: str, package_root: str) -> Mapping[str, object]:
         """Observe a deployed immutable agent version and derive content fingerprints.
 
@@ -1438,7 +1454,7 @@ class FoundryAdapter:
         existing = self._get_agent_version(name, version)
         if existing is not None:
             recorded = self._created_drafts.get((name, version))
-            content_hash = str(_sdk_attribute(_sdk_attribute(existing, 'code_configuration', 'codeConfiguration'), 'content_hash', 'contentHash') or '')
+            content_hash = self._agent_code_content_hash(existing)
             if recorded is None or recorded != package.zip_sha256 or content_hash.split(':')[-1].casefold() != package.zip_sha256:
                 raise FoundryPrerequisiteError(
                     f'agent version {name}:{version} already exists and was not created by this operation',
@@ -1465,12 +1481,7 @@ class FoundryAdapter:
             if observed is None:
                 return None
             observed_metadata = _sdk_attribute(observed, 'metadata')
-            observed_configuration = (
-                _sdk_attribute(observed, 'code_configuration', 'codeConfiguration')
-            )
-            observed_hash = str(
-                _sdk_attribute(observed_configuration, 'content_hash', 'contentHash') or ''
-            )
+            observed_hash = self._agent_code_content_hash(observed)
             if not isinstance(observed_metadata, Mapping) or observed_metadata.get(_OWNERSHIP_TAG) != ownership[_OWNERSHIP_TAG]:
                 raise FoundryPrerequisiteError(
                     f'agent version {name}:{version} appeared with foreign ownership during upload',
@@ -1539,7 +1550,7 @@ class FoundryAdapter:
         created_version = str(_sdk_attribute(created, 'version') or '')
         if created_name != name or created_version != version:
             raise FoundryPrerequisiteError('created agent draft identity does not match the approved activation plan', kind='prerequisite')
-        content_hash = str(_sdk_attribute(_sdk_attribute(created, 'code_configuration', 'codeConfiguration'), 'content_hash', 'contentHash') or '')
+        content_hash = self._agent_code_content_hash(created)
         if content_hash and content_hash.split(':')[-1].casefold() != package.zip_sha256:
             raise FoundryPrerequisiteError('created agent draft content hash does not match the uploaded package', kind='prerequisite')
         self._created_drafts[(name, version)] = package.zip_sha256
