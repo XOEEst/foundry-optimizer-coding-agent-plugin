@@ -45,6 +45,7 @@ def _body(request: httpx.Request) -> dict:
 def test_sends_real_authorization_header() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers["Authorization"] == "Bearer ghp_secret"
+        assert request.headers["Accept-Encoding"] == "identity"
         return _response(200, {"id": 7, "default_branch": "main", "full_name": "example-org/example-repo"})
 
     provider = GitHubBootstrapProvider(token="ghp_secret", transport=FakeGitHubTransport(handler))
