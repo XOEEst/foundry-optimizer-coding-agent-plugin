@@ -345,6 +345,72 @@ def test_real_poller_continuation_resume_and_deadline() -> None:
     assert poller.result_calls == [((), {})]
 
 
+def test_generation_poll_uses_a_bounded_default_deadline() -> None:
+    poller = _Poller([], done_sequence=[False])
+    jobs = _Jobs(create_results=[poller])
+    adapter = FoundryAdapter(
+        "https://account.services.ai.azure.com/api/projects/demo",
+        _Cred(),
+        client=_Client(beta=_Beta(datasets=jobs, evaluators=_Jobs())),
+        sleep=lambda _seconds: None,
+        time_source=iter([0.0, 11.0]).__next__,
+        operation_timeout=10.0,
+    )
+
+    with pytest.raises(FoundryOperationDeadlineError, match="polling deadline exceeded"):
+        adapter.poll_generation_job(
+            FoundryOperationHandle(
+                operation_id="dataset-operation-1",
+                job_kind="dataset_generation",
+                continuation_token="resume-dataset",
+                polling_url="https://poll/dataset",
+                created=True,
+            )
+        )
+
+
+def test_completed_split_preserves_restart_fingerprints() -> None:
+    adapter = FoundryAdapter(
+        "https://account.services.ai.azure.com/api/projects/demo",
+        _Cred(),
+        client=_Client(beta=_Beta(datasets=_Jobs(), evaluators=_Jobs())),
+    )
+    ledger = {
+        "stages": {
+            "split": {
+                "status": "in_flight",
+                "pending_splits": {
+                    "development": {
+                        "dataset_name": "dev",
+                        "dataset_version": "1",
+                        "split_fingerprint": "a" * 64,
+                    },
+                    "validating": {
+                        "dataset_name": "val",
+                        "dataset_version": "1",
+                        "split_fingerprint": "b" * 64,
+                    },
+                },
+            }
+        }
+    }
+
+    adapter._record_stage(
+        ledger,
+        "split",
+        {
+            "split_lineage_hash": "c" * 64,
+            "development_case_count": 20,
+            "validating_case_count": 10,
+        },
+    )
+
+    assert set(ledger["stages"]["split"]["pending_splits"]) == {
+        "development",
+        "validating",
+    }
+
+
 def test_evaluator_poll_recovers_succeeded_job_by_operation_id() -> None:
     failed_poller = _Poller(
         [RuntimeError("poll endpoint failed")],

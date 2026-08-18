@@ -520,7 +520,7 @@ class FoundryCapabilityProbe(FrozenModel):
 
 
 class FoundryAdapter:
-    def __init__(self, project_endpoint: str, credential: TokenCredential, *, client: object | None = None, time_source: Callable[[], float] | None = None, sleep: Callable[[float], None] | None = None, default_poll_interval: float = 1.0, split_writer: Callable[..., str] | None = None, checkpoint: Callable[[Mapping[str, object]], None] | None = None, download_timeout: float = 60.0) -> None:
+    def __init__(self, project_endpoint: str, credential: TokenCredential, *, client: object | None = None, time_source: Callable[[], float] | None = None, sleep: Callable[[float], None] | None = None, default_poll_interval: float = 1.0, split_writer: Callable[..., str] | None = None, checkpoint: Callable[[Mapping[str, object]], None] | None = None, download_timeout: float = 60.0, request_timeout: float = 120.0, operation_timeout: float = 1800.0) -> None:
         self._project_endpoint = project_endpoint
         self._client = client if client is not None else AIProjectClient(project_endpoint, credential)
         self._time = time_source or time.monotonic
@@ -535,6 +535,10 @@ class FoundryAdapter:
         self._dataset_row_cache: dict[tuple[str, str], tuple[Mapping[str, object], ...]] = {}
         self._published_splits: dict[tuple[str, str], str] = {}
         self._download_timeout = download_timeout
+        self._request_timeout = request_timeout
+        self._operation_timeout = operation_timeout
+        if self._request_timeout <= 0 or self._operation_timeout <= 0:
+            raise FoundryPrerequisiteError('Foundry timeouts must be positive', kind='prerequisite')
         self._agent_packages: Mapping[str, AgentPackage] = {}
         self._created_drafts: dict[tuple[str, str], str] = {}
 
@@ -778,6 +782,9 @@ class FoundryAdapter:
             client = getter()
         except Exception as exc:
             raise self._classify_error(exc) from exc
+        with_options = getattr(client, 'with_options', None)
+        if callable(with_options):
+            client = with_options(timeout=self._request_timeout, max_retries=2)
         self._openai = client
         return client
 
@@ -1500,6 +1507,8 @@ class FoundryAdapter:
     def _await_agent_version_active(self, agent_name: str, agent_version: str, *, deadline_monotonic: float | None = None) -> None:
         """Wait until the created draft is servable, failing closed on terminal failures."""
 
+        if deadline_monotonic is None:
+            deadline_monotonic = self._time() + self._operation_timeout
         while True:
             version = self._get_agent_version(agent_name, agent_version)
             if version is None:
@@ -1662,6 +1671,8 @@ class FoundryAdapter:
         if persist_before_poll is not None:
             persist_before_poll(handle)
         poll_interval = self._default_poll_interval if poll_interval is None else poll_interval
+        if deadline_monotonic is None:
+            deadline_monotonic = self._time() + self._operation_timeout
         beta_group = self._beta('datasets') if handle.job_kind == 'dataset_generation' else self._beta('evaluators')
         if not handle.continuation_token:
             raise FoundryPrerequisiteError('continuation token required to resume generation job', kind='prerequisite')
@@ -2185,6 +2196,8 @@ class FoundryAdapter:
 
     def _await_activation_run(self, run_id: str, definition_id: str, *, deadline_monotonic: float | None = None) -> Mapping[str, object]:
         client = self._openai_client()
+        if deadline_monotonic is None:
+            deadline_monotonic = self._time() + self._operation_timeout
         while True:
             try:
                 run = client.evals.runs.retrieve(run_id=run_id, eval_id=definition_id)
@@ -2476,7 +2489,11 @@ class FoundryAdapter:
         stages = ledger.get('stages')
         if isinstance(stages, dict):
             # A completed stage drops any in-flight handle: there is nothing left to resume.
-            stages[stage] = {'status': 'completed', **{key: value for key, value in detail.items()}}
+            existing = stages.get(stage)
+            recovery = {}
+            if stage == 'split' and isinstance(existing, Mapping) and isinstance(existing.get('pending_splits'), Mapping):
+                recovery['pending_splits'] = dict(existing['pending_splits'])
+            stages[stage] = {'status': 'completed', **recovery, **{key: value for key, value in detail.items()}}
             self._publish_checkpoint()
 
     def _completed_stage(self, ledger: Mapping[str, object], stage: str) -> Mapping[str, object] | None:
