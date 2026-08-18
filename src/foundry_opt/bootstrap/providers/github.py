@@ -774,6 +774,7 @@ class GitHubBootstrapProvider:
     def _headers(self) -> Mapping[str, str]:
         return {
             "Accept": "application/vnd.github+json",
+            "Accept-Encoding": "identity",
             "Authorization": f"Bearer {self._token}",
             "X-GitHub-Api-Version": _API_VERSION,
         }
