@@ -1447,6 +1447,7 @@ class FoundryAdapter:
         digest = hashlib.sha256(archive.read_bytes()).hexdigest()
         if digest != package.zip_sha256:
             raise FoundryPrerequisiteError('packaged agent source archive does not match its recorded digest', kind='prerequisite')
+        ownership = self._with_ownership_tags(None, operation_id=operation_id, action_id=action_id)
         try:
             with archive.open('rb') as stream:
                 created = creator(
@@ -1454,10 +1455,29 @@ class FoundryAdapter:
                     definition=definition,
                     code=stream,
                     code_zip_sha256=package.zip_sha256,
-                    metadata=self._with_ownership_tags(None, operation_id=operation_id, action_id=action_id),
+                    metadata=ownership,
+                    connection_timeout=self._request_timeout,
+                    read_timeout=self._request_timeout,
                 )
         except Exception as exc:
-            raise self._classify_error(exc) from exc
+            observed = self._get_agent_version(name, version)
+            observed_metadata = _sdk_attribute(observed, 'metadata') if observed is not None else None
+            observed_configuration = (
+                _sdk_attribute(observed, 'code_configuration', 'codeConfiguration')
+                if observed is not None
+                else None
+            )
+            observed_hash = str(
+                _sdk_attribute(observed_configuration, 'content_hash', 'contentHash') or ''
+            )
+            if (
+                observed is None
+                or not isinstance(observed_metadata, Mapping)
+                or observed_metadata.get(_OWNERSHIP_TAG) != ownership[_OWNERSHIP_TAG]
+                or observed_hash.split(':')[-1].casefold() != package.zip_sha256
+            ):
+                raise self._classify_error(exc) from exc
+            created = observed
         created_name = str(_sdk_attribute(created, 'name') or '')
         created_version = str(_sdk_attribute(created, 'version') or '')
         if created_name != name or created_version != version:

@@ -392,6 +392,7 @@ class Agents:
             "version": version,
             "status": "active",
             "code_configuration": {"content_hash": code_zip_sha256 or digest},
+            "metadata": dict(metadata or {}),
         }
         self.created[(agent_name, version)] = record
         return SdkObject(record)

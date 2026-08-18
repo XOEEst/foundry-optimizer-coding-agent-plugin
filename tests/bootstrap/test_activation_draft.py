@@ -196,6 +196,35 @@ def test_a_crash_after_creation_resumes_without_creating_a_second_draft() -> Non
     assert fakes["agents"].delete_version_calls == [("draft-agent", "1"), ("draft-agent", "1")]
 
 
+def test_agent_upload_timeout_recovers_exact_owned_active_version() -> None:
+    contract = build_contract()
+    adapter, fakes = build_fake_adapter()
+    original = fakes["agents"].create_version_from_code
+
+    def _create_then_timeout(*args, **kwargs):
+        original(*args, **kwargs)
+        raise TimeoutError("agent upload response timed out")
+
+    fakes["agents"].create_version_from_code = _create_then_timeout
+
+    result = adapter.create_activation_draft(
+        contract=contract,
+        package=fakes["package"],
+        operation_id="op-upload-timeout",
+        action_id="evaluations:app:onboarding:agent-draft",
+    )
+
+    assert result["created"] is True
+    assert result["draft_agent_name"] == "draft-agent"
+    assert result["draft_agent_version"] == "1"
+    assert fakes["agents"].create_from_code_calls[0]["metadata"][
+        "foundry_opt_operation"
+    ] == adapter._ownership_token(
+        "op-upload-timeout",
+        "evaluations:app:onboarding:agent-draft",
+    )
+
+
 def test_a_failed_safety_gate_still_deletes_the_owned_draft() -> None:
     contract = build_contract()
     adapter, fakes = build_fake_adapter(safety_pass_rate=0.9)
