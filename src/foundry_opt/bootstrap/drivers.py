@@ -183,22 +183,22 @@ class AzurePhaseDriver(PhaseDriver):
         return self._client(plan_input).plan_bindings(BootstrapPlan.create(operation_id=str(context["operation_id"]), runtime_repository=str(context["runtime_repository"]), runtime_commit=str(context["runtime_commit"]), repository_identity=str(context["repository_id"]), actions=tuple(action for action in build_phase_actions(plan_input) if action.phase == "azure")))
 
     def apply(self, phase_plan: BootstrapPlan) -> BootstrapReceipt:
-        return self._client().apply_bindings(phase_plan)
+        return self._client(self._plan_input).apply_bindings(phase_plan)
 
     def verify(self, receipt: BootstrapReceipt) -> bool:
-        return self._client().verify_bindings(receipt)
+        return self._client(self._plan_input).verify_bindings(receipt)
 
     def export_provider_state(self, receipt: BootstrapReceipt) -> Mapping[str, object]:
-        return self._client().export_provider_state(receipt)
+        return self._client(self._plan_input).export_provider_state(receipt)
 
     def restore_provider_state(self, mapping: Mapping[str, object]) -> None:
-        self._client().restore_provider_state(mapping)
+        self._client(self._plan_input).restore_provider_state(mapping)
 
     def rollback(self, receipt: BootstrapReceipt) -> None:
-        self._client().rollback_bindings(receipt)
+        self._client(self._plan_input).rollback_bindings(receipt)
 
     def verify_rollback(self, receipt: BootstrapReceipt) -> bool:
-        return self._client().verify_rollback(receipt)
+        return self._client(self._plan_input).verify_rollback(receipt)
 
 
 class EvaluationPhaseDriver(PhaseDriver):
