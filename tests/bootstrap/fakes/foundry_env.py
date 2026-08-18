@@ -753,7 +753,15 @@ def build_fake_adapter(
     runs.fail_create = fail_run_create
     if definitions_exist:
         criteria = existing_definition_criteria if existing_definition_criteria is not None else onboarding_definition_criteria(safety_names=safety_names)
-        config = existing_definition_config if existing_definition_config is not None else {"type": "azure_ai_source", "scenario": "synthetic_data_gen_preview"}
+        config = existing_definition_config if existing_definition_config is not None else {
+            "type": "custom",
+            "item_schema": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            },
+            "include_sample_schema": True,
+        }
         existing_definitions = [
             EvalObject("eval_development", "dev-def", data_source_config=config, testing_criteria=criteria),
             EvalObject("eval_validating", "val-def", data_source_config=config, testing_criteria=criteria),

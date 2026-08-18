@@ -438,7 +438,15 @@ def test_definitions_bind_real_azure_ai_evaluator_graders() -> None:
     ]
     assert activation_definitions, "activation definitions were not created"
     for call in activation_definitions:
-        assert call["data_source_config"] == {"type": "azure_ai_source", "scenario": "synthetic_data_gen_preview"}
+        assert call["data_source_config"] == {
+            "type": "custom",
+            "item_schema": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            },
+            "include_sample_schema": True,
+        }
         criteria = call["testing_criteria"]
         assert all(item["type"] == "azure_ai_evaluator" for item in criteria)
         # No Python-grader passthrough remains.
