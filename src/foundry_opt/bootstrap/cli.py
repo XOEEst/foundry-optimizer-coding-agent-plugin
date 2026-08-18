@@ -120,7 +120,7 @@ def _build_orchestrator(
         ),
         github_driver=GitHubPhaseDriver(plan_input=plan_input),
         azure_driver=AzurePhaseDriver(plan_input=plan_input),
-        evaluations_driver=EvaluationPhaseDriver(plan_input=plan_input),
+        evaluations_driver=EvaluationPhaseDriver(plan_input=plan_input, repository_root=repo_root),
         state_root=state_root,
     )
 
@@ -367,7 +367,7 @@ def register_bootstrap_commands(app: typer.Typer) -> None:
                 selected_agents=tuple({"root": agent.root, "repoAgentId": agent.repo_agent_id} for agent in loaded.repository.selected_agents),
             )
             discovered_by_id = {agent.repoAgentId.casefold(): agent for agent in discovered.agents}
-            driver = EvaluationPhaseDriver(plan_input=loaded)
+            driver = EvaluationPhaseDriver(plan_input=loaded, repository_root=repo_root)
             observed_at = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
             records = []
             for agent in loaded.evaluations_phase.agents:
@@ -639,7 +639,7 @@ def register_bootstrap_commands(app: typer.Typer) -> None:
             }
             if live:
                 # One inventory per Foundry project: agents may live in different projects.
-                payload["inventory_by_project"] = EvaluationPhaseDriver(plan_input=loaded).inventory_by_project()
+                payload["inventory_by_project"] = EvaluationPhaseDriver(plan_input=loaded, repository_root=repo_root).inventory_by_project()
                 payload["inventory"] = next(iter(payload["inventory_by_project"].values()), {})
             emit_json(payload)
         except Exception as exc:

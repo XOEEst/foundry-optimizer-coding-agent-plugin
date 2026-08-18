@@ -227,11 +227,14 @@ def test_execution_errors_in_a_criterion_fail_closed() -> None:
         adapter.apply_resources(_plan(contract, operation_id="op-errored"))
 
 
-def test_missing_split_materialization_seam_fails_closed() -> None:
+def test_a_project_without_dataset_credentials_or_writer_fails_closed() -> None:
+    """Without the injected writer the adapter falls back to the real upload path, which
+    still fails closed when the project exposes no dataset credentials."""
+
     contract = build_contract()
     adapter, fakes = build_fake_adapter(split_writer_available=False)
 
-    with pytest.raises(FoundryUnsupportedCapabilityError, match="split materialization"):
+    with pytest.raises(FoundryUnsupportedCapabilityError, match="dataset credentials are unavailable"):
         adapter.apply_resources(_plan(contract, operation_id="op-no-writer"))
 
     assert fakes["datasets"].create_calls == []
@@ -294,6 +297,7 @@ def test_restart_resumes_recorded_stages_without_repeating_generation() -> None:
         split_writer=fakes["split_writer"],
         sleep=lambda _seconds: None,
     )
+    resumed.set_agent_packages({contract.repo_agent_id: fakes["package"]})
     resumed.restore_provider_state(state)
     assert resumed.verify_resources(receipt) is True
 

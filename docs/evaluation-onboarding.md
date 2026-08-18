@@ -76,9 +76,35 @@ inventory -> generation -> split -> evaluator -> definitions -> activation -> cl
   validate its structure, and record `auto_generated_unreviewed` provenance.
 - **definitions** — create or adopt the immutable development/validating definitions that
   measure the objective evaluator and every required built-in safety evaluator.
-- **activation** — submit both runs, read back per-criterion measurements, and gate on
-  execution, measurable headroom, and a 1.0 pass rate for every configured safety evaluator.
+- **activation** — package the reviewed repository source, create the owned draft, submit both
+  runs, read back per-criterion measurements, and gate on execution, measurable headroom, and
+  a 1.0 pass rate for every configured safety evaluator.
 - **cleanup** — always delete the owned draft, whether or not the gates passed.
+
+## Owned activation draft
+
+The smoke run never targets a baseline or a pre-existing version:
+
+1. The driver packages each agent's reviewed `package_root` with `build_deterministic_zip`,
+   excluding `.git`, `.github`, `.foundry-opt`, virtualenvs, caches, build output, secrets
+   (`.env*`, keys, `secrets/`), and dataset/trace/prompt directories. The archive lives in a
+   private temporary directory for the duration of the phase only.
+2. The adapter refuses to continue if an agent version already exists under the requested
+   draft name/version — that is a conflict, never an adoption, so a retained baseline can
+   never be targeted or deleted.
+3. `agents.create_version_from_code` uploads the archive with the approved runtime, entry
+   point, dependency resolution, cpu/memory, protocol version, model deployment environment
+   variable, and project endpoint, plus the operation ownership token as metadata. The
+   returned name/version and `code_configuration.content_hash` must match the uploaded
+   package.
+4. The draft is recorded as operation-created and checkpointed *before* any evaluation run
+   targets it, then awaited until it is active.
+5. Cleanup and rollback delete only that exact operation-created draft; the deprecated pre-v3
+   `activation_cleanup` action keeps its old caller-owned behaviour.
+
+The receipt records `package_tree_sha256`, `package_zip_sha256`, and `draft_code_digest`;
+package bytes never enter provider state, receipts, sidecars, or logs. In a multi-project
+repository each package is routed to the adapter that owns that agent's project.
 
 ## Real cloud evaluation APIs
 
@@ -152,9 +178,39 @@ Every immutable identifier the stages discover is written to the receipt and pro
 an `EvaluationFinalization`, sealed with its own `finalization_hash`, and re-verified against
 the approved contract bounds before it is accepted.
 
-Two narrow adapter seams are explicit and fail closed when unavailable: the dataset case index
-(identifiers only) and split materialization (an injected writer that streams selected case
-identifiers into a new blob and returns its URI). Neither ever returns row content.
+Two narrow adapter seams remain injectable for tests, but the default
+`FoundryAdapter(endpoint, credential)` the CLI builds needs neither: dataset case indexing and
+split materialization both run against the current SDK by default.
+
+## Dataset materialization
+
+The split stage reads and republishes real dataset content with the shipped SDK:
+
+1. `datasets.get_credentials(name, version)` returns `blob_reference.credential.sas_uri`
+   (attribute models, `as_dict` payloads with wire names, and `model_dump` models are all
+   accepted). A credential without a usable SAS uri fails closed.
+2. The blob is downloaded over HTTPS with hard byte and row budgets (32 MiB / 5000 rows).
+   Rejected downloads surface as permission errors, transport failures as retryable network
+   errors. Folder and multi-file layouts, and unsupported file types, fail closed instead of
+   being guessed; JSONL/NDJSON and CSV are supported.
+3. Every row gets a stable identifier: the first present safe id field
+   (`row_id`/`id`/`case_id`/`sample_id`/`item_id`, camelCase included), otherwise a canonical
+   SHA-256 of the row. Duplicate identifiers fail closed. Optional `group_id`/`category` are
+   preserved for the deterministic split.
+4. `dataset_case_index` returns only `row_id`/`group_id`/`category`. Raw rows stay in memory
+   for the current operation and are dropped as soon as the run finishes.
+5. Each selected split is written to a restrictive (0600) temporary JSONL file, uploaded with
+   `datasets.upload_file(name=…, version=…, file_path=…, connection_name=…)`, and the temp
+   file is deleted immediately in a `finally`. The returned immutable id, name, version, and
+   type are validated, then the version is tagged with the operation ownership token so
+   created-only rollback can prove ownership. The blob itself is uploaded exactly once.
+6. Restart and idempotency: the pending upload (dataset name, version, and a content-free
+   split fingerprint over source dataset id + role + selected row ids) is checkpointed before
+   the upload. A resumed run adopts a matching already-published version instead of uploading
+   again; a version that exists with a different fingerprint fails closed.
+
+Raw rows never reach provider state, receipts, sidecars, logs, or test artifacts — only
+identifiers, counts, and digests do.
 
 ## Receipt-bound activation
 

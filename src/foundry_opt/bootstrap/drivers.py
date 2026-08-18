@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
+import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
@@ -13,11 +15,13 @@ from foundry_opt.bootstrap.command_io import BootstrapCliError, BootstrapExitCod
 from foundry_opt.bootstrap.contracts import BootstrapAction, BootstrapPlan, BootstrapReceipt, FingerprintRecord, SemanticPatchSpec, TemplatePayloadSpec
 from foundry_opt.bootstrap.input_contracts import BootstrapPlanInput, TrustedTemplateManifest
 from foundry_opt.bootstrap.orchestrator import PhaseDriver
+from foundry_opt.bootstrap.packaging_policy import PACKAGE_EXCLUDES as _PACKAGE_EXCLUDES
 from foundry_opt.bootstrap.plan_factory import build_phase_actions, load_trusted_manifest
 from foundry_opt.bootstrap.providers.azure import AzureArmRestProvider
-from foundry_opt.bootstrap.providers.foundry import FoundryAdapter
+from foundry_opt.bootstrap.providers.foundry import AgentPackage, FoundryAdapter
 from foundry_opt.bootstrap.providers.github import GitHubBootstrapProvider
 from foundry_opt.bootstrap.repository.engine import apply_repository, inventory_repository, plan_repository, rollback_repository
+from foundry_opt.packaging import PackagingError, build_deterministic_zip
 
 
 def _hash_json(value: object) -> str:
@@ -212,12 +216,14 @@ class EvaluationPhaseDriver(PhaseDriver):
         plan_input: BootstrapPlanInput | None = None,
         provider: FoundryAdapter | None = None,
         checkpoint: Callable[[Mapping[str, object]], None] | None = None,
+        repository_root: Path | None = None,
     ) -> None:
         self._plan_input = plan_input
         self._provider = provider
         self._providers: dict[str, FoundryAdapter] = {}
         self._checkpoint = checkpoint
         self._project_receipts: dict[str, BootstrapReceipt] = {}
+        self._repository_root = Path(repository_root) if repository_root is not None else None
 
     def set_checkpoint(self, checkpoint: Callable[[Mapping[str, object]], None] | None) -> None:
         self._checkpoint = checkpoint
@@ -349,16 +355,68 @@ class EvaluationPhaseDriver(PhaseDriver):
         return tuple(action for action in build_phase_actions(plan_input) if action.phase == "evaluations")
 
     def apply(self, phase_plan: BootstrapPlan) -> BootstrapReceipt:
+        with self._packaged_agents() as packages:
+            return self._apply_packaged(phase_plan, packages)
+
+    @contextlib.contextmanager
+    def _packaged_agents(self):
+        """Package every reviewed agent source tree for the duration of one apply.
+
+        Archives are deterministic (`build_deterministic_zip`), live in a private temporary
+        directory, and are removed as soon as the phase finishes; their bytes never enter
+        provider state, receipts, or logs.
+        """
+
+        agents = [agent for agent in self._agents() if getattr(agent, "onboarding_contract", None) is not None]
+        if not agents or self._repository_root is None:
+            yield {}
+            return
+        with tempfile.TemporaryDirectory(prefix="foundry-opt-package-") as scratch:
+            packages: dict[str, AgentPackage] = {}
+            for agent in agents:
+                contract = agent.onboarding_contract
+                policy = contract.sidecar_policy
+                if policy is None or contract.stopped:
+                    continue
+                package_root = (self._repository_root / policy.package_root).resolve() if policy.package_root != "." else self._repository_root.resolve()
+                if not package_root.is_dir():
+                    raise BootstrapCliError("agent-package-root-missing", "reviewed package root does not exist", exit_code=BootstrapExitCode.CONFIG, details={"repo_agent_id": agent.repo_agent_id, "package_root": policy.package_root})
+                destination = Path(scratch) / f"{agent.repo_agent_id}.zip"
+                try:
+                    result = build_deterministic_zip(
+                        package_root,
+                        destination,
+                        includes=("**/*",),
+                        excludes=_PACKAGE_EXCLUDES,
+                        check_deadline=lambda: None,
+                    )
+                except PackagingError as exc:
+                    raise BootstrapCliError("agent-package-failed", "reviewed agent source could not be packaged", exit_code=BootstrapExitCode.CONFIG, details={"repo_agent_id": agent.repo_agent_id, "reason": str(exc)[:200]}) from None
+                packages[agent.repo_agent_id] = AgentPackage(
+                    repo_agent_id=agent.repo_agent_id,
+                    zip_path=str(result.zip_path),
+                    zip_sha256=result.zip_sha256,
+                    tree_sha256=result.tree_sha256,
+                    file_count=len(result.entries),
+                    size_bytes=result.size_bytes,
+                )
+            yield packages
+
+    def _apply_packaged(self, phase_plan: BootstrapPlan, packages: Mapping[str, AgentPackage]) -> BootstrapReceipt:
         groups = self._group_actions(phase_plan)
         if len(groups) <= 1:
             endpoint = next(iter(groups), None) or self._endpoints()[0]
-            receipt = self._client_for(endpoint).apply_resources(phase_plan)
+            client = self._client_for(endpoint)
+            self._install_packages(client, endpoint, packages)
+            receipt = client.apply_resources(phase_plan)
             self._project_receipts = {endpoint: receipt}
             return receipt
         receipts: dict[str, BootstrapReceipt] = {}
         try:
             for endpoint, actions in groups.items():
-                receipts[endpoint] = self._client_for(endpoint).apply_resources(self._sub_plan(phase_plan, actions))
+                client = self._client_for(endpoint)
+                self._install_packages(client, endpoint, packages)
+                receipts[endpoint] = client.apply_resources(self._sub_plan(phase_plan, actions))
         except Exception:
             # Created-only compensation across projects: everything already created by this
             # apply is rolled back before the failure surfaces.
@@ -368,6 +426,17 @@ class EvaluationPhaseDriver(PhaseDriver):
             raise
         self._project_receipts = dict(receipts)
         return self._merge_receipts(phase_plan, receipts)
+
+    def _packages_for(self, endpoint: str, packages: Mapping[str, AgentPackage]) -> dict[str, AgentPackage]:
+        """Route each package to the adapter that owns that agent's Foundry project."""
+
+        owned = {str(agent.repo_agent_id) for agent in self._agents() if str(agent.project_endpoint) == endpoint}
+        return {key: value for key, value in packages.items() if key in owned}
+
+    def _install_packages(self, client: FoundryAdapter, endpoint: str, packages: Mapping[str, AgentPackage]) -> None:
+        routed = self._packages_for(endpoint, packages)
+        if routed:
+            client.set_agent_packages(routed)
 
     def _receipt_for(self, endpoint: str, receipt: BootstrapReceipt) -> BootstrapReceipt:
         recorded = self._project_receipts.get(endpoint)

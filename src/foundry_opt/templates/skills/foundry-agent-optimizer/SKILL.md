@@ -85,7 +85,11 @@ an agent optimize job.
    first, trace eligibility, split targets), `bootstrap evaluation plan` (one
    approval-bound composite action per agent), `bootstrap evaluation apply`
    (staged inventory -> generation -> split -> evaluator -> definitions ->
-   activation -> cleanup), then `bootstrap evaluation activate`. The repository
+   activation -> cleanup), then `bootstrap evaluation activate`. Activation
+   packages the reviewed agent source and creates a temporary owned draft to
+   evaluate; a pre-existing agent version with the requested draft name is a
+   conflict, never a target, and only the operation-created draft is deleted.
+   The repository
    phase never writes a sidecar; only the receipt-bound `activate` step writes
    it and enables that agent in the registry. `activate` is the finalization of
    the same single approval — never a second approval — and is idempotent, so an
@@ -102,7 +106,10 @@ an agent optimize job.
     data and never a partial trace output.
 11. Explain that immutable dataset, evaluator, definition, and run ids come from
     the receipt, never from the approved plan, and that the sidecar is derived
-    from that receipt.
+    from that receipt. Split datasets are materialized by downloading the source
+    dataset through its SAS credential, writing only the selected rows to a
+    short-lived temporary file, and uploading each split once; raw rows are never
+    persisted, reported, or copied into GitHub.
 12. Report `ready-unbound` agents as scaffolded but disabled: they stop before
     evaluation generation and activation.
 13. Use `bootstrap evaluation inspect|status|replace` for approved bounds,
