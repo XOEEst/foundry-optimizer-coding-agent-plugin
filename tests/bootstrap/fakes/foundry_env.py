@@ -458,9 +458,13 @@ class RunObject:
         measurements: Sequence[Mapping[str, object]],
         *,
         data_source: Mapping[str, object] | None = None,
+        eval_id: str | None = None,
+        name: str | None = None,
     ) -> None:
         self.id = run_id
         self.status = status
+        self.eval_id = eval_id
+        self.name = name
         self.per_testing_criteria_results = [dict(item) for item in measurements]
         self.data_source = SdkObject(dict(data_source)) if data_source is not None else None
 
@@ -509,12 +513,12 @@ class Runs:
                 self.on_synthetic_create()
             params = dict(data_source.get("item_generation_params") or {})
             params["output_dataset_id"] = self.synthetic_dataset_id
-            run = RunObject(f"run-{self._next}", self.status, [], data_source={**data_source, "item_generation_params": params})
+            run = RunObject(f"run-{self._next}", self.status, [], data_source={**data_source, "item_generation_params": params}, eval_id=eval_id, name=name)
             if self.synthetic_generated_samples is not None:
                 self.output_items.counts[run.id] = self.synthetic_generated_samples
         else:
             phase = "development" if str(name or "").startswith("development") else "validating"
-            run = RunObject(f"run-{self._next}", self.status, self.measurements.get(phase, []), data_source=data_source)
+            run = RunObject(f"run-{self._next}", self.status, self.measurements.get(phase, []), data_source=data_source, eval_id=eval_id, name=name)
         self.items[run.id] = run
         return run
 
@@ -523,6 +527,10 @@ class Runs:
         if run_id not in self.items:
             raise _not_found()
         return self.items[run_id]
+
+    def list(self, *, eval_id: str, **kwargs: object) -> list[RunObject]:
+        del kwargs
+        return [item for item in self.items.values() if item.eval_id == eval_id]
 
     def delete(self, run_id: str, *, eval_id: str) -> None:
         self.delete_calls.append((eval_id, run_id))
