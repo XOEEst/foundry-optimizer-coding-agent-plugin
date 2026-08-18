@@ -483,6 +483,7 @@ class Runs:
         self.synthetic_dataset_id = synthetic_dataset_id
         self.synthetic_generated_samples = synthetic_generated_samples
         self.output_items = OutputItems({})
+        self.on_synthetic_create = None
 
     def create(self, eval_id: str, *, data_source: Mapping[str, object], name: str | None = None) -> RunObject:
         if self.fail_create:
@@ -491,6 +492,8 @@ class Runs:
         self._next += 1
         source_type = str(data_source.get("type") or "")
         if source_type == "azure_ai_synthetic_data_gen_preview":
+            if callable(self.on_synthetic_create):
+                self.on_synthetic_create()
             params = dict(data_source.get("item_generation_params") or {})
             params["output_dataset_id"] = self.synthetic_dataset_id
             run = RunObject(f"run-{self._next}", self.status, [], data_source={**data_source, "item_generation_params": params})
@@ -650,6 +653,7 @@ def build_fake_adapter(
                 "id": "azureai://accounts/example/projects/example/data/generated-set/versions/1",
                 "type": "uri_file",
                 "dataUri": SOURCE_DATASET_URI,
+                "tags": {"data_generation_job_id": "datagen-fake-1"},
             }
         )
         case_index[("generated-set", "1")] = _rows(generated_samples)
@@ -707,6 +711,21 @@ def build_fake_adapter(
         ),
         synthetic_generated_samples=generated_samples,
     )
+    if not reuse:
+        def _restore_synthetic_dataset() -> None:
+            gets[("generated-set", "1")] = SdkValue(
+                {
+                    "name": "generated-set",
+                    "version": "1",
+                    "id": "azureai://accounts/example/projects/example/data/generated-set/versions/1",
+                    "type": "uri_file",
+                    "dataUri": SOURCE_DATASET_URI,
+                    "tags": {"data_generation_job_id": "datagen-fake-1"},
+                }
+            )
+            case_index[("generated-set", "1")] = _rows(generated_samples)
+
+        runs.on_synthetic_create = _restore_synthetic_dataset
     runs.fail_create = fail_run_create
     if definitions_exist:
         criteria = existing_definition_criteria if existing_definition_criteria is not None else onboarding_definition_criteria(safety_names=safety_names)

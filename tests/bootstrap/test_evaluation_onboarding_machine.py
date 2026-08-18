@@ -89,6 +89,15 @@ def test_generated_path_runs_every_stage_and_records_dynamic_ids(tmp_path) -> No
     assert finalization.activation.status == "succeeded"
     assert finalization.activation.cleanup_completed is True
     assert fakes["agents"].delete_version_calls == [("draft-agent", "1")]
+    assert "evaluations:app:onboarding:dataset:generation-source" in receipt.created_actions
+    state = adapter.export_provider_state(receipt)
+    source = next(
+        item
+        for item in state["resources"]
+        if item["action_id"] == "evaluations:app:onboarding:dataset:generation-source"
+    )
+    assert source["ownership_tag"] == "data_generation_job_id"
+    assert source["ownership_token"] == "datagen-fake-1"
     generation_definition = next(
         call
         for call in fakes["evals"].create_calls
@@ -166,7 +175,11 @@ def test_malformed_generated_rubric_blocks_activation_and_rolls_back() -> None:
 
     assert _definition_creates(fakes) == []
     # Created-only rollback removed the two split datasets registered before the rubric gate.
-    assert sorted(fakes["datasets"].delete_calls) == [("dev-set", "1"), ("val-set", "1")]
+    assert sorted(fakes["datasets"].delete_calls) == [
+        ("dev-set", "1"),
+        ("generated-set", "1"),
+        ("val-set", "1"),
+    ]
 
 
 def test_content_safety_below_one_hundred_percent_blocks_activation() -> None:
@@ -179,7 +192,11 @@ def test_content_safety_below_one_hundred_percent_blocks_activation() -> None:
     # The owned draft is always cleaned up, and every resource created by this apply is
     # rolled back; nothing pre-existing is touched.
     assert fakes["agents"].delete_version_calls == [("draft-agent", "1")]
-    assert sorted(fakes["datasets"].delete_calls) == [("dev-set", "1"), ("val-set", "1")]
+    assert sorted(fakes["datasets"].delete_calls) == [
+        ("dev-set", "1"),
+        ("generated-set", "1"),
+        ("val-set", "1"),
+    ]
     assert fakes["evaluator_jobs"].delete_version_calls == [("quality-eval", "2")]
     # Two activation definitions plus the synthetic generation eval object.
     assert len(fakes["evals"].delete_calls) == 3
@@ -387,7 +404,11 @@ def test_created_only_rollback_preserves_adopted_assets() -> None:
 
     adapter.rollback_resources(receipt)
 
-    assert sorted(fakes["datasets"].delete_calls) == [("dev-set", "1"), ("val-set", "1")]
+    assert sorted(fakes["datasets"].delete_calls) == [
+        ("dev-set", "1"),
+        ("generated-set", "1"),
+        ("val-set", "1"),
+    ]
     assert fakes["evaluator_jobs"].delete_version_calls == [("quality-eval", "2")]
     # Two activation definitions plus the synthetic generation eval object.
     assert len(fakes["evals"].delete_calls) == 3
@@ -512,3 +533,5 @@ def test_synthetic_run_without_an_output_dataset_id_fails_closed() -> None:
 
     with pytest.raises(FoundryPrerequisiteError, match="no output dataset id"):
         adapter.apply_resources(_plan(contract, operation_id="op-no-output-dataset"))
+
+    assert fakes["runs"].delete_calls == [("eval_1", "run-1")]

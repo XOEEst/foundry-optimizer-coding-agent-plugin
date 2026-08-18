@@ -15,7 +15,8 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, unquote, urlencode, urlparse, urlunparse
+import xml.etree.ElementTree as ET
 import zipfile
 
 import httpx
@@ -112,6 +113,7 @@ _MAX_RUN_OUTPUT_ITEMS = 5000
 _MAX_AGENT_CODE_BYTES = 32 * 1024 * 1024
 _MAX_AGENT_CODE_ENTRIES = 2000
 _MAX_DATASET_BYTES = 32 * 1024 * 1024
+_MAX_DATASET_FILES = 32
 _MAX_DATASET_ROWS = 5000
 _DATASET_ROW_ID_FIELDS = ('row_id', 'rowId', 'id', 'case_id', 'caseId', 'sample_id', 'sampleId', 'item_id', 'itemId')
 _SUPPORTED_DATASET_SUFFIXES = ('.jsonl', '.ndjson', '.csv')
@@ -224,6 +226,7 @@ class _ResourceDraft:
     fingerprint: str | None = None
     resource_type: str | None = None
     ownership_token: str | None = None
+    ownership_tag: str | None = None
 
 
 def _as_mapping(value: object) -> Mapping[str, object]:
@@ -503,6 +506,7 @@ class _ResourceRecord:
     rollback_order: int | None
     resource_type: str | None = None
     ownership_token: str | None = None
+    ownership_tag: str | None = None
 
 
 class FoundryCapabilityProbe(FrozenModel):
@@ -638,6 +642,7 @@ class FoundryAdapter:
                 'fingerprint': item.fingerprint,
                 'rollback_order': item.rollback_order,
                 'ownership_token': item.ownership_token,
+                'ownership_tag': item.ownership_tag,
             }
             for item in resources
         ]
@@ -659,7 +664,7 @@ class FoundryAdapter:
         if len(resources) > _MAX_PROVIDER_STATE_RESOURCES:
             raise FoundryPrerequisiteError('provider state resource count exceeds safe bound', kind='prerequisite')
         for resource in resources:
-            if len(_canonical_json({'action_id': resource.action_id, 'id': resource.resource_id, 'name': resource.name, 'version': resource.version, 'kind': resource.kind, 'disposition': resource.disposition, 'resource_type': resource.resource_type, 'fingerprint': resource.fingerprint, 'rollback_order': resource.rollback_order, 'ownership_token': resource.ownership_token}).encode('utf-8')) > (_MAX_PROVIDER_STATE_BYTES // 4):
+            if len(_canonical_json({'action_id': resource.action_id, 'id': resource.resource_id, 'name': resource.name, 'version': resource.version, 'kind': resource.kind, 'disposition': resource.disposition, 'resource_type': resource.resource_type, 'fingerprint': resource.fingerprint, 'rollback_order': resource.rollback_order, 'ownership_token': resource.ownership_token, 'ownership_tag': resource.ownership_tag}).encode('utf-8')) > (_MAX_PROVIDER_STATE_BYTES // 4):
                 raise FoundryPrerequisiteError('provider state resource entry exceeds safe bound', kind='prerequisite')
 
     def _validate_state_document_bounds(self, state: Mapping[str, object]) -> None:
@@ -746,8 +751,11 @@ class FoundryAdapter:
         if resource.fingerprint is not None and str(live.get('content_fingerprint')) != resource.fingerprint:
             return False
         if require_ownership:
+            if not resource.ownership_token:
+                return False
             tags = live.get('tags')
-            if not isinstance(tags, Mapping) or str(tags.get(_OWNERSHIP_TAG) or '') != str(resource.ownership_token or ''):
+            ownership_tag = resource.ownership_tag or _OWNERSHIP_TAG
+            if not isinstance(tags, Mapping) or str(tags.get(ownership_tag) or '') != resource.ownership_token:
                 return False
         return True
 
@@ -1790,12 +1798,27 @@ class FoundryAdapter:
             return cached
         sas_uri, blob_uri = self._dataset_blob_credential(dataset_name, dataset_version)
         suffix = self._dataset_suffix(blob_uri or sas_uri)
-        payload = self._download_bounded(sas_uri)
-        rows = self._parse_dataset_payload(payload, suffix=suffix)
+        payloads = (
+            ((suffix, self._download_bounded(sas_uri)),)
+            if suffix is not None
+            else self._download_folder_payloads(sas_uri, blob_uri)
+        )
+        rows: list[Mapping[str, object]] = []
+        seen: set[str] = set()
+        for payload_suffix, payload in payloads:
+            for row in self._parse_dataset_payload(payload, suffix=payload_suffix):
+                row_id = str(row['row_id'])
+                if row_id in seen:
+                    raise FoundryPrerequisiteError('dataset contains duplicate stable row identifiers', kind='prerequisite')
+                seen.add(row_id)
+                rows.append(row)
+                if len(rows) > _MAX_DATASET_ROWS:
+                    raise FoundryPrerequisiteError('dataset row count exceeds the supported budget', kind='prerequisite')
         if not rows:
             raise FoundryPrerequisiteError('dataset version contains no rows', kind='prerequisite')
-        self._dataset_row_cache[(dataset_name, dataset_version)] = rows
-        return rows
+        result = tuple(rows)
+        self._dataset_row_cache[(dataset_name, dataset_version)] = result
+        return result
 
     def _dataset_blob_credential(self, dataset_name: str, dataset_version: str) -> tuple[str, str]:
         getter = getattr(self._client.datasets, 'get_credentials', None)
@@ -1818,27 +1841,77 @@ class FoundryAdapter:
         return sas_uri, blob_uri if isinstance(blob_uri, str) else ''
 
     @staticmethod
-    def _dataset_suffix(uri: str) -> str:
+    def _dataset_suffix(uri: str) -> str | None:
         path = urlparse(uri).path
         name = path.rsplit('/', 1)[-1]
         if not name or '.' not in name:
-            raise FoundryUnsupportedCapabilityError(
-                'folder or multi-file dataset layouts are not supported; register a single JSONL or CSV file',
-                kind='unsupported_preview',
-            )
+            return None
         suffix = f'.{name.rsplit(".", 1)[-1]}'.casefold()
         if suffix not in _SUPPORTED_DATASET_SUFFIXES:
             raise FoundryUnsupportedCapabilityError(f'unsupported dataset file type {suffix!r}', kind='unsupported_preview')
         return suffix
 
-    def _download_bounded(self, sas_uri: str) -> bytes:
+    def _download_folder_payloads(self, sas_uri: str, blob_uri: str) -> tuple[tuple[str, bytes], ...]:
+        """List and download a bounded container-scoped dataset deterministically."""
+
+        sas = urlparse(sas_uri)
+        blob = urlparse(blob_uri or sas_uri)
+        sas_parts = [unquote(part) for part in sas.path.split('/') if part]
+        blob_parts = [unquote(part) for part in blob.path.split('/') if part]
+        if not sas_parts or not blob_parts or sas_parts[0].casefold() != blob_parts[0].casefold():
+            raise FoundryPrerequisiteError('folder dataset credential does not identify one blob container', kind='prerequisite')
+        prefix = '/'.join(blob_parts[1:]).strip('/')
+        if prefix:
+            prefix += '/'
+        list_path = f'/{quote(sas_parts[0], safe="")}'
+        query_parts = [('restype', 'container'), ('comp', 'list'), ('maxresults', str(_MAX_DATASET_FILES + 1))]
+        if prefix:
+            query_parts.append(('prefix', prefix))
+        list_query = '&'.join(part for part in (sas.query, urlencode(query_parts)) if part)
+        list_uri = urlunparse((sas.scheme, sas.netloc, list_path, '', list_query, ''))
+        listing = self._download_bounded(list_uri)
+        try:
+            root = ET.fromstring(listing)
+        except ET.ParseError:
+            raise FoundryPrerequisiteError('folder dataset blob listing is invalid', kind='prerequisite') from None
+        marker = root.findtext('./NextMarker')
+        names = [
+            str(item.text)
+            for item in root.findall('./Blobs/Blob/Name')
+            if isinstance(item.text, str) and item.text
+        ]
+        if marker or len(names) > _MAX_DATASET_FILES:
+            raise FoundryPrerequisiteError('folder dataset file count exceeds the supported budget', kind='prerequisite')
+        selected = sorted(
+            (name for name in names if not prefix or name.startswith(prefix)),
+            key=lambda value: (value.casefold(), value),
+        )
+        if not selected:
+            raise FoundryPrerequisiteError('folder dataset contains no supported data files', kind='prerequisite')
+        payloads: list[tuple[str, bytes]] = []
+        total_bytes = 0
+        for name in selected:
+            suffix = self._dataset_suffix(name)
+            if suffix is None:
+                raise FoundryUnsupportedCapabilityError('nested folder entries are not supported', kind='unsupported_preview')
+            blob_path = f'{list_path}/{quote(name, safe="/")}'
+            download_uri = urlunparse((sas.scheme, sas.netloc, blob_path, '', sas.query, ''))
+            payload = self._download_bounded(download_uri, maximum_bytes=_MAX_DATASET_BYTES - total_bytes)
+            total_bytes += len(payload)
+            payloads.append((suffix, payload))
+        return tuple(payloads)
+
+    def _download_bounded(self, sas_uri: str, *, maximum_bytes: int | None = None) -> bytes:
+        maximum_bytes = _MAX_DATASET_BYTES if maximum_bytes is None else maximum_bytes
+        if maximum_bytes <= 0:
+            raise FoundryPrerequisiteError('dataset content exceeds the supported size budget', kind='prerequisite')
         payload = bytearray()
         try:
             with httpx.stream('GET', sas_uri, timeout=self._download_timeout) as response:
                 response.raise_for_status()
                 for chunk in response.iter_bytes():
                     payload.extend(chunk)
-                    if len(payload) > _MAX_DATASET_BYTES:
+                    if len(payload) > maximum_bytes:
                         raise FoundryPrerequisiteError('dataset content exceeds the supported size budget', kind='prerequisite')
         except FoundryAdapterError:
             raise
@@ -2259,6 +2332,7 @@ class FoundryAdapter:
         agent_name: str,
         agent_version: str,
         run_name: str,
+        on_submitted: Callable[[str], None] | None = None,
         deadline_monotonic: float | None = None,
     ) -> Mapping[str, object]:
         """Generate a synthetic dataset by running the agent through the cloud-eval API.
@@ -2291,6 +2365,8 @@ class FoundryAdapter:
         run_id = getattr(run, 'id', None)
         if not isinstance(run_id, str) or not run_id:
             raise FoundryPrerequisiteError('synthetic generation run returned no id', kind='prerequisite')
+        if on_submitted is not None:
+            on_submitted(run_id)
         payload = self._await_activation_run(run_id, definition_id, deadline_monotonic=deadline_monotonic)
         completed = payload.get('run') if 'run' in payload else payload
         output_dataset_id = self._synthetic_output_dataset_id(completed, payload)
@@ -2457,8 +2533,12 @@ class FoundryAdapter:
                 source_dataset = self.get_dataset(str(completed['dataset_name']), str(completed['dataset_version']))
                 generated_sample_count = int(completed.get('generated_sample_count') or 0)
                 if source_dataset is None:
-                    raise FoundryPrerequisiteError('resumed generation output dataset no longer exists', kind='prerequisite')
-            else:
+                    stages = ledger.get('stages')
+                    if isinstance(stages, dict):
+                        stages.pop('generation', None)
+                        self._publish_checkpoint()
+                    completed = None
+            if completed is None:
                 if dataset_strategy == 'synthetic_only':
                     # Real synthetic agent run: the service generates the dataset and returns
                     # its immutable `output_dataset_id`.
@@ -2496,20 +2576,50 @@ class FoundryAdapter:
                         agent_name=dataset_plan.agent_name,
                         agent_version=dataset_plan.agent_version,
                         run_name=f'{contract.repo_agent_id}-synthetic-generation',
-                    )
-                    record(
-                        _ResourceDraft(
-                            suffix='activation-run:generation',
-                            resource_id=str(outcome['run_id']),
-                            name=generation_definition_id,
-                            version='generation',
-                            kind='activation_run',
-                            disposition='created',
-                        )
+                        on_submitted=lambda run_id: record(
+                            _ResourceDraft(
+                                suffix='activation-run:generation',
+                                resource_id=run_id,
+                                name=generation_definition_id,
+                                version='generation',
+                                kind='activation_run',
+                                disposition='created',
+                            )
+                        ),
                     )
                     source_dataset = self.get_dataset_by_id(str(outcome['output_dataset_id']))
                     if source_dataset is None:
                         raise FoundryPrerequisiteError('synthetic generation output dataset is not resolvable', kind='prerequisite')
+                    source_tags = source_dataset.get('tags')
+                    generation_resource_id = (
+                        str(source_tags.get('data_generation_job_id') or '')
+                        if isinstance(source_tags, Mapping)
+                        else ''
+                    )
+                    if not generation_resource_id:
+                        raise FoundryPrerequisiteError(
+                            'synthetic generation output dataset has no service ownership tag',
+                            kind='prerequisite',
+                        )
+                    record(
+                        _ResourceDraft(
+                            suffix='dataset:generation-source',
+                            resource_id=str(source_dataset['id']),
+                            name=str(source_dataset.get('name') or ''),
+                            version=str(source_dataset.get('version') or ''),
+                            kind='dataset',
+                            disposition='created',
+                            fingerprint=(
+                                _fingerprint_dataset_content(
+                                    str(source_dataset.get('data_uri') or ''),
+                                    str(source_dataset.get('type') or ''),
+                                )
+                            ),
+                            resource_type=str(source_dataset.get('type') or ''),
+                            ownership_token=generation_resource_id,
+                            ownership_tag='data_generation_job_id',
+                        )
+                    )
                     index = self.dataset_case_index(str(source_dataset.get('name') or ''), str(source_dataset.get('version') or ''))
                     generated_sample_count = (
                         int(outcome['generated_samples'])
@@ -3213,7 +3323,7 @@ class FoundryAdapter:
         for item in resources:
             if not isinstance(item, Mapping):
                 raise FoundryPrerequisiteError('provider state resource entry is invalid', kind='prerequisite')
-            records.append(_ResourceRecord(action_id=str(item.get('action_id') or ''), resource_id=str(item.get('id') or ''), name=str(item.get('name') or ''), version=str(item.get('version') or ''), kind=str(item.get('kind') or ''), disposition=str(item.get('disposition') or ''), fingerprint=str(item.get('fingerprint')) if item.get('fingerprint') is not None else None, rollback_order=int(item['rollback_order']) if isinstance(item.get('rollback_order'), int) else None, resource_type=str(item.get('resource_type')) if item.get('resource_type') is not None else None, ownership_token=str(item.get('ownership_token')) if item.get('ownership_token') is not None else None))
+            records.append(_ResourceRecord(action_id=str(item.get('action_id') or ''), resource_id=str(item.get('id') or ''), name=str(item.get('name') or ''), version=str(item.get('version') or ''), kind=str(item.get('kind') or ''), disposition=str(item.get('disposition') or ''), fingerprint=str(item.get('fingerprint')) if item.get('fingerprint') is not None else None, rollback_order=int(item['rollback_order']) if isinstance(item.get('rollback_order'), int) else None, resource_type=str(item.get('resource_type')) if item.get('resource_type') is not None else None, ownership_token=str(item.get('ownership_token')) if item.get('ownership_token') is not None else None, ownership_tag=str(item.get('ownership_tag')) if item.get('ownership_tag') is not None else None))
         self._validate_provider_state_bounds(records)
         return tuple(records)
 
@@ -3389,6 +3499,7 @@ class FoundryAdapter:
                                 rollback_order=rollback_order,
                                 resource_type=draft.resource_type,
                                 ownership_token=draft.ownership_token,
+                                ownership_tag=draft.ownership_tag,
                             )
                         )
                         if draft.kind == 'dataset':

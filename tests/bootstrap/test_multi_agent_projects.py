@@ -210,7 +210,11 @@ def test_multi_project_state_round_trips_and_rolls_back_per_project(tmp_path: Pa
 
     assert rolled.state == "rolled_back"
     for fakes in (context["first_fakes"], context["second_fakes"]):
-        assert sorted(fakes["datasets"].delete_calls) == [("dev-set", "1"), ("val-set", "1")]
+        assert sorted(fakes["datasets"].delete_calls) == [
+            ("dev-set", "1"),
+            ("generated-set", "1"),
+            ("val-set", "1"),
+        ]
 
 
 def test_a_failing_second_project_compensates_the_first(tmp_path: Path) -> None:
@@ -221,7 +225,11 @@ def test_a_failing_second_project_compensates_the_first(tmp_path: Path) -> None:
 
     assert receipt.state != "applied"
     # Created-only compensation: the successful project's resources are removed again.
-    assert sorted(context["first_fakes"]["datasets"].delete_calls) == [("dev-set", "1"), ("val-set", "1")]
+    assert sorted(context["first_fakes"]["datasets"].delete_calls) == [
+        ("dev-set", "1"),
+        ("generated-set", "1"),
+        ("val-set", "1"),
+    ]
     assert context["first_fakes"]["agents"].delete_version_calls == [("draft-agent", "1")]
 
 
