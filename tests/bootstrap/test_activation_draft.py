@@ -273,6 +273,8 @@ def test_the_driver_packages_the_reviewed_source_and_excludes_secrets(tmp_path: 
     (repo / "app" / "__pycache__" / "main.cpython-312.pyc").write_bytes(b"\x00\x01")
     (repo / "app" / "secrets").mkdir()
     (repo / "app" / "secrets" / "token.txt").write_text("token\n", encoding="utf-8")
+    (repo / "app" / "prompts").mkdir()
+    (repo / "app" / "prompts" / "system.txt").write_text("review safely\n", encoding="utf-8")
     loaded = _plan_input(tmp_path, repo)
     adapter, fakes = build_fake_adapter()
     driver = EvaluationPhaseDriver(plan_input=loaded, provider=adapter, repository_root=repo)
@@ -287,8 +289,10 @@ def test_the_driver_packages_the_reviewed_source_and_excludes_secrets(tmp_path: 
             names = set(bundle.namelist())
         assert "main.py" in names
         assert not any(name.endswith(".env") for name in names)
+        assert not any(name.startswith(".foundry/") for name in names)
         assert not any("__pycache__" in name for name in names)
         assert not any(name.startswith("secrets/") for name in names)
+        assert "prompts/system.txt" in names
         assert package.zip_sha256 == hashlib.sha256(archive.read_bytes()).hexdigest()
         recorded = package.zip_path
 

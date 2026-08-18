@@ -10,6 +10,7 @@ PACKAGE_EXCLUDES: tuple[str, ...] = (
     ".git/**",
     ".git",
     ".github/**",
+    ".foundry/**",
     ".foundry-opt/**",
     ".venv/**",
     "venv/**",
@@ -45,8 +46,6 @@ PACKAGE_EXCLUDES: tuple[str, ...] = (
     "**/datasets/**",
     "traces/**",
     "**/traces/**",
-    "prompts/**",
-    "**/prompts/**",
     ".DS_Store",
     "**/.DS_Store",
 )
