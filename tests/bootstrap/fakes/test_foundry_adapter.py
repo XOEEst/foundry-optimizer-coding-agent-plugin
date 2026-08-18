@@ -14,6 +14,7 @@ from foundry_opt.bootstrap.providers.foundry import (
     FoundryAdapter,
     FoundryOperationDeadlineError,
     FoundryOperationHandle,
+    FoundryPlatformError,
     FoundryPrerequisiteError,
     FoundryRegionUnsupportedError,
     FoundryRollbackError,
@@ -764,6 +765,20 @@ def test_region_and_network_errors_are_sanitized() -> None:
     with pytest.raises(Exception) as caught2:
         adapter2.create_dataset_generation_job({'sources': [{'type': 'agent', 'agent_name': 'a'}], 'options': {'type': 'simple_qna', 'max_samples': 30, 'model_options': {'model': 'gpt-4o'}}, 'scenario': 'evaluation'})
     assert 'secret' not in str(caught2.value)
+
+
+def test_generic_platform_errors_keep_only_the_exception_type_code() -> None:
+    adapter = FoundryAdapter(
+        'https://account.services.ai.azure.com/api/projects/demo',
+        _Cred(),
+        client=_Client(beta=_Beta(datasets=_Jobs(), evaluators=_Jobs())),
+    )
+
+    error = adapter._classify_error(TypeError('sensitive local details'))
+
+    assert isinstance(error, FoundryPlatformError)
+    assert error.code == 'TypeError'
+    assert 'sensitive' not in str(error)
 
 
 def test_keyword_signatures_and_default_hash_normalization() -> None:

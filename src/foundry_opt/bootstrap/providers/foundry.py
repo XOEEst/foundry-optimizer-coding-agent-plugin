@@ -862,9 +862,9 @@ class FoundryAdapter:
             return FoundryPrerequisiteError('foundry evals resource not found', kind='prerequisite', status_code=404)
         if isinstance(exc, openai.APIStatusError):
             status = _status_code(exc)
-            return FoundryPlatformError('foundry evals platform request failed', kind='platform', retryable=bool(status and status >= 500), status_code=status)
+            return FoundryPlatformError('foundry evals platform request failed', kind='platform', retryable=bool(status and status >= 500), status_code=status, code=type(exc).__name__)
         if isinstance(exc, openai.OpenAIError):
-            return FoundryPlatformError('foundry evals request failed', kind='platform')
+            return FoundryPlatformError('foundry evals request failed', kind='platform', code=type(exc).__name__)
         if isinstance(exc, ServiceRequestError):
             return FoundryNetworkError(_sanitize_message(exc), kind='network', retryable=True)
         if isinstance(exc, ClientAuthenticationError):
@@ -883,7 +883,7 @@ class FoundryAdapter:
             if status == 412 or 'prerequisite' in raw or 'app insights' in raw:
                 return FoundryPrerequisiteError(text, kind='prerequisite', status_code=status, code=code)
             return FoundryPlatformError(text, kind='platform', retryable=bool(status and status >= 500), status_code=status, code=code)
-        return FoundryPlatformError(_sanitize_message(exc), kind='platform')
+        return FoundryPlatformError(_sanitize_message(exc), kind='platform', code=type(exc).__name__)
 
     def _project_region(self) -> str | None:
         metadata = getattr(self._client, 'project', None)
