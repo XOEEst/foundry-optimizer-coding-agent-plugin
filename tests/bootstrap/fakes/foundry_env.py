@@ -300,12 +300,24 @@ class EvaluatorJobs:
                     "version": version,
                     "id": f"azureai://accounts/example/projects/example/evaluators/{name}/versions/{version}",
                     "evaluator_type": "custom",
-                    "generation_job_id": RUBRIC_JOB_ID,
-                    "rubric": dict(self.rubric or VALID_RUBRIC),
+                    "generation_job_id": "evaluatorgen-fake-1",
+                    "metadata": {"operation_id": RUBRIC_JOB_ID},
+                    "definition": dict(self.rubric or VALID_RUBRIC),
                 }
             )
         name, version = self.generated or ("quality-eval", "2")
-        return SdkValue({"id": RUBRIC_JOB_ID, "status": "succeeded", "name": name, "version": version})
+        return SdkValue(
+            {
+                "id": "evaluatorgen-fake-1",
+                "status": "succeeded",
+                "result": {
+                    "id": f"azureai://accounts/example/projects/example/evaluators/{name}/versions/{version}",
+                    "name": name,
+                    "version": version,
+                    "display_name": name,
+                },
+            }
+        )
 
     def begin_create_generation_job(self, job: object, *, operation_id: str | None = None, continuation_token: str | None = None, **kwargs: object) -> Poller:
         del kwargs

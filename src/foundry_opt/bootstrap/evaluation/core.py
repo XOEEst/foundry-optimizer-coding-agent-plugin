@@ -516,14 +516,20 @@ def validate_generated_rubric(document: Mapping[str, object]) -> None:
     if not isinstance(dimensions, Sequence) or isinstance(dimensions, (str, bytes)) or not dimensions:
         raise BootstrapConfigError("rubric.dimensions must be a non-empty sequence")
     seen_names: set[str] = set()
+    service_shape = item.get("type") == "rubric"
     for index, dimension in enumerate(dimensions):
         part = _require_mapping(dimension, field=f"rubric.dimensions[{index}]")
-        name = _require_string(part.get("name"), field=f"rubric.dimensions[{index}].name")
+        name = _require_string(
+            part.get("name") or part.get("id"),
+            field=f"rubric.dimensions[{index}].name",
+        )
         normalized_name = name.casefold()
         if normalized_name in seen_names:
             raise BootstrapConfigError("rubric dimensions must be unique")
         seen_names.add(normalized_name)
         _require_positive_finite(part.get("weight"), field=f"rubric.dimensions[{index}].weight")
+        if service_shape:
+            continue
         required_inputs = part.get("required_inputs")
         if not isinstance(required_inputs, Sequence) or isinstance(required_inputs, (str, bytes)) or not required_inputs:
             raise BootstrapConfigError("rubric dimensions must declare non-empty required_inputs")
@@ -546,6 +552,32 @@ def validate_generated_rubric(document: Mapping[str, object]) -> None:
         threshold = _require_finite_number(part.get("threshold"), field=f"rubric.dimensions[{index}].threshold")
         if threshold < minimum or threshold > maximum:
             raise BootstrapConfigError("scalar threshold must lie within declared range")
+    if service_shape:
+        schema = _require_mapping(item.get("data_schema"), field="rubric.data_schema")
+        properties = _require_mapping(schema.get("properties"), field="rubric.data_schema.properties")
+        required = schema.get("required")
+        declared_inputs = (
+            tuple(required)
+            if isinstance(required, Sequence) and not isinstance(required, (str, bytes)) and required
+            else tuple(properties)
+        )
+        if not declared_inputs or any(not isinstance(value, str) or not value for value in declared_inputs):
+            raise BootstrapConfigError("rubric data schema must declare supported inputs")
+        metrics = _require_mapping(item.get("metrics"), field="rubric.metrics")
+        primary = [
+            _require_mapping(metric, field=f"rubric.metrics.{name}")
+            for name, metric in metrics.items()
+            if isinstance(metric, Mapping) and metric.get("is_primary") is True
+        ]
+        if len(primary) != 1:
+            raise BootstrapConfigError("rubric must declare exactly one primary metric")
+        minimum = _require_finite_number(primary[0].get("min_value"), field="rubric.primary_metric.min_value")
+        maximum = _require_finite_number(primary[0].get("max_value"), field="rubric.primary_metric.max_value")
+        if maximum <= minimum:
+            raise BootstrapConfigError("rubric primary metric range must increase")
+        threshold = _require_finite_number(item.get("pass_threshold"), field="rubric.pass_threshold")
+        if threshold < minimum or threshold > maximum:
+            raise BootstrapConfigError("rubric pass threshold must lie within the primary metric range")
 
 
 def validate_activation(*, cases: Sequence[Mapping[str, object]], guardrails: Sequence[Mapping[str, object]], generated_bundle: Mapping[str, object] | None = None) -> None:

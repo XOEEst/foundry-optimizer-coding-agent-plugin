@@ -72,13 +72,14 @@ class _Poller:
 
 
 class _Jobs:
-    def __init__(self, create_results: list[object] | None = None, list_result: list[object] | None = None, *, versions: dict[tuple[str, str], object] | None = None, fail_delete_version: set[tuple[str, str]] | None = None) -> None:
+    def __init__(self, create_results: list[object] | None = None, list_result: list[object] | None = None, *, versions: dict[tuple[str, str], object] | None = None, fail_delete_version: set[tuple[str, str]] | None = None, generation_jobs: list[object] | None = None) -> None:
         self.create_calls: list[tuple[object, str | None, str | None]] = []
         self.create_results = list(create_results or [])
         self.list_result = list_result or []
         self.versions = versions or {}
         self.delete_version_calls: list[tuple[str, str]] = []
         self.fail_delete_version = fail_delete_version or set()
+        self.generation_jobs = list(generation_jobs or [])
 
     def begin_create_generation_job(self, job: object, *, operation_id: str | None = None, continuation_token: str | None = None, **kwargs: object) -> object:
         del kwargs
@@ -95,6 +96,10 @@ class _Jobs:
     def list_versions(self, name: str, **kwargs: object) -> list[object]:
         del name, kwargs
         return list(self.list_result)
+
+    def list_generation_jobs(self, **kwargs: object) -> list[object]:
+        del kwargs
+        return list(self.generation_jobs)
 
     def get_version(self, name: str, version: str, **kwargs: object) -> object:
         del kwargs
@@ -338,6 +343,49 @@ def test_real_poller_continuation_resume_and_deadline() -> None:
     assert resumed['generated_samples'] == 15
     assert jobs.create_calls[1][2] == 'resume-1'
     assert poller.result_calls == [((), {})]
+
+
+def test_evaluator_poll_recovers_succeeded_job_by_operation_id() -> None:
+    failed_poller = _Poller(
+        [RuntimeError("poll endpoint failed")],
+        continuation="resume-evaluator",
+        done_sequence=[True],
+    )
+    jobs = _Jobs(
+        create_results=[failed_poller],
+        generation_jobs=[
+            _SdkValue(
+                {
+                    "id": "evaluatorgen-1",
+                    "status": "succeeded",
+                    "result": {
+                        "id": "azureai://accounts/a/projects/p/evaluators/quality/versions/1",
+                        "name": "quality",
+                        "version": "1",
+                        "metadata": {"operation_id": "rubric-operation-1"},
+                    },
+                }
+            )
+        ],
+    )
+    adapter = FoundryAdapter(
+        "https://account.services.ai.azure.com/api/projects/demo",
+        _Cred(),
+        client=_Client(beta=_Beta(datasets=_Jobs(), evaluators=jobs)),
+    )
+
+    result = adapter.poll_generation_job(
+        FoundryOperationHandle(
+            operation_id="rubric-operation-1",
+            job_kind="evaluator_generation",
+            continuation_token="resume-evaluator",
+            polling_url="https://poll/evaluator",
+            created=True,
+        )
+    )
+
+    assert result["saved_evaluator"]["name"] == "quality"
+    assert result["saved_evaluator"]["version"] == "1"
 
 
 def test_dataset_create_or_update_and_adopt_verification() -> None:
