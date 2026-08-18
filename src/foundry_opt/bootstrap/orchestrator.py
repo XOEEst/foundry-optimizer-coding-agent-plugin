@@ -10,6 +10,7 @@ from foundry_opt.bootstrap.discovery import DiscoveryResult, discover_repository
 from foundry_opt.bootstrap.errors import BootstrapApplyError
 from foundry_opt.bootstrap.operation_state import DiscoveredAgentRecord, DiscoveryBlockerRecord, OperationStateEnvelope, SelectionPlan, next_generation, read_operation_state, status_from_state, write_operation_state
 from foundry_opt.bootstrap.providers.foundry import (
+    FoundryAdapterError,
     rollback_failure_details as foundry_rollback_failure_details,
 )
 from foundry_opt.bootstrap.providers.github import (
@@ -314,6 +315,13 @@ class BootstrapOrchestrator:
         return safe
 
     def _sanitize_error(self, exc: Exception) -> tuple[str, str]:
+        if isinstance(exc, FoundryAdapterError):
+            details = [type(exc).__name__, f"kind={exc.kind}"]
+            if exc.status_code is not None:
+                details.append(f"status={exc.status_code}")
+            if exc.code:
+                details.append(f"code={exc.code[:64]}")
+            return "provider-invalid", " ".join(details)[:256]
         for error_type, code in _SANITIZED_ERROR_CODES.items():
             if isinstance(exc, error_type):
                 return code, type(exc).__name__[:64]

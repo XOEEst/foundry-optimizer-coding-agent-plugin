@@ -11,7 +11,7 @@ from foundry_opt.bootstrap.contracts import BindingAssessment, BootstrapAction, 
 from foundry_opt.bootstrap.errors import BootstrapApplyError
 from foundry_opt.bootstrap.operation_state import OperationStateEnvelope, read_operation_state, write_operation_state
 from foundry_opt.bootstrap.orchestrator import BootstrapOrchestrator
-from foundry_opt.bootstrap.providers.foundry import FoundryRollbackError
+from foundry_opt.bootstrap.providers.foundry import FoundryPlatformError, FoundryRollbackError
 from foundry_opt.bootstrap.providers.github import GitHubProviderRollbackError
 from foundry_opt.bootstrap.receipts import ApprovalRecord, EvaluationReplacementRecord
 
@@ -358,3 +358,21 @@ def test_orchestrator_persists_github_rollback_error_state(tmp_path: Path) -> No
         "github-environment",
     )
     assert receipt.provider_state["stateKey"] == "github-state"
+
+
+def test_foundry_error_summary_keeps_only_safe_status_metadata(tmp_path: Path) -> None:
+    drivers = _drivers()
+    orch, _ = _build_orchestrator(tmp_path, drivers)
+
+    code, summary = orch._sanitize_error(
+        FoundryPlatformError(
+            "sensitive platform response",
+            kind="platform",
+            status_code=400,
+            code="UserError",
+        )
+    )
+
+    assert code == "provider-invalid"
+    assert summary == "FoundryPlatformError kind=platform status=400 code=UserError"
+    assert "sensitive" not in summary

@@ -143,6 +143,18 @@ def test_reuse_path_skips_generation_and_adopts_reviewed_assets() -> None:
     finalization.verify_against_contract(contract)
 
 
+def test_preexisting_generated_evaluator_is_adopted_not_rollback_owned() -> None:
+    contract = build_contract()
+    adapter, fakes = build_fake_adapter()
+    fakes["evaluator_jobs"]._job()
+
+    receipt = adapter.apply_resources(_plan(contract, operation_id="op-existing-generated"))
+
+    objective_action = "evaluations:app:onboarding:evaluator:objective"
+    assert objective_action in receipt.adopted_actions
+    assert objective_action not in receipt.created_actions
+
+
 def test_fourteen_useful_trace_samples_fail_closed_without_configuring_a_partial_dataset() -> None:
     contract = build_contract(generation_kind="dataset_trace", useful_trace_samples=20)
     adapter, fakes = build_fake_adapter(generated_samples=14)
