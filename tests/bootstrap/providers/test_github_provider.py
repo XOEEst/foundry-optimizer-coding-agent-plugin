@@ -5,6 +5,7 @@ import json
 import httpx
 import pytest
 
+from foundry_opt.bootstrap.canonical import canonical_sha256
 from foundry_opt.bootstrap.contracts import BootstrapAction, BootstrapPlan, FingerprintRecord
 from foundry_opt.bootstrap.providers.github import (
     GitHubBootstrapProvider,
@@ -223,7 +224,7 @@ def test_branch_policy_uses_requested_branch_not_main() -> None:
     assert receipt.adopted_actions == ("branch",)
 
 
-def _stateful_handler(state: dict[str, object], log: list[tuple[str, str, object | None]]):
+def _stateful_handler(state: dict[str, object], log: list[tuple[str, str, object | None]], variable_name: str = "AZURE_OPTIMIZER_CLIENT_ID"):
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
         method = request.method
@@ -250,27 +251,31 @@ def _stateful_handler(state: dict[str, object], log: list[tuple[str, str, object
             state["variable_value"] = None
             state["branch_policies"] = []
             return _response(204, {})
-        if path.endswith("/variables/AZURE_OPTIMIZER_CLIENT_ID") and method == "GET":
+        if path.endswith(f"/variables/{variable_name}") and method == "GET":
             if not state["env_exists"] or state["variable_value"] is None:
                 return _response(404, {})
-            return _response(200, {"name": "AZURE_OPTIMIZER_CLIENT_ID", "value": state["variable_value"]})
-        if path.endswith("/variables/AZURE_OPTIMIZER_CLIENT_ID") and method == "PATCH":
+            return _response(200, {"name": variable_name, "value": state["variable_value"]})
+        if path.endswith(f"/variables/{variable_name}") and method == "PATCH":
             payload = _body(request)
             log.append((method, path, payload))
             state["variable_value"] = payload["value"]
             return _response(204, {})
         if path.endswith("/variables") and method == "GET":
-            variables = [] if state["variable_value"] is None else [{"name": "AZURE_OPTIMIZER_CLIENT_ID", "value": state["variable_value"]}]
+            variables = [] if state["variable_value"] is None else [{"name": variable_name, "value": state["variable_value"]}]
             return _response(200, {"variables": variables})
         if path.endswith("/variables") and method == "POST":
             payload = _body(request)
             log.append((method, path, payload))
             state["variable_value"] = payload["value"]
             return _response(201, {})
-        if path.endswith("/variables/AZURE_OPTIMIZER_CLIENT_ID") and method == "DELETE":
+        if path.endswith(f"/variables/{variable_name}") and method == "DELETE":
             log.append((method, path, None))
             state["variable_value"] = None
             return _response(204, {})
+        if "/variables/" in path and method == "GET":
+            # Any other variable name (e.g. the default used by apply_changes'
+            # upfront informational inventory pass) simply does not exist.
+            return _response(404, {})
         if path.endswith("/deployment_branch_policies") and method == "GET":
             return _response(200, {"branch_policies": state["branch_policies"]})
         if path.endswith("/deployment_branch_policies") and method == "POST":
@@ -703,3 +708,125 @@ def test_branch_identity_round_trips_through_export_restore() -> None:
     provider2 = GitHubBootstrapProvider(token="ghp_secret", transport=FakeGitHubTransport(handler))
     provider2.restore_provider_state(exported)
     assert provider2.verify_changes(receipt) is True
+
+
+def test_custom_variable_name_apply_verify_export_restore_rollback() -> None:
+    state = {
+        "env_exists": True,
+        "policy": {"protected_branches": False, "custom_branch_policies": True},
+        "variable_value": None,
+        "branch_policies": [],
+        "next_policy_id": 41,
+    }
+    log: list[tuple[str, str, object | None]] = []
+    transport = FakeGitHubTransport(_stateful_handler(state, log, variable_name="AZURE_SHARED_UAMI_CLIENT_ID"))
+    action = BootstrapAction(
+        action_id="github-variable-client-id-foundry-production",
+        phase="github",
+        stage="planned",
+        kind="github-variable",
+        diagnostics=("foundry-production", "AZURE_SHARED_UAMI_CLIENT_ID", "22222222-2222-2222-2222-222222222222"),
+    )
+
+    provider1 = GitHubBootstrapProvider(token="ghp_secret", transport=transport)
+    receipt = provider1.apply_changes(_plan(action))
+    assert receipt.changed_actions == ("github-variable-client-id-foundry-production",)
+    assert state["variable_value"] == "22222222-2222-2222-2222-222222222222"
+    assert any(path.endswith("/variables") and method == "POST" for method, path, _ in log)
+
+    assert provider1.verify_changes(receipt) is True
+
+    exported = provider1.export_provider_state(receipt)
+    assert exported["snapshots"][0]["variable_name"] == "AZURE_SHARED_UAMI_CLIENT_ID"
+    assert "token" not in json.dumps(exported)
+    assert "ghp_secret" not in json.dumps(exported)
+
+    provider2 = GitHubBootstrapProvider(token="ghp_secret", transport=transport)
+    provider2.restore_provider_state(exported)
+    assert provider2.verify_changes(receipt) is True
+
+    provider2.rollback_changes(receipt)
+    assert provider2.verify_rollback(receipt) is True
+    assert state["variable_value"] is None
+    assert any(path.endswith("/variables/AZURE_SHARED_UAMI_CLIENT_ID") and method == "DELETE" for method, path, _ in log)
+
+
+def test_legacy_two_field_variable_diagnostics_still_target_default_name() -> None:
+    state = {
+        "env_exists": True,
+        "policy": {"protected_branches": False, "custom_branch_policies": True},
+        "variable_value": None,
+        "branch_policies": [],
+        "next_policy_id": 41,
+    }
+    log: list[tuple[str, str, object | None]] = []
+    transport = FakeGitHubTransport(_stateful_handler(state, log))
+    action = BootstrapAction(
+        action_id="github-variable-client-id",
+        phase="github",
+        stage="planned",
+        kind="github-variable",
+        diagnostics=("foundry-production", "33333333-3333-3333-3333-333333333333"),
+    )
+
+    provider = GitHubBootstrapProvider(token="ghp_secret", transport=transport)
+    receipt = provider.apply_changes(_plan(action))
+    assert receipt.changed_actions == ("github-variable-client-id",)
+    posts = [payload for method, path, payload in log if path.endswith("/variables") and method == "POST"]
+    assert posts == [{"name": "AZURE_OPTIMIZER_CLIENT_ID", "value": "33333333-3333-3333-3333-333333333333"}]
+
+    exported = provider.export_provider_state(receipt)
+    assert exported["snapshots"][0]["variable_name"] == "AZURE_OPTIMIZER_CLIENT_ID"
+
+    assert provider.verify_changes(receipt) is True
+    provider.rollback_changes(receipt)
+    assert provider.verify_rollback(receipt) is True
+    assert state["variable_value"] is None
+    assert any(path.endswith("/variables/AZURE_OPTIMIZER_CLIENT_ID") and method == "DELETE" for method, path, _ in log)
+
+
+def test_restoring_state_persisted_before_variable_name_tracking_falls_back_to_default() -> None:
+    state = {
+        "env_exists": True,
+        "policy": {"protected_branches": False, "custom_branch_policies": True},
+        "variable_value": None,
+        "branch_policies": [],
+        "next_policy_id": 41,
+    }
+    transport = FakeGitHubTransport(_stateful_handler(state, []))
+    action = BootstrapAction(
+        action_id="github-variable-client-id",
+        phase="github",
+        stage="planned",
+        kind="github-variable",
+        diagnostics=("foundry-production", "AZURE_OPTIMIZER_CLIENT_ID", "44444444-4444-4444-4444-444444444444"),
+    )
+
+    provider1 = GitHubBootstrapProvider(token="ghp_secret", transport=transport)
+    receipt = provider1.apply_changes(_plan(action))
+    exported = provider1.export_provider_state(receipt)
+
+    # Simulate state persisted by a version of the provider that predates
+    # variable_name tracking: the field decodes as None (same as an absent key)
+    # and every consumer must fall back to the legacy default variable name.
+    legacy_snapshots = []
+    for snapshot in exported["snapshots"]:
+        legacy_snapshot = dict(snapshot)
+        legacy_snapshot["variable_name"] = None
+        legacy_snapshots.append(legacy_snapshot)
+    legacy_payload = {
+        "version": exported["version"],
+        "receipt_hash": exported["receipt_hash"],
+        "operation_id": exported["operation_id"],
+        "repository": exported["repository"],
+        "snapshots": legacy_snapshots,
+    }
+    legacy_state = {**legacy_payload, "state_hash": canonical_sha256(legacy_payload)}
+
+    provider2 = GitHubBootstrapProvider(token="ghp_secret", transport=transport)
+    provider2.restore_provider_state(legacy_state)
+    assert provider2.verify_changes(receipt) is True
+
+    provider2.rollback_changes(receipt)
+    assert provider2.verify_rollback(receipt) is True
+    assert state["variable_value"] is None

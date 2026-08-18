@@ -14,6 +14,10 @@ from foundry_opt.bootstrap.errors import BootstrapApplyError, BootstrapProviderE
 
 _OWNER_REPO_PATTERN = re.compile(r"^(?P<owner>[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}[A-Za-z0-9])?)/(?P<repo>[A-Za-z0-9_.-]{1,100})$")
 _LINK_REL_PATTERN = re.compile(r'<([^>]+)>;\s*rel="([^"]+)"')
+# Mirrors the safe uppercase variable-name contract enforced on plan input
+# (foundry_opt.bootstrap.input_contracts.VariableName) so the provider never
+# trusts action diagnostics or persisted state blindly.
+_VARIABLE_NAME_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _ENVIRONMENTS = ("copilot", "foundry-production")
 _VAR_NAME = "AZURE_OPTIMIZER_CLIENT_ID"
 _API_VERSION = "2022-11-28"
@@ -94,6 +98,7 @@ class _ActionSnapshot:
     ownership: str
     rollback: tuple[tuple[str, str, object], ...]
     branch_name: str | None = None
+    variable_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -113,6 +118,13 @@ def _bounded_text(value: object, *, field: str, max_length: int = 255, error_typ
     if len(value) > max_length:
         raise error_type(f"{field} exceeds its bounded length")
     return value
+
+
+def _validate_variable_name(value: object, *, error_type: type[Exception] = GitHubProviderError) -> str:
+    text = _bounded_text(value, field="variable_name", max_length=128, error_type=error_type)
+    if not _VARIABLE_NAME_PATTERN.fullmatch(text):
+        raise error_type("variable_name must match the safe uppercase variable-name contract")
+    return text
 
 
 def _canonical_repo(repository: str) -> tuple[str, str]:
@@ -149,6 +161,17 @@ def _fingerprint(label: str, value: object) -> FingerprintRecord:
 
 def _is_pending_snapshot(snapshot: _ActionSnapshot) -> bool:
     return isinstance(snapshot.expected_after, Mapping) and snapshot.expected_after.get("pending") is True
+
+
+def _rollback_variable_name(payload: object) -> str:
+    # Rollback steps carry the exact variable identity in their payload so a
+    # custom-named variable is restored/deleted precisely; payloads persisted
+    # before this field existed fall back to the legacy _VAR_NAME.
+    if isinstance(payload, Mapping):
+        candidate = payload.get("variable_name")
+        if isinstance(candidate, str) and _VARIABLE_NAME_PATTERN.fullmatch(candidate):
+            return candidate
+    return _VAR_NAME
 
 
 def _json_safe(value: object) -> object:
@@ -190,6 +213,7 @@ def _encode_snapshot(snapshot: _ActionSnapshot) -> Mapping[str, object]:
         "ownership": snapshot.ownership,
         "rollback": [_canonicalized_document([operation, environment, payload]) for operation, environment, payload in snapshot.rollback],
         "branch_name": snapshot.branch_name,
+        "variable_name": snapshot.variable_name,
     }
 
 
@@ -197,6 +221,14 @@ def _decode_branch_name(value: object) -> str | None:
     if value is None:
         return None
     return _bounded_text(value, field="snapshot.branch_name", max_length=255, error_type=GitHubProviderApplyError)
+
+
+def _decode_variable_name(value: object) -> str | None:
+    if value is None:
+        # Backward compatible default: state persisted before variable_name was
+        # tracked decodes as None, and callers fall back to the legacy _VAR_NAME.
+        return None
+    return _validate_variable_name(value, error_type=GitHubProviderApplyError)
 
 
 def _decode_snapshot(value: object) -> _ActionSnapshot:
@@ -211,6 +243,7 @@ def _decode_snapshot(value: object) -> _ActionSnapshot:
     if not isinstance(rollback_raw, list):
         raise GitHubProviderApplyError("snapshot.rollback must be a list")
     branch_name = _decode_branch_name(mapping.get("branch_name"))
+    variable_name = _decode_variable_name(mapping.get("variable_name"))
     snapshot = _ActionSnapshot(
         action_id=action_id,
         kind=kind,
@@ -220,6 +253,7 @@ def _decode_snapshot(value: object) -> _ActionSnapshot:
         ownership=ownership,
         rollback=tuple(_decode_rollback_step(item) for item in rollback_raw),
         branch_name=branch_name,
+        variable_name=variable_name,
     )
     allowed_operations = {
         "github-environment": {"delete_environment"},
@@ -233,6 +267,8 @@ def _decode_snapshot(value: object) -> _ActionSnapshot:
         raise GitHubProviderApplyError("snapshot kind is invalid")
     if snapshot.branch_name is not None and snapshot.kind != "github-branch-policy":
         raise GitHubProviderApplyError("snapshot branch_name is only valid for github-branch-policy")
+    if snapshot.variable_name is not None and snapshot.kind != "github-variable":
+        raise GitHubProviderApplyError("snapshot variable_name is only valid for github-variable")
     for operation, environment, _ in snapshot.rollback:
         if operation not in allowed_operations[snapshot.kind]:
             raise GitHubProviderApplyError("snapshot rollback operation is invalid")
@@ -521,22 +557,40 @@ class GitHubBootstrapProvider:
             )
         if action.kind == "github-variable":
             env_name = _bounded_text(action.diagnostics[0], field="environment")
-            value = _bounded_text(action.diagnostics[1], field="client_id", max_length=512)
-            env = self._inventory_environment(owner, repo, env_name, default_branch)
+            # v2 diagnostics carry (environment, variable_name, value); legacy
+            # 2-field diagnostics (environment, value) fall back to _VAR_NAME so
+            # already-planned/persisted actions keep working unchanged.
+            if len(action.diagnostics) == 4:
+                variable_name = _validate_variable_name(action.diagnostics[1])
+                value = _bounded_text(action.diagnostics[2], field="client_id", max_length=512)
+            elif len(action.diagnostics) == 3:
+                variable_name = _VAR_NAME
+                value = _bounded_text(action.diagnostics[1], field="client_id", max_length=512)
+            else:
+                raise GitHubProviderError("github-variable action diagnostics are invalid")
+            env = self._inventory_environment(owner, repo, env_name, default_branch, variable_name=variable_name)
             before = {"exists": env.variable_state.exists, "value": env.variable_state.value}
             if env.variable_state.exists and env.variable_state.value == value:
-                return _ActionSnapshot(action.action_id, action.kind, env_name, before, before, "adopted", ())
-            rollback = (("restore_variable", env_name, before) if env.variable_state.exists else ("delete_variable", env_name, None),)
-            snapshots.append(_ActionSnapshot(action.action_id, action.kind, env_name, before, {"pending": True}, "changed", rollback))
+                return _ActionSnapshot(action.action_id, action.kind, env_name, before, before, "adopted", (), variable_name=variable_name)
+            rollback = (
+                (
+                    "restore_variable",
+                    env_name,
+                    {"exists": True, "value": env.variable_state.value, "variable_name": variable_name},
+                )
+                if env.variable_state.exists
+                else ("delete_variable", env_name, {"variable_name": variable_name}),
+            )
+            snapshots.append(_ActionSnapshot(action.action_id, action.kind, env_name, before, {"pending": True}, "changed", rollback, variable_name=variable_name))
             if env.variable_state.exists:
-                self._patch(f"/repos/{owner}/{repo}/environments/{env_name}/variables/{_VAR_NAME}", {"name": _VAR_NAME, "value": value})
+                self._patch(f"/repos/{owner}/{repo}/environments/{env_name}/variables/{variable_name}", {"name": variable_name, "value": value})
             else:
-                self._post(f"/repos/{owner}/{repo}/environments/{env_name}/variables", {"name": _VAR_NAME, "value": value})
-            variable = self._read_environment_variable(owner, repo, env_name, _VAR_NAME)
+                self._post(f"/repos/{owner}/{repo}/environments/{env_name}/variables", {"name": variable_name, "value": value})
+            variable = self._read_environment_variable(owner, repo, env_name, variable_name)
             if variable.value != value:
                 raise GitHubProviderError("variable verification failed")
             snapshots.pop()
-            return _ActionSnapshot(action.action_id, action.kind, env_name, before, {"exists": True, "value": value}, "changed", rollback)
+            return _ActionSnapshot(action.action_id, action.kind, env_name, before, {"exists": True, "value": value}, "changed", rollback, variable_name=variable_name)
         if action.kind == "github-branch-policy":
             env_name = _bounded_text(action.diagnostics[0], field="environment")
             branch_name = _bounded_text(action.diagnostics[1], field="default_branch")
@@ -602,7 +656,7 @@ class GitHubBootstrapProvider:
             env = self._inventory_environment(owner, repo, snapshot.target, default_branch)
             return {"exists": env.exists, "deployment_branch_policy": env.deployment_branch_policy}
         if snapshot.kind == "github-variable":
-            variable = self._read_environment_variable(owner, repo, snapshot.target, _VAR_NAME)
+            variable = self._read_environment_variable(owner, repo, snapshot.target, snapshot.variable_name or _VAR_NAME)
             return {"exists": variable.exists, "value": variable.value}
         # github-branch-policy identity is exact and persisted on the snapshot; never
         # re-derive it from the (possibly since-changed) live repository default branch.
@@ -653,9 +707,12 @@ class GitHubBootstrapProvider:
                 raise GitHubProviderError(f"rollback verification failed for action {snapshot.action_id}")
 
     def _verify_final_state(self, owner: str, repo: str, default_branch: str, snapshots: Sequence[_ActionSnapshot]) -> None:
-        merged: dict[tuple[str, str], _ActionSnapshot] = {}
+        merged: dict[tuple[str, str, str | None], _ActionSnapshot] = {}
         for snapshot in snapshots:
-            merged[(snapshot.kind, snapshot.target)] = snapshot
+            # The exact variable identity is part of the merge key so two
+            # github-variable actions on the same environment with different
+            # variable names are verified independently, never collapsed.
+            merged[(snapshot.kind, snapshot.target, snapshot.variable_name)] = snapshot
         branch_policy_targets = {
             snapshot.target
             for snapshot in merged.values()
@@ -672,7 +729,7 @@ class GitHubBootstrapProvider:
                     continue
                 current = {"exists": env.exists, "deployment_branch_policy": env.deployment_branch_policy}
             elif snapshot.kind == "github-variable":
-                variable = self._read_environment_variable(owner, repo, snapshot.target, _VAR_NAME)
+                variable = self._read_environment_variable(owner, repo, snapshot.target, snapshot.variable_name or _VAR_NAME)
                 current = {"exists": variable.exists, "value": variable.value}
             else:
                 env = self._inventory_environment(owner, repo, snapshot.target, snapshot.branch_name or default_branch)
@@ -723,10 +780,12 @@ class GitHubBootstrapProvider:
             elif operation == "restore_variable":
                 previous = value if isinstance(value, Mapping) else {}
                 previous_value = previous.get("value")
+                variable_name = _rollback_variable_name(previous)
                 if isinstance(previous_value, str):
-                    self._patch(f"/repos/{owner}/{repo}/environments/{environment}/variables/{_VAR_NAME}", {"name": _VAR_NAME, "value": previous_value})
+                    self._patch(f"/repos/{owner}/{repo}/environments/{environment}/variables/{variable_name}", {"name": variable_name, "value": previous_value})
             elif operation == "delete_variable":
-                self._delete(f"/repos/{owner}/{repo}/environments/{environment}/variables/{_VAR_NAME}", allow_statuses={204, 404})
+                variable_name = _rollback_variable_name(value)
+                self._delete(f"/repos/{owner}/{repo}/environments/{environment}/variables/{variable_name}", allow_statuses={204, 404})
             elif operation == "restore_environment_policy":
                 self._put(f"/repos/{owner}/{repo}/environments/{environment}", {"deployment_branch_policy": value})
             elif operation == "delete_environment":
@@ -741,7 +800,7 @@ class GitHubBootstrapProvider:
         result["custom_branch_policies"] = True
         return result
 
-    def _inventory_environment(self, owner: str, repo: str, env_name: str, branch_name: str) -> _EnvironmentState:
+    def _inventory_environment(self, owner: str, repo: str, env_name: str, branch_name: str, *, variable_name: str = _VAR_NAME) -> _EnvironmentState:
         payload = self._get_json(f"/repos/{owner}/{repo}/environments/{env_name}", allow_404=True)
         if not payload:
             return _EnvironmentState(env_name, False, None, (), _VariableState(False, None), (), _BranchPolicyState(False, None, None, None))
@@ -749,7 +808,7 @@ class GitHubBootstrapProvider:
         if policy_payload is not None and not isinstance(policy_payload, Mapping):
             raise GitHubProviderError("deployment_branch_policy payload is invalid")
         variables = tuple(self._list_paginated(f"/repos/{owner}/{repo}/environments/{env_name}/variables", "variables", allow_404=True))
-        variable = self._read_environment_variable(owner, repo, env_name, _VAR_NAME)
+        variable = self._read_environment_variable(owner, repo, env_name, variable_name)
         policies = tuple(self._list_paginated(f"/repos/{owner}/{repo}/environments/{env_name}/deployment_branch_policies", "branch_policies", allow_404=True))
         branch_policy = _BranchPolicyState(False, None, None, None)
         for policy in policies:
