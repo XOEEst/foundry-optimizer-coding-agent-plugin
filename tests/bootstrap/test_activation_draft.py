@@ -228,6 +228,28 @@ def test_agent_upload_timeout_recovers_exact_owned_active_version() -> None:
     )
 
 
+def test_live_adapter_uses_a_separate_agent_observer_pipeline(monkeypatch) -> None:
+    created_clients = []
+
+    class _Client:
+        def __init__(self, endpoint, credential):
+            created_clients.append((endpoint, credential))
+            self.agents = object()
+
+    monkeypatch.setattr(
+        "foundry_opt.bootstrap.providers.foundry.AIProjectClient",
+        _Client,
+    )
+
+    adapter = FoundryAdapter(
+        "https://example.services.ai.azure.com/api/projects/example",
+        Credential(),
+    )
+
+    assert len(created_clients) == 2
+    assert adapter._client is not adapter._agent_observer_client
+
+
 def test_a_failed_safety_gate_still_deletes_the_owned_draft() -> None:
     contract = build_contract()
     adapter, fakes = build_fake_adapter(safety_pass_rate=0.9)

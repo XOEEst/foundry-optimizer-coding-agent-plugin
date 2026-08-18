@@ -525,6 +525,14 @@ class FoundryAdapter:
     def __init__(self, project_endpoint: str, credential: TokenCredential, *, client: object | None = None, time_source: Callable[[], float] | None = None, sleep: Callable[[float], None] | None = None, default_poll_interval: float = 1.0, split_writer: Callable[..., str] | None = None, checkpoint: Callable[[Mapping[str, object]], None] | None = None, download_timeout: float = 60.0, request_timeout: float = 120.0, operation_timeout: float = 1800.0) -> None:
         self._project_endpoint = project_endpoint
         self._client = client if client is not None else AIProjectClient(project_endpoint, credential)
+        # A synchronous hosted-code upload can keep its client pipeline occupied after the
+        # version is already active. Live observation uses an independent pipeline so the
+        # bounded owner can see that exact version and continue.
+        self._agent_observer_client = (
+            client
+            if client is not None
+            else AIProjectClient(project_endpoint, credential)
+        )
         self._time = time_source or time.monotonic
         self._sleep = sleep or time.sleep
         self._default_poll_interval = default_poll_interval
@@ -1563,7 +1571,7 @@ class FoundryAdapter:
         )
 
     def _get_agent_version(self, agent_name: str, agent_version: str) -> object | None:
-        getter = getattr(self._client.agents, 'get_version', None)
+        getter = getattr(self._agent_observer_client.agents, 'get_version', None)
         if not callable(getter):
             return None
         try:
