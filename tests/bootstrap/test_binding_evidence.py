@@ -343,6 +343,80 @@ def test_observation_fails_closed_when_the_published_content_hash_disagrees(tmp_
         adapter.observe_agent_binding(agent_name="example-agent", agent_version="1", source_root="app", package_root="app")
 
 
+def test_observation_maps_archive_entries_from_package_root(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    (repo / "agents" / "example" / ".foundry").mkdir(parents=True)
+    (repo / "agents" / "example" / "app").mkdir(parents=True)
+    (repo / "agents" / "example" / "app" / "main.py").write_text(
+        "import fastapi\napp = fastapi.FastAPI()\n",
+        encoding="utf-8",
+    )
+    (repo / "agents" / "example" / "pyproject.toml").write_text(
+        "[project]\nname='agent'\nversion='1.0.0'\n",
+        encoding="utf-8",
+    )
+    (repo / "agents" / "example" / ".foundry" / "agent-metadata.yaml").write_text(
+        "agent_name: example-agent\n"
+        "source_root: agents/example/app\n"
+        "package_root: agents/example\n"
+        "expected_version: '1'\n",
+        encoding="utf-8",
+    )
+    expected_source = fingerprint_files(
+        {
+            "agents/example/app/main.py": hashlib.sha256(
+                (repo / "agents" / "example" / "app" / "main.py").read_bytes()
+            ).hexdigest()
+        }
+    )
+    expected_package = fingerprint_files(
+        {
+            "agents/example/app/main.py": hashlib.sha256(
+                (repo / "agents" / "example" / "app" / "main.py").read_bytes()
+            ).hexdigest(),
+            "agents/example/pyproject.toml": hashlib.sha256(
+                (repo / "agents" / "example" / "pyproject.toml").read_bytes()
+            ).hexdigest(),
+            "agents/example/.foundry/agent-metadata.yaml": hashlib.sha256(
+                (
+                    repo
+                    / "agents"
+                    / "example"
+                    / ".foundry"
+                    / "agent-metadata.yaml"
+                ).read_bytes()
+            ).hexdigest(),
+        }
+    )
+    archive = build_code_archive(repo / "agents" / "example")
+    adapter, _fakes = build_fake_adapter(
+        code_archive=archive,
+        code_content_hash=hashlib.sha256(archive).hexdigest(),
+        agent_versions={
+            ("example-agent", "1"): {
+                "name": "example-agent",
+                "version": "1",
+                "definition": {
+                    "code_configuration": {
+                        "content_hash": hashlib.sha256(archive).hexdigest()
+                    }
+                },
+            }
+        },
+    )
+
+    observation = adapter.observe_agent_binding(
+        agent_name="example-agent",
+        agent_version="1",
+        source_root="agents/example/app",
+        package_root="agents/example",
+    )
+
+    assert observation["code_content_hash_verified"] is True
+    assert observation["source_fingerprint"] == expected_source
+    assert observation["package_fingerprint"] == expected_package
+
+
 def test_observation_rejects_unreadable_or_empty_archives(tmp_path: Path) -> None:
     adapter, _fakes = build_fake_adapter(code_archive=b"not-a-zip-archive")
     with pytest.raises(FoundryPrerequisiteError, match="not a readable zip archive"):

@@ -879,8 +879,19 @@ class FoundryAdapter:
         observed_version = details.get('version')
         if isinstance(observed_version, str) and observed_version and observed_version != agent_version:
             raise FoundryPrerequisiteError('agent version response does not match the requested version', kind='prerequisite')
-        code_configuration = details.get('code_configuration') or details.get('codeConfiguration') or {}
-        declared_hash = _as_mapping(code_configuration).get('content_hash') or _as_mapping(code_configuration).get('contentHash')
+        definition = _sdk_mapping(details.get('definition'))
+        code_configuration = (
+            definition.get('code_configuration')
+            or definition.get('codeConfiguration')
+            or details.get('code_configuration')
+            or details.get('codeConfiguration')
+            or {}
+        )
+        normalized_code_configuration = _sdk_mapping(code_configuration)
+        declared_hash = (
+            normalized_code_configuration.get('content_hash')
+            or normalized_code_configuration.get('contentHash')
+        )
         try:
             chunks = downloader(agent_name, agent_version=agent_version)
         except ResourceNotFoundError as exc:
@@ -927,17 +938,27 @@ class FoundryAdapter:
                 if len(entries) > _MAX_AGENT_CODE_ENTRIES:
                     raise FoundryPrerequisiteError('agent code archive exceeds the supported entry count', kind='prerequisite')
                 total = 0
+                normalized_source_root = source_root.rstrip('/')
                 for entry in entries:
                     if entry.is_dir():
                         continue
                     total += entry.file_size
                     if total > _MAX_AGENT_CODE_BYTES:
                         raise FoundryPrerequisiteError('agent code archive expands beyond the supported size budget', kind='prerequisite')
-                    for root, sink in ((source_root, source_files), (package_root, package_files)):
-                        relative = _repo_relative_archive_path(entry.filename, root=root)
-                        if relative is None or not is_fingerprintable_path(relative):
-                            continue
-                        sink[relative] = hashlib.sha256(bundle.read(entry)).hexdigest()
+                    relative = _repo_relative_archive_path(
+                        entry.filename,
+                        root=package_root,
+                    )
+                    if relative is None or not is_fingerprintable_path(relative):
+                        continue
+                    digest = hashlib.sha256(bundle.read(entry)).hexdigest()
+                    package_files[relative] = digest
+                    if (
+                        normalized_source_root == '.'
+                        or relative == normalized_source_root
+                        or relative.startswith(f'{normalized_source_root}/')
+                    ):
+                        source_files[relative] = digest
         except zipfile.BadZipFile as exc:
             raise FoundryPrerequisiteError('agent code download is not a readable zip archive', kind='prerequisite') from exc
         if not source_files or not package_files:
