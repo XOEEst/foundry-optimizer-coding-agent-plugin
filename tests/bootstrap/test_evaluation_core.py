@@ -128,6 +128,35 @@ def test_generated_rubric_rejects_invalid_thresholds_inputs_and_duplicates() -> 
     validate_generated_rubric({"dimensions": [{"name": "quality", "weight": 1.0, "scalar_range": {"min": 0, "max": 1}, "threshold": 0.5, "required_inputs": ["answer"]}]})
 
 
+def test_generated_rubric_accepts_live_service_shape() -> None:
+    validate_generated_rubric(
+        {
+            "type": "rubric",
+            "dimensions": [
+                {"id": "schema_alignment", "weight": 10},
+                {"id": "general_quality", "weight": 5},
+            ],
+            "pass_threshold": 0.5,
+            "metrics": {
+                "quality": {
+                    "type": "continuous",
+                    "min_value": 0.0,
+                    "max_value": 1.0,
+                    "is_primary": True,
+                }
+            },
+            "data_schema": {
+                "required": [],
+                "properties": {
+                    "query": {"type": "string"},
+                    "response": {"type": "string"},
+                    "messages": {"type": "array"},
+                },
+            },
+        }
+    )
+
+
 def test_activation_requires_canonical_content_safety_guardrail() -> None:
     with pytest.raises(BootstrapConfigError):
         validate_activation(

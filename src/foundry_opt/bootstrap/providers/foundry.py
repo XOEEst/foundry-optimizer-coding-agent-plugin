@@ -1122,12 +1122,19 @@ class FoundryAdapter:
             return None
         except Exception as exc:
             raise self._classify_error(exc) from exc
+        metadata = raw.get('metadata')
+        generation_operation_id = (
+            metadata.get('operation_id')
+            if isinstance(metadata, Mapping)
+            else None
+        )
         return {
             'name': raw.get('name'),
             'version': raw.get('version'),
             'id': raw.get('id'),
             'evaluator_type': raw.get('evaluator_type'),
-            'generation_job_id': raw.get('generation_job_id'),
+            'generation_job_id': generation_operation_id or raw.get('generation_job_id'),
+            'service_generation_job_id': raw.get('generation_job_id'),
             'raw': _plain(raw),
         }
 
@@ -1667,6 +1674,9 @@ class FoundryAdapter:
                 try:
                     job = poller.result()
                 except Exception as exc:
+                    recovered = self._reconcile_generation_job(handle)
+                    if recovered is not None:
+                        return self._normalize_job_result(handle.job_kind, recovered)
                     raise self._classify_error(exc) from None
                 return self._normalize_job_result(handle.job_kind, _as_mapping(job))
             if deadline_monotonic is not None and self._time() >= deadline_monotonic:
@@ -1675,6 +1685,29 @@ class FoundryAdapter:
 
     def resume_generation_job(self, handle: FoundryOperationHandle, *, persist_before_poll: Callable[[FoundryOperationHandle], None] | None = None, deadline_monotonic: float | None = None, poll_interval: float | None = None) -> Mapping[str, object]:
         return self.poll_generation_job(handle, persist_before_poll=persist_before_poll, deadline_monotonic=deadline_monotonic, poll_interval=poll_interval)
+
+    def _reconcile_generation_job(self, handle: FoundryOperationHandle) -> Mapping[str, object] | None:
+        """Recover a succeeded evaluator job when the resumed LRO endpoint fails."""
+
+        if handle.job_kind != 'evaluator_generation':
+            return None
+        lister = getattr(self._beta('evaluators'), 'list_generation_jobs', None)
+        if not callable(lister):
+            return None
+        try:
+            jobs = lister(limit=100)
+            matches = []
+            for item in jobs:
+                job = _as_mapping(item)
+                result = job.get('result')
+                metadata = result.get('metadata') if isinstance(result, Mapping) else None
+                if isinstance(metadata, Mapping) and metadata.get('operation_id') == handle.operation_id:
+                    matches.append(job)
+        except Exception:
+            return None
+        if len(matches) != 1 or str(matches[0].get('status') or '') not in {'completed', 'succeeded'}:
+            return None
+        return matches[0]
 
     def _normalize_job_result(self, job_kind: str, job: Mapping[str, object]) -> Mapping[str, object]:
         result = job.get('result')
@@ -1700,7 +1733,13 @@ class FoundryAdapter:
             normalized['outcome'] = 'accepted'
             normalized['output_datasets'] = tuple(accepted)
         else:
-            normalized['saved_evaluator'] = {'id': job.get('id'), 'name': job.get('name'), 'version': job.get('version'), 'display_name': job.get('display_name')}
+            saved = result if isinstance(result, Mapping) else job
+            normalized['saved_evaluator'] = {
+                'id': saved.get('id'),
+                'name': saved.get('name'),
+                'version': saved.get('version'),
+                'display_name': saved.get('display_name'),
+            }
         return normalized
 
     def plan_resources(self, plan: BootstrapPlan) -> tuple[BootstrapAction, ...]:
@@ -2135,7 +2174,11 @@ class FoundryAdapter:
         if version is None:
             raise FoundryPrerequisiteError('generated evaluator version does not exist', kind='prerequisite')
         raw = version.get('raw')
-        rubric = raw.get('rubric') if isinstance(raw, Mapping) else None
+        rubric = (
+            raw.get('rubric') or raw.get('definition')
+            if isinstance(raw, Mapping)
+            else None
+        )
         if not isinstance(rubric, Mapping):
             raise FoundryPrerequisiteError('generated rubric structure is unavailable for validation', kind='prerequisite')
         return rubric
