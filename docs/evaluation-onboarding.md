@@ -46,7 +46,7 @@ The contract carries only reviewable, deterministic inputs:
 | --- | --- |
 | `bounds` | target sample count, 10/5 minimums, 15-sample telemetry threshold, maximum generated samples, maximum evaluators, 100% safety pass rate, the required safety evaluator names, required headroom, allowed dataset types and provenance |
 | `telemetry_probe` | prerequisite availability, useful sample count, window identifier, derived eligibility |
-| `dataset_plan` | requested development/validating names and version, dataset type, connection, generation kind, deterministic generation job id, generation-context fingerprint, reviewed reuse candidates |
+| `dataset_plan` | requested development/validating names and version, dataset type, optional storage connection (omitted for project-managed storage), generation kind, deterministic generation job id, generation-context fingerprint, reviewed reuse candidates |
 | `evaluator_plan` | requested evaluator name/version, deterministic rubric generation job id *or* one reviewed reuse candidate, the required built-in safety evaluator **names**, objective normalization and weight |
 | `definition_plan` / `activation_plan` | requested definition names, model deployment, owned draft agent name/version |
 | `sidecar_policy` | static sidecar content: roots, editable paths, runtime/protocol, Foundry binding, models, candidate bounds, decision policy, hard guardrails, deployment policy |

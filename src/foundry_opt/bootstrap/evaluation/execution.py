@@ -204,7 +204,7 @@ class DatasetPlan(BootstrapDocument):
     requested_validating_name: ResourceName
     requested_version: ResourceVersion
     dataset_type: DatasetType = "uri_file"
-    connection_name: ResourceName
+    connection_name: ResourceName | None = None
     generation_kind: GenerationKind
     generation_job_id: OperationId
     source_fingerprint: Sha256

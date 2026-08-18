@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from foundry_opt.bootstrap.canonical import canonical_sha256
 from foundry_opt.bootstrap.errors import BootstrapConfigError
+from foundry_opt.bootstrap.evaluation.execution import EvaluationOnboardingRequest
 from foundry_opt.bootstrap.input_contracts import BootstrapPlanInput, TrustedTemplateManifest, load_bootstrap_plan_input
 from tests.bootstrap.fakes.evaluation_contract import build_contract
 
@@ -143,6 +144,28 @@ def test_plan_input_round_trips_yaml_and_json_with_canonical_hashes(tmp_path: Pa
     assert loaded_yaml.required_phases == ('repository', 'azure', 'evaluations')
     assert loaded_yaml.plan_input_hash == canonical_sha256(loaded_yaml.model_dump(mode='json', exclude_none=True))
     assert loaded_yaml.repository_phase.trusted_manifest_hash == _manifest_hash()
+
+
+def test_project_managed_storage_may_omit_connection_name() -> None:
+    payload = _sample_payload()
+    agent = payload["evaluations_phase"]["agents"][0]  # type: ignore[index]
+    contract_payload = dict(agent["onboarding_contract"])  # type: ignore[index]
+    dataset_plan = dict(contract_payload["dataset_plan"])
+    dataset_plan["connection_name"] = None
+    contract_payload["dataset_plan"] = dataset_plan
+    contract_payload.pop("contract_hash")
+    contract = EvaluationOnboardingRequest.create(**contract_payload)
+    agent["connection_name"] = None  # type: ignore[index]
+    agent["onboarding_contract"] = contract.model_dump(mode="json")  # type: ignore[index]
+
+    loaded = BootstrapPlanInput.model_validate(payload)
+
+    assert loaded.evaluations_phase is not None
+    evaluation = loaded.evaluations_phase.agents[0]
+    assert evaluation.connection_name is None
+    assert evaluation.onboarding_contract is not None
+    assert evaluation.onboarding_contract.dataset_plan is not None
+    assert evaluation.onboarding_contract.dataset_plan.connection_name is None
 
 
 def test_repository_identity_and_runtime_provenance_are_distinct_and_validated() -> None:

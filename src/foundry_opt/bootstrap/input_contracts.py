@@ -636,7 +636,7 @@ class EvaluationAgentInput(BootstrapDocument):
     generation_sources: tuple[EvaluationGenerationSource, ...]
     model_deployment: Annotated[str, StringConstraints(min_length=1, max_length=128)]
     trace_window: Annotated[str, StringConstraints(min_length=1, max_length=64)]
-    connection_name: Annotated[str, StringConstraints(min_length=1, max_length=128)]
+    connection_name: Annotated[str, StringConstraints(min_length=1, max_length=128)] | None = None
     target_sample_count: Annotated[StrictInt, Field(ge=1, le=100000)]
     replacement_intent: StrictBool
     onboarding_contract: EvaluationOnboardingRequest | None = None
@@ -659,10 +659,17 @@ class EvaluationAgentInput(BootstrapDocument):
     def _validate_account(cls, value: str) -> str:
         return _validate_resource_id(value, 'account_resource_id')
 
-    @field_validator('agent_name', 'agent_version', 'model_deployment', 'trace_window', 'connection_name')
+    @field_validator('agent_name', 'agent_version', 'model_deployment', 'trace_window')
     @classmethod
     def _validate_text_fields(cls, value: str, info) -> str:
         return _assert_safe_text(value, field=info.field_name)
+
+    @field_validator('connection_name')
+    @classmethod
+    def _validate_connection_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _assert_safe_text(value, field='connection_name')
 
     @field_validator('existing_dataset_ids', 'existing_evaluator_ids', 'existing_definition_ids')
     @classmethod
