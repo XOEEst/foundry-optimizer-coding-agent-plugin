@@ -19,7 +19,7 @@ Every operation must:
 
 Customer templates and generated bootstrap plans use this exact-pin contract.
 The current reviewed customer runtime is
-`260ca61b2cde7e9b9f03a81bf880c0453f9e8981`; later upgrades must select a new
+`770ad878f0658e9368b042d9a7f6732e49ff0200`; later upgrades must select a new
 reviewed commit explicitly and refresh the managed lock.
 
 ## Rollback
