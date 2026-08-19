@@ -20,11 +20,28 @@ _TEXT_SUFFIXES = frozenset({".cs", ".js", ".json", ".md", ".mjs", ".py", ".toml"
 _PACKAGE_FILE_NAMES = frozenset({"package.json", "pyproject.toml", "requirements.txt", "Dockerfile", "Dockerfile.app"})
 _ENTRYPOINT_FILE_NAMES = frozenset({"main.py", "app.py", "server.py", "index.js", "index.ts", "program.cs"})
 _INSTRUCTION_FILE_NAMES = frozenset({"AGENTS.md", "CLAUDE.md", "README.md"})
-_ALLOWED_TOP_LEVEL_DIRS = frozenset({".foundry", ".github", "agents", "app", "apps", "services", "service", "src", "skills", "tests", "packages", "shared"})
+_ALLOWED_TOP_LEVEL_DIRS = frozenset({".foundry", ".github", "agent", "agents", "app", "apps", "services", "service", "src", "skills", "tests", "packages", "shared"})
 _BLOCKED_EXACT_NAMES = frozenset({".env", ".env.local", ".env.development", ".env.production", "credentials.json", "secrets.json", "trace.json", "trace.ndjson", "trace.jsonl", "dataset.csv", "dataset.json", "dataset.jsonl", "dataset.parquet", "prompt.txt", "prompts.txt"})
 _BLOCKED_SEGMENTS = frozenset({".git", "__pycache__", ".mypy_cache", ".pytest_cache", ".venv", "venv", "node_modules", "datasets", "traces", "prompts", "secrets"})
-_FRAMEWORK_MARKERS: tuple[tuple[str, str], ...] = (("fastapi", "fastapi"), ("flask", "flask"), ("@azure/functions", "azure-functions"), ("azure.functions", "azure-functions"), ("express", "express"), ("microsoft.semantickernel", "semantic-kernel"))
-_HANDLER_MARKERS: tuple[str, ...] = ("responses.create", "invoke(", "handler(", "app.route", "MapPost(", "Function(")
+_FRAMEWORK_MARKERS: tuple[tuple[str, str], ...] = (
+    ("fastapi", "fastapi"),
+    ("flask", "flask"),
+    ("@azure/functions", "azure-functions"),
+    ("azure.functions", "azure-functions"),
+    ("express", "express"),
+    ("microsoft.semantickernel", "semantic-kernel"),
+    ("agent_framework", "microsoft-agent-framework"),
+)
+_HANDLER_MARKERS: tuple[str, ...] = (
+    "responses.create",
+    "invoke(",
+    "handler(",
+    "app.route",
+    "MapPost(",
+    "Function(",
+    "ResponsesHostServer",
+    "create_responses_host",
+)
 _MAX_TEXT_BYTES = 64 * 1024
 _MAX_HASH_BYTES = 2 * 1024 * 1024
 _MAX_METADATA_BYTES = 16 * 1024
@@ -414,13 +431,87 @@ def _discover_metadata_candidate(relative: str, text: str, repository_root: Path
     canonical_root = str(path.parent.parent) if path.parent.name == ".foundry" else str(path.parent)
     if canonical_root == "":
         canonical_root = "."
+    legacy_policy = _legacy_policy_for_metadata(
+        repository_root,
+        metadata_path=relative,
+    )
+    source_root = payload.get("source_root")
+    if source_root is None:
+        source_root = legacy_policy.get("source_root", canonical_root)
+    package_root = payload.get("package_root")
+    if package_root is None:
+        package_root = legacy_policy.get("package_root", source_root)
+    evidence = [
+        DiscoveryEvidence(
+            kind="agent-metadata",
+            path=relative,
+            detail=path.name,
+            confidence=0.95,
+        )
+    ]
+    if legacy_policy:
+        evidence.append(
+            DiscoveryEvidence(
+                kind="repository-policy",
+                path=".github/foundry-optimizer.yaml",
+                detail="legacy source/package roots",
+                confidence=0.85,
+            )
+        )
     return _Candidate(
         canonical_root=canonical_root,
-        source_root=_resolve_repository_relative(repository_root, str(payload.get("source_root", canonical_root)), field="source_root", allow_dot=True),
-        package_root=_resolve_repository_relative(repository_root, str(payload.get("package_root", payload.get("source_root", canonical_root))), field="package_root", allow_dot=True),
+        source_root=_resolve_repository_relative(
+            repository_root,
+            str(source_root),
+            field="source_root",
+            allow_dot=True,
+        ),
+        package_root=_resolve_repository_relative(
+            repository_root,
+            str(package_root),
+            field="package_root",
+            allow_dot=True,
+        ),
         config_path=relative,
-        evidence=(DiscoveryEvidence(kind="agent-metadata", path=relative, detail=path.name, confidence=0.95),),
+        evidence=tuple(evidence),
     )
+
+
+def _legacy_policy_for_metadata(
+    repository_root: Path,
+    *,
+    metadata_path: str,
+) -> Mapping[str, object]:
+    if metadata_path != ".foundry/agent-metadata.yaml":
+        return {}
+    policy_path = repository_root / ".github" / "foundry-optimizer.yaml"
+    if not policy_path.exists():
+        return {}
+    lst = _safe_lstat(policy_path)
+    if stat.S_ISLNK(lst.st_mode) or policy_path.is_junction():
+        raise BootstrapConfigError(
+            "legacy repository policy must not be a symlink or junction"
+        )
+    if not stat.S_ISREG(lst.st_mode):
+        raise BootstrapConfigError(
+            "legacy repository policy must be a regular file"
+        )
+    if lst.st_size > _MAX_METADATA_BYTES:
+        raise BootstrapConfigError(
+            "legacy repository policy exceeds byte budget"
+        )
+    payload = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, Mapping):
+        raise BootstrapConfigError(
+            "legacy repository policy must contain a mapping"
+        )
+    configured_metadata = payload.get(
+        "metadata_path",
+        ".foundry/agent-metadata.yaml",
+    )
+    if configured_metadata != metadata_path:
+        return {}
+    return payload
 
 
 def _collect_candidates(cache: _ScanCache) -> dict[str, _Candidate]:
