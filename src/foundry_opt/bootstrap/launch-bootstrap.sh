@@ -26,7 +26,12 @@ git -C "$extract_root" fetch --depth 1 origin "$sha" >/dev/null
 git -C "$extract_root" checkout --detach "$sha" >/dev/null
 head_sha="$(git -C "$extract_root" rev-parse HEAD)"
 test "$head_sha" = "$sha"
-lock_hash="$(python - <<'PY' "$extract_root/uv.lock"
+python_executable="$(command -v python3 || command -v python || true)"
+if [[ -z "$python_executable" ]]; then
+  echo "python3 or python is required" >&2
+  exit 1
+fi
+lock_hash="$("$python_executable" - <<'PY' "$extract_root/uv.lock"
 import hashlib, pathlib, sys
 print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())
 PY
