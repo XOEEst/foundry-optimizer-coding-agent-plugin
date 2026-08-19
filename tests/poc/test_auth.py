@@ -8,6 +8,7 @@ from urllib.parse import parse_qs
 
 import httpx
 import pytest
+from azure.core.exceptions import ClientAuthenticationError
 
 from foundry_opt.poc.auth import (
     ACTIONS_ID_TOKEN_REQUEST_TOKEN_ENV,
@@ -148,6 +149,27 @@ def test_build_client_assertion_credential_requests_exact_audience() -> None:
     assert assertion not in diagnostics
 
 
+def test_client_assertion_credential_sanitizes_entra_rejection() -> None:
+    class RejectedCredential:
+        def get_token(self, *scopes: str, **kwargs: object) -> object:
+            del scopes, kwargs
+            raise ClientAuthenticationError(
+                message="sensitive tenant rejection details"
+            )
+
+    credential = build_client_assertion_credential(
+        _config(),
+        environment={},
+        credential_factory=lambda *_args: RejectedCredential(),
+    )
+
+    with pytest.raises(AuthError, match="Microsoft Entra rejected") as captured:
+        credential.get_token("https://ai.azure.com/.default")
+
+    assert captured.value.stage == "entra_token"
+    assert "sensitive tenant rejection details" not in str(captured.value)
+
+
 @pytest.mark.parametrize(
     ("environment", "handler", "match"),
     [
@@ -244,4 +266,3 @@ def test_assertion_provider_validates_expected_claims(claims: dict[str, object])
     )
     with pytest.raises(AuthError):
         provider.get_assertion()
-
