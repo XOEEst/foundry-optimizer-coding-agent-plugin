@@ -42,6 +42,15 @@ class _SdkValue:
         return dict(self._payload)
 
 
+class _ModelDumpValue:
+    def __init__(self, payload: Mapping[str, object]) -> None:
+        self._payload = dict(payload)
+
+    def model_dump(self, mode: str = "python") -> Mapping[str, object]:
+        del mode
+        return dict(self._payload)
+
+
 class _PollingMethod:
     def __init__(self, operation_location: str = 'https://poll/job-1') -> None:
         self._operation_location = operation_location
@@ -779,6 +788,12 @@ def test_generic_platform_errors_keep_only_the_exception_type_code() -> None:
     assert isinstance(error, FoundryPlatformError)
     assert error.code == 'TypeError'
     assert 'sensitive' not in str(error)
+
+
+def test_openai_model_dump_values_are_normalized_as_mappings() -> None:
+    from foundry_opt.bootstrap.providers.foundry import _as_mapping
+
+    assert _as_mapping(_ModelDumpValue({"score": 0.75})) == {"score": 0.75}
 
 
 def test_keyword_signatures_and_default_hash_normalization() -> None:
