@@ -1187,8 +1187,7 @@ class FoundryAdapter:
                 'required built-in safety evaluators are unavailable in this project: ' + ', '.join(sorted(missing)),
                 kind='unsupported_preview',
             )
-        ordered = [*required_names, *(name for name in sorted(resolved) if name not in required_names)]
-        return tuple({**resolved[name], 'safety_name': name} for name in ordered)
+        return tuple({**resolved[name], 'safety_name': name} for name in required_names)
 
     def resolve_builtin_evaluator_by_id(self, evaluator_id: str) -> Mapping[str, object]:
         for item in self.inventory_evaluators(include_builtin=True):
