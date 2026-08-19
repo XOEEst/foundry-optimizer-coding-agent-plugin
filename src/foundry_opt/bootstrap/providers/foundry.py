@@ -2640,7 +2640,10 @@ class FoundryAdapter:
             measurements.append(measurement)
         missing = set(criteria) - seen
         if missing:
-            raise FoundryPrerequisiteError('activation run did not measure every approved evaluator', kind='prerequisite')
+            raise FoundryPrerequisiteError(
+                'activation run did not measure approved evaluators: ' + ','.join(sorted(missing)),
+                kind='prerequisite',
+            )
         return tuple(measurements)
 
     def run_criterion_scores(self, *, run_id: str, definition_id: str) -> Mapping[str, tuple[float, ...]]:
