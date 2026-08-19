@@ -24,9 +24,9 @@ currently pin reviewed runtime `770ad878f0658e9368b042d9a7f6732e49ff0200`.
 The synthetic multi-agent pilot completed repository bootstrap, evaluation
 activation, validation, and Copilot setup; its personal repository correctly
 fails the selected tenant's enterprise-claim policy. Live acceptance completed
-on `microsoft-foundry/luffy-test-agent-repo-002`: public-runtime setup and
-validation passed, deployment reconciled version 15, and Copilot issue #110
-finished with a receipt-backed no-winner decision.
+in a separate private enterprise-owned agent repository: public-runtime setup
+and validation passed, deployment reconciled the existing regular version, and
+one bounded Copilot job finished with a receipt-backed no-winner decision.
 
 ## Distribution trust
 

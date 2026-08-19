@@ -38,21 +38,17 @@ runtime does not fall back to static Azure credentials or broaden RBAC.
 
 ## Live enterprise acceptance
 
-Live optimize/deploy acceptance uses the enterprise-owned
-[`microsoft-foundry/luffy-test-agent-repo-002`](https://github.com/microsoft-foundry/luffy-test-agent-repo-002)
-agent code repository.
+Live optimize/deploy acceptance uses a separate private enterprise-owned agent
+code repository. Retained evidence confirms:
 
-| Gate | Evidence |
-| --- | --- |
-| Public cutover | [PR #109](https://github.com/microsoft-foundry/luffy-test-agent-repo-002/pull/109) replaced the private cross-organization SSH fetch with exact public HTTPS and removed the obsolete deploy-key secret. |
-| Runtime | Luffy pins `770ad878f0658e9368b042d9a7f6732e49ff0200`; the bootstrap Bash launcher discovered the legacy `agent/` root through the repository policy. |
-| Setup | [Run 32285445511](https://github.com/microsoft-foundry/luffy-test-agent-repo-002/actions/runs/32285445511) installed and verified the public CLI and skill. |
-| Validation | [Run 32285445523](https://github.com/microsoft-foundry/luffy-test-agent-repo-002/actions/runs/32285445523) passed the shared runtime suite and target contract. |
-| Deployment | [Run 32280836699](https://github.com/microsoft-foundry/luffy-test-agent-repo-002/actions/runs/32280836699) reconciled existing version 15 with `advisory_safety=1.0`, `reconciled=true`, and `route_mutated=false`. |
-| Optimize issue | [Issue #110](https://github.com/microsoft-foundry/luffy-test-agent-repo-002/issues/110) ran one baseline and exactly two changed candidates on public runtime `770ad878`. |
-| Decision | Both candidates held `policy_coverage=0.5000` with delta `0.0000` and `advisory_safety=1.0000`; the final verdict was `no_winner`. |
-| Repository result | [PR #113](https://github.com/microsoft-foundry/luffy-test-agent-repo-002/pull/113) closed with no files. No validating run, regular publication, or route mutation occurred. |
-| Cleanup | All owned optimize drafts were removed; the retained agent version list contains regular versions only and latest remains 15. |
+- exact public HTTPS runtime cutover with the private deploy key removed
+- successful public CLI/skill setup and target-contract validation
+- merge-deployment reconciliation of the existing regular version with safety
+  at 1.0 and no route mutation
+- one fresh baseline and exactly two changed candidates
+- both candidates discarded at zero aggregate delta with safety at 1.0
+- final `no_winner`, no validating run, and an unchanged closed draft PR
+- all owned optimize drafts removed and the existing regular version retained
 
 The Copilot workflow reports `cancelled` after the no-winner path closes its own
 draft PR, but the broker had already persisted baseline, both candidate
