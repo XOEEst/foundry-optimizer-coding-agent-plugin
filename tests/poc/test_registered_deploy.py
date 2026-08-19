@@ -37,7 +37,11 @@ def _git(repository: Path, *arguments: str) -> str:
     return completed.stdout.strip()
 
 
-def _registered_repository(tmp_path: Path) -> tuple[Path, str, dict[str, str]]:
+def _registered_repository(
+    tmp_path: Path,
+    *,
+    immutable_subject: bool = False,
+) -> tuple[Path, str, dict[str, str]]:
     repository = tmp_path / "repo"
     (repository / ".foundry-opt").mkdir(parents=True)
     (repository / "agent" / ".foundry").mkdir(parents=True)
@@ -61,6 +65,10 @@ def _registered_repository(tmp_path: Path) -> tuple[Path, str, dict[str, str]]:
         ),
         "client_id": CLIENT_ID,
     }
+    if immutable_subject:
+        registry["github"]["oidc_subject_prefix"] = (
+            "repo:example-org@987654321/example-repo@123456789"
+        )
     (repository / ".foundry-opt" / "registry.yaml").write_text(
         yaml.safe_dump(registry, sort_keys=False),
         encoding="utf-8",
@@ -138,6 +146,7 @@ def _registered_repository(tmp_path: Path) -> tuple[Path, str, dict[str, str]]:
         "GITHUB_ACTIONS": "true",
         "GITHUB_REPOSITORY": "example-org/example-repo",
         "GITHUB_REPOSITORY_ID": "123456789",
+        "GITHUB_REPOSITORY_OWNER_ID": "987654321",
         "GITHUB_REF": "refs/heads/main",
         "GITHUB_REF_NAME": "main",
         "GITHUB_SHA": commit,
@@ -184,6 +193,30 @@ def test_registered_settings_reject_client_id_drift(tmp_path: Path) -> None:
             exact_source=commit,
             environment=environment,
         )
+
+
+def test_registered_settings_accept_immutable_github_subjects(
+    tmp_path: Path,
+) -> None:
+    repository, commit, environment = _registered_repository(
+        tmp_path,
+        immutable_subject=True,
+    )
+
+    settings = load_registered_deployment_settings(
+        repository,
+        repo_agent_id="example-agent",
+        exact_source=commit,
+        environment=environment,
+    )
+
+    expected = (
+        "repo:example-org@987654321/example-repo@123456789:"
+        "environment:foundry-production"
+    )
+    assert settings.oidc_config.expected_subject == expected
+    principal = settings.metadata.oidc.principals[0]
+    assert principal.subjects[0].subject == expected
 
 
 def test_registered_settings_require_github_actions_oidc(tmp_path: Path) -> None:

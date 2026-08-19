@@ -1136,6 +1136,19 @@
           "title": "Deployment Environment",
           "type": "string"
         },
+        "oidc_subject_prefix": {
+          "anyOf": [
+            {
+              "pattern": "^repo:[A-Za-z0-9_.-]+(?:@[0-9]+)?/[A-Za-z0-9_.-]+(?:@[0-9]+)?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Oidc Subject Prefix"
+        },
         "optimizer_environment": {
           "maxLength": 64,
           "minLength": 1,

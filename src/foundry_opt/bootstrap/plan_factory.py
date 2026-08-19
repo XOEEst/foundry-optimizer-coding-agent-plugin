@@ -191,6 +191,9 @@ def _render_managed_payload(
                     if github
                     else "AZURE_FOUNDRY_OPT_CLIENT_ID"
                 ),
+                oidc_subject_prefix=(
+                    github.oidc_subject_prefix if github else None
+                ),
             ),
             identity=identity,
             agents=tuple(
@@ -299,8 +302,42 @@ def build_phase_actions(plan_input: BootstrapPlanInput, inventories: Mapping[str
             else "managed-identity"
         )
         actions.append(BootstrapAction(action_id="azure-identity", phase="azure", stage="planned", kind=identity_kind, diagnostics=tuple(diagnostics)))
-        actions.append(BootstrapAction(action_id="azure-fic-copilot", phase="azure", stage="planned", kind="federated-credential", diagnostics=(f"subject=repo:{az.github_repository_id}:environment:copilot",)))
-        actions.append(BootstrapAction(action_id="azure-fic-foundry-production", phase="azure", stage="planned", kind="federated-credential", diagnostics=(f"subject=repo:{az.github_repository_id}:environment:foundry-production",)))
+        github = plan_input.github_phase
+        subject_prefix = (
+            github.oidc_subject_prefix
+            if github is not None and github.oidc_subject_prefix is not None
+            else f"repo:{az.github_repository_id}"
+        )
+        optimizer_environment = (
+            github.optimizer_environment if github is not None else "copilot"
+        )
+        deployment_environment = (
+            github.deployment_environment
+            if github is not None
+            else "foundry-production"
+        )
+        actions.append(
+            BootstrapAction(
+                action_id="azure-fic-copilot",
+                phase="azure",
+                stage="planned",
+                kind="federated-credential",
+                diagnostics=(
+                    f"subject={subject_prefix}:environment:{optimizer_environment}",
+                ),
+            )
+        )
+        actions.append(
+            BootstrapAction(
+                action_id="azure-fic-foundry-production",
+                phase="azure",
+                stage="planned",
+                kind="federated-credential",
+                diagnostics=(
+                    f"subject={subject_prefix}:environment:{deployment_environment}",
+                ),
+            )
+        )
         for role in az.approved_role_assignments:
             actions.append(BootstrapAction(action_id=f"azure-rbac-{role.alias}", phase="azure", stage="planned", kind="role-assignment", diagnostics=(f"scope={role.scope}", f"role={role.alias}", f"role_definition_id={role.role_definition_id}")))
     if "evaluations" in plan_input.required_phases and plan_input.evaluations_phase is not None:

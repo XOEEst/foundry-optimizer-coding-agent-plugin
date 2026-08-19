@@ -86,6 +86,8 @@ def test_legacy_single_agent_files_exist_only_as_migration_fixtures() -> None:
 def test_setup_uses_venv_python_and_offline_unsets_broker() -> None:
     text = _workflow_text(WORKFLOW_ROOT / "copilot-setup-steps.yml")
     assert "\"$FOUNDRY_OPT_PACKAGE_ROOT/.venv/bin/python\" - <<'PY'" in text
+    assert 'python3 -m pip install' in text
+    assert '"uv==0.11.6"' in text
     assert 'unset FOUNDRY_OPT_GITHUB_BINDING' in text
     assert 'unset FOUNDRY_OPT_BROKER_SOCKET' in text
     assert '--head-ref' in text and '--ref-name' in text

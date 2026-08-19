@@ -17,6 +17,7 @@ from foundry_opt.bootstrap.contracts import (
     BuiltInEvaluatorId,
     DatasetUri,
     EvaluationDefinitionId,
+    GitHubOidcSubjectPrefix,
     IdentityKind,
     VersionedEvaluatorUri,
 )
@@ -435,6 +436,7 @@ class GitHubPhaseInput(BootstrapDocument):
     deployment_environment: EnvironmentName
     shared_client_id: Guid | Literal['azure_identity_resolution_required']
     client_id_variable_name: VariableName
+    oidc_subject_prefix: GitHubOidcSubjectPrefix | None = None
     default_branch_policy_intent: DefaultBranchPolicyIntent
 
     @field_validator('shared_client_id')

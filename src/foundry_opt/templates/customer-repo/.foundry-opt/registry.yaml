@@ -9,6 +9,7 @@ github:
   optimizer_environment: copilot
   deployment_environment: foundry-production
   client_id_variable: AZURE_OPTIMIZER_CLIENT_ID
+  oidc_subject_prefix: repo:example-org/example-repo
 identity:
   schema_version: 1
   kind: unresolved_migration

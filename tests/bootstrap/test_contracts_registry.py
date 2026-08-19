@@ -90,6 +90,18 @@ def test_root_registry_accepts_explicit_agents() -> None:
     assert registry.agents[0].enabled is True
 
 
+def test_root_registry_requires_complete_immutable_oidc_ids() -> None:
+    with pytest.raises(BootstrapConfigError, match="both owner and repository ids"):
+        GitHubSettings.from_document(
+            {
+                "optimizer_environment": "copilot",
+                "deployment_environment": "foundry-production",
+                "client_id_variable": "AZURE_OPTIMIZER_CLIENT_ID",
+                "oidc_subject_prefix": "repo:org@123/repo",
+            }
+        )
+
+
 def test_template_payload_accepts_reviewed_rendered_text() -> None:
     payload = TemplatePayloadSpec(
         template_id="foundry-opt-instructions",
