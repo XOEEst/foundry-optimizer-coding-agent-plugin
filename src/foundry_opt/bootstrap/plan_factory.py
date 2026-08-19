@@ -24,7 +24,7 @@ from foundry_opt.bootstrap.input_contracts import (
     TrustedTemplateManifest,
 )
 
-_TEMPLATE_RUNTIME_COMMIT = "260ca61b2cde7e9b9f03a81bf880c0453f9e8981"
+_TEMPLATE_RUNTIME_COMMIT = "770ad878f0658e9368b042d9a7f6732e49ff0200"
 _TEMPLATE_LOCK_SHA256 = (
     "74d7bb534c53e71a61ce197f3d5fa3169f2413373c2e42617280e78e83d6c681"
 )
