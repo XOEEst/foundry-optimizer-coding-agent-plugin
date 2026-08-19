@@ -10,6 +10,7 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 import httpx
 import typer
@@ -245,7 +246,11 @@ def validate_config(
         root / _POLICY_PATH,
         metadata_path=root / _METADATA_PATH,
     )
-    _verify_repository_identity(root, metadata.repository_identity)
+    _verify_repository_identity(
+        root,
+        metadata.repository_identity,
+        metadata.repository_id,
+    )
     receipt = (
         verify_shared_checkout(pin, shared_checkout)
         if shared_checkout is not None
@@ -281,7 +286,11 @@ def preflight(
         root / _POLICY_PATH,
         metadata_path=root / _METADATA_PATH,
     )
-    _verify_repository_identity(root, metadata.repository_identity)
+    _verify_repository_identity(
+        root,
+        metadata.repository_identity,
+        metadata.repository_id,
+    )
 
     receipt_path = _required_environment_path(
         "FOUNDRY_OPT_BOOTSTRAP_RECEIPT",
@@ -2546,7 +2555,11 @@ def _repository_root(repository: Path) -> Path:
     return root
 
 
-def _verify_repository_identity(root: Path, expected: str) -> None:
+def _verify_repository_identity(
+    root: Path,
+    expected: str,
+    expected_id: int,
+) -> None:
     completed = subprocess.run(
         ["git", "-C", str(root), "remote", "get-url", "origin"],
         check=False,
@@ -2560,7 +2573,35 @@ def _verify_repository_identity(root: Path, expected: str) -> None:
         raise typer.BadParameter("repository origin is unavailable")
     remote = completed.stdout.strip().removesuffix(".git")
     normalized = remote.replace("git@github.com:", "https://github.com/")
-    if normalized != f"https://github.com/{expected}":
+    if normalized == f"https://github.com/{expected}":
+        return
+    try:
+        parsed = urlsplit(remote)
+        proxy_port = parsed.port
+    except ValueError:
+        parsed = None
+        proxy_port = None
+    proxy_path = (
+        ""
+        if parsed is None
+        else parsed.path.removeprefix("/").removesuffix(".git")
+    )
+    trusted_proxy = (
+        parsed is not None
+        and os.environ.get("GITHUB_ACTIONS", "").casefold() == "true"
+        and os.environ.get("GITHUB_EVENT_NAME") == "dynamic"
+        and os.environ.get("GITHUB_REPOSITORY") == expected
+        and os.environ.get("GITHUB_REPOSITORY_ID") == str(expected_id)
+        and parsed.scheme == "http"
+        and parsed.hostname in {"localhost", "127.0.0.1"}
+        and proxy_port is not None
+        and parsed.username is None
+        and parsed.password is None
+        and not parsed.query
+        and not parsed.fragment
+        and proxy_path == expected
+    )
+    if not trusted_proxy:
         raise typer.BadParameter("repository origin does not match metadata")
 
 
