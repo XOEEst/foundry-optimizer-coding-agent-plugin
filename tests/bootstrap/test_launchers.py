@@ -85,6 +85,7 @@ def test_bash_launcher_contains_sha_and_uvlock_checks() -> None:
     assert "uv.lock" in text
     assert "rev-parse HEAD" in text
     assert "git -C \"$extract_root\" init" in text
+    assert "command -v python3 || command -v python" in text
     assert "uv sync --frozen" in text
     assert "exec uv run --no-sync" in text
 
