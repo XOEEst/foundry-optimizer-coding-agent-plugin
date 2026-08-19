@@ -3,7 +3,7 @@ distribution:
   schema_version: 1
   repository: https://github.com/XOEEst/foundry-optimizer-coding-agent-plugin.git
   channel: reviewed
-  pin: 6f6e5249356b4680184cd4b3376b60c33b2fa4fb
+  pin: 0ed83d9b8add3e3bf565e76a9789fd9e6fe267d1
 github:
   schema_version: 1
   optimizer_environment: copilot
