@@ -478,7 +478,7 @@ def test_definitions_bind_real_azure_ai_evaluator_graders() -> None:
         assert all("source" not in item for item in criteria)
         by_name = {item["name"]: item for item in criteria}
         for safety_name in REQUIRED_SAFETY_EVALUATORS:
-            grader = by_name[f"builtin.{safety_name}"]
+            grader = by_name[safety_name]
             assert grader["evaluator_name"] == f"builtin.{safety_name}"
             assert grader["evaluator_version"] == SAFETY_CATALOG_VERSION
             assert grader["data_mapping"] == {"query": "{{item.query}}", "response": "{{sample.output_text}}"}
@@ -492,7 +492,7 @@ def test_definitions_bind_real_azure_ai_evaluator_graders() -> None:
         # AI-assisted evaluators are initialized with the judge deployment; safety built-ins
         # take no initialization parameters (matches the official SDK sample).
         assert objective["initialization_parameters"] == {"deployment_name": "baseline-model"}
-        assert all("initialization_parameters" not in by_name[f"builtin.{name}"] for name in REQUIRED_SAFETY_EVALUATORS)
+        assert all("initialization_parameters" not in by_name[name] for name in REQUIRED_SAFETY_EVALUATORS)
 
 
 def test_custom_evaluator_initialization_uses_its_declared_schema() -> None:
