@@ -487,7 +487,7 @@ def test_definitions_bind_real_azure_ai_evaluator_graders() -> None:
         assert objective["evaluator_version"] == "2"
         assert objective["data_mapping"] == {
             "query": "{{item.query}}",
-            "response": "{{sample.output_items}}",
+            "response": "{{sample.output_text}}",
         }
         # AI-assisted evaluators are initialized with the judge deployment; safety built-ins
         # take no initialization parameters (matches the official SDK sample).
@@ -510,6 +510,27 @@ def test_custom_evaluator_initialization_uses_its_declared_schema() -> None:
         },
         "baseline-model",
     ) == {"model": "baseline-model"}
+
+
+def test_custom_evaluator_mapping_uses_declared_response_type() -> None:
+    assert FoundryAdapter._evaluator_data_mapping(
+        {
+            "raw": {
+                "definition": {
+                    "data_schema": {
+                        "properties": {
+                            "query": {"type": "string"},
+                            "response": {"type": "string"},
+                            "messages": {"type": "array"},
+                        }
+                    }
+                }
+            }
+        }
+    ) == {
+        "query": "{{item.query}}",
+        "response": "{{sample.output_text}}",
+    }
 
 
 def test_activation_runs_use_target_completions_against_the_split_datasets() -> None:
