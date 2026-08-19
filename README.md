@@ -21,10 +21,12 @@ Pre-release. Do not use floating `main` for privileged workflows until the
 documented branch-protection policy is enabled. Generated customer templates
 currently pin reviewed runtime `770ad878f0658e9368b042d9a7f6732e49ff0200`.
 
-The retained development pilot completed repository bootstrap, evaluation
-activation, validation, and Copilot setup. GitHub-hosted Foundry publication is
-blocked by the selected Microsoft tenant's enterprise-claim policy; no static
-credential fallback is provided.
+The synthetic multi-agent pilot completed repository bootstrap, evaluation
+activation, validation, and Copilot setup; its personal repository correctly
+fails the selected tenant's enterprise-claim policy. Live acceptance completed
+on `microsoft-foundry/luffy-test-agent-repo-002`: public-runtime setup and
+validation passed, deployment reconciled version 15, and Copilot issue #110
+finished with a receipt-backed no-winner decision.
 
 ## Distribution trust
 
