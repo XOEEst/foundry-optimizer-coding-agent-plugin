@@ -1463,15 +1463,46 @@ class FoundryAdapter:
 
         if require_operation_created and (draft_agent_name, draft_agent_version) not in self._created_drafts:
             return {'draft_agent_name': draft_agent_name, 'draft_agent_version': draft_agent_version, 'completed': False, 'skipped': 'draft was not created by this operation'}
-        deleter = getattr(self._client.agents, 'delete_version', None)
-        if not callable(deleter):
-            raise FoundryUnsupportedCapabilityError('agent draft version deletion unavailable', kind='unsupported_preview')
-        try:
-            deleter(draft_agent_name, draft_agent_version, force=True)
-        except ResourceNotFoundError:
-            pass
-        except Exception as exc:
-            raise self._classify_error(exc) from exc
+        if self._injected_client:
+            deleter = getattr(self._client.agents, 'delete_version', None)
+            if not callable(deleter):
+                raise FoundryUnsupportedCapabilityError('agent draft version deletion unavailable', kind='unsupported_preview')
+            try:
+                deleter(draft_agent_name, draft_agent_version, force=True)
+            except ResourceNotFoundError:
+                pass
+            except Exception as exc:
+                raise self._classify_error(exc) from exc
+        else:
+            token = self._credential.get_token('https://ai.azure.com/.default')
+            url = (
+                f"{self._project_endpoint.rstrip('/')}/agents/"
+                f"{quote(draft_agent_name, safe='')}/versions/{quote(draft_agent_version, safe='')}"
+            )
+            try:
+                response = httpx.delete(
+                    url,
+                    params={'force': 'true', 'api-version': 'v1'},
+                    headers={
+                        'Authorization': f'Bearer {token.token}',
+                        'Accept': 'application/json',
+                        'Accept-Encoding': 'identity',
+                    },
+                    timeout=self._request_timeout,
+                )
+            except httpx.HTTPError:
+                if self._get_agent_version(draft_agent_name, draft_agent_version) is not None:
+                    raise FoundryNetworkError('agent draft deletion failed', kind='network', retryable=True) from None
+            else:
+                if response.status_code not in {200, 202, 204, 404}:
+                    raise FoundryPlatformError(
+                        'agent draft deletion was rejected',
+                        kind='platform',
+                        retryable=response.status_code >= 500,
+                        status_code=response.status_code,
+                    )
+            if self._get_agent_version(draft_agent_name, draft_agent_version) is not None:
+                raise FoundryPrerequisiteError('agent draft deletion was not observed', kind='prerequisite')
         self._created_drafts.pop((draft_agent_name, draft_agent_version), None)
         return {'draft_agent_name': draft_agent_name, 'draft_agent_version': draft_agent_version, 'completed': True}
 
