@@ -81,6 +81,11 @@ class _Poller:
         return result
 
 
+class _BrokenContinuationPoller(_Poller):
+    def continuation_token(self) -> str:
+        raise ValueError("continuation serialization failed")
+
+
 class _Jobs:
     def __init__(self, create_results: list[object] | None = None, list_result: list[object] | None = None, *, versions: dict[tuple[str, str], object] | None = None, fail_delete_version: set[tuple[str, str]] | None = None, generation_jobs: list[object] | None = None) -> None:
         self.create_calls: list[tuple[object, str | None, str | None]] = []
@@ -560,6 +565,40 @@ def test_evaluator_submission_reconciles_a_job_without_a_continuation_token() ->
     assert handle.continuation_token == "job-id:evaluatorgen-1"
     assert result["saved_evaluator"]["version"] == "1"
     assert jobs.create_calls == []
+
+
+def test_evaluator_submission_reconciles_when_poller_token_extraction_fails() -> None:
+    generation_job = _SdkValue(
+        {
+            "id": "evaluatorgen-1",
+            "status": "in_progress",
+            "inputs": {
+                "model": "gpt-4.1",
+                "evaluator_name": "quality",
+                "sources": [{"type": "agent", "agent_name": "agent", "agent_version": "1"}],
+            },
+        }
+    )
+    jobs = _Jobs(
+        create_results=[_BrokenContinuationPoller([])],
+        generation_jobs=[generation_job],
+    )
+    adapter = FoundryAdapter(
+        "https://account.services.ai.azure.com/api/projects/demo",
+        _Cred(),
+        client=_Client(beta=_Beta(datasets=_Jobs(), evaluators=jobs)),
+    )
+
+    handle = adapter.create_evaluator_generation_job(
+        {
+            "operation_id": "rubric-operation-1",
+            "sources": [{"type": "agent", "agent_name": "agent", "agent_version": "1"}],
+            "model": "gpt-4.1",
+            "evaluator_name": "quality",
+        }
+    )
+
+    assert handle.continuation_token == "job-id:evaluatorgen-1"
 
 
 def test_injected_submission_errors_do_not_wait_for_live_visibility() -> None:

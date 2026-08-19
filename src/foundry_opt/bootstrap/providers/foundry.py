@@ -1900,7 +1900,24 @@ class FoundryAdapter:
                     created=True,
                 )
             raise self._classify_error(exc) from exc
-        token, url = self._poller_seam(poller)
+        try:
+            token, url = self._poller_seam(poller)
+        except Exception as exc:
+            reconciled = self._find_evaluator_generation_job(request)
+            if reconciled is None and not self._injected_client:
+                visibility_deadline = self._time() + self._request_timeout
+                while reconciled is None and self._time() < visibility_deadline:
+                    self._sleep(self._default_poll_interval)
+                    reconciled = self._find_evaluator_generation_job(request)
+            if reconciled is not None:
+                return FoundryOperationHandle(
+                    operation_id=operation_id,
+                    job_kind='evaluator_generation',
+                    continuation_token=f"job-id:{reconciled['id']}",
+                    polling_url=None,
+                    created=True,
+                )
+            raise self._classify_error(exc) from exc
         return FoundryOperationHandle(operation_id=operation_id, job_kind='evaluator_generation', continuation_token=token, polling_url=url, created=True)
 
     def _find_evaluator_generation_job(self, request: Mapping[str, object]) -> Mapping[str, object] | None:
