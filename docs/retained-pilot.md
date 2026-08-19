@@ -17,7 +17,7 @@ inactive ready-unbound fixture.
 | Copilot setup | Pilot run [`32258753085`](https://github.com/XOEEst/foundry-bootstrap-pilot/actions/runs/32258753085) passed, including pinned `uv` fallback in the preserved customer workflow. |
 | Deployment preflight | Run [`32258753043`](https://github.com/XOEEst/foundry-bootstrap-pilot/actions/runs/32258753043) selected only the enabled root and froze the exact source, registry hash, sidecar hash, objective hash, and repository-default evaluator ID. |
 
-## Retained blocker
+## Synthetic repository boundary
 
 The deployment run stopped before any Foundry request with structured
 `status=blocked`. Microsoft Entra returned `AADSTS7002381`: this tenant accepts
@@ -32,10 +32,27 @@ subject:
 repo:XOEEst@18523445/foundry-bootstrap-pilot@1337678711:environment:foundry-production
 ```
 
-Changing the subject cannot add the missing enterprise claim. The optimize
-issue and merge-publication acceptance gates therefore remain blocked for this
-selected project/repository pair. The runtime does not fall back to static
-Azure credentials or broaden RBAC.
+Changing the subject cannot add the missing enterprise claim. That repository
+therefore remains bootstrap-shape and evaluation-activation evidence only. The
+runtime does not fall back to static Azure credentials or broaden RBAC.
+
+## Live enterprise acceptance
+
+Live optimize/deploy acceptance uses a separate private enterprise-owned agent
+code repository. Retained evidence confirms:
+
+- exact public HTTPS runtime cutover with the private deploy key removed
+- successful public CLI/skill setup and target-contract validation
+- merge-deployment reconciliation of the existing regular version with safety
+  at 1.0 and no route mutation
+- one fresh baseline and exactly two changed candidates
+- both candidates discarded at zero aggregate delta with safety at 1.0
+- final `no_winner`, no validating run, and an unchanged closed draft PR
+- all owned optimize drafts removed and the existing regular version retained
+
+The Copilot workflow reports `cancelled` after the no-winner path closes its own
+draft PR, but the broker had already persisted baseline, both candidate
+results, and the final receipt-backed decision.
 
 ## Retained resources and cost posture
 
@@ -50,6 +67,6 @@ Azure credentials or broaden RBAC.
 - the bounded generation/evaluation work stayed within the approved 30-case,
   one-generation-job, one-evaluator-job, and retry/deadline limits
 
-Further live acceptance requires either a qualifying enterprise-owned GitHub
-repository or a development Foundry project in a tenant that accepts this
-repository's OIDC enterprise claim.
+The personal synthetic repository still requires a compatible tenant or
+enterprise owner for its own publication, but it is no longer a blocker for
+the completed customer bootstrap acceptance.
