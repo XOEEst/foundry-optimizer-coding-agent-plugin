@@ -110,7 +110,11 @@ jobs:
           registry = RootRegistry.from_document((root / '.foundry-opt' / 'registry.yaml').read_text(encoding='utf-8'))
           protected = ['.foundry-opt/'] + [agent.config_path for agent in registry.agents]
           for agent in registry.agents:
-              sidecar = BootstrapSidecar.from_document((root / agent.config_path).read_text(encoding='utf-8'))
+              sidecar_path = root / agent.config_path
+              if not sidecar_path.exists():
+                  assert not agent.enabled, f'enabled agent sidecar is missing: {agent.config_path}'
+                  continue
+              sidecar = BootstrapSidecar.from_document(sidecar_path.read_text(encoding='utf-8'))
               for editable in sidecar.editable_paths:
                   assert editable != '.foundry-opt/**'
                   assert not editable.startswith('.foundry-opt/')
