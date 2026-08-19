@@ -243,9 +243,22 @@ def test_project_without_the_fictitious_aggregate_still_resolves_the_bundle() ->
 
     catalog_ids = {item["id"] for item in adapter.inventory_evaluators(include_builtin=True)}
     assert LEGACY_AGGREGATE_SAFETY_ID not in catalog_ids
-    assert [item["safety_name"] for item in bundle][:5] == list(REQUIRED_SAFETY_EVALUATORS)
+    assert [item["safety_name"] for item in bundle] == list(REQUIRED_SAFETY_EVALUATORS)
     assert bundle[0]["id"] == registry_evaluator_id("violence")
     assert bundle[0]["version"] == SAFETY_CATALOG_VERSION
+
+
+def test_optional_safety_evaluator_is_used_only_when_explicitly_required() -> None:
+    adapter, _ = build_fake_adapter()
+
+    bundle = adapter.resolve_safety_bundle(
+        (*REQUIRED_SAFETY_EVALUATORS, "protected_material")
+    )
+
+    assert [item["safety_name"] for item in bundle] == [
+        *REQUIRED_SAFETY_EVALUATORS,
+        "protected_material",
+    ]
 
 
 def test_legacy_aggregate_is_used_only_when_the_project_returns_it() -> None:

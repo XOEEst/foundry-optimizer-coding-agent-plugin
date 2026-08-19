@@ -752,7 +752,7 @@ def build_fake_adapter(
         runs.on_synthetic_create = _restore_synthetic_dataset
     runs.fail_create = fail_run_create
     if definitions_exist:
-        criteria = existing_definition_criteria if existing_definition_criteria is not None else onboarding_definition_criteria(safety_names=safety_names)
+        criteria = existing_definition_criteria if existing_definition_criteria is not None else onboarding_definition_criteria(safety_names=SAFETY_EVALUATOR_NAMES[:5])
         config = existing_definition_config if existing_definition_config is not None else {
             "type": "custom",
             "item_schema": {
