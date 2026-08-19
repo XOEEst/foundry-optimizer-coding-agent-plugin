@@ -2556,6 +2556,7 @@ class FoundryAdapter:
             per_criterion = payload.get('per_testing_criteria_results')
         if not isinstance(per_criterion, Sequence) or isinstance(per_criterion, (str, bytes, bytearray)) or not per_criterion:
             raise FoundryPrerequisiteError('activation run reported no testing-criteria measurements', kind='prerequisite')
+        row_scores = self.run_criterion_scores(run_id=run_id, definition_id=definition_id)
         measurements: list[ActivationCaseFinalization] = []
         seen: set[str] = set()
         for item in per_criterion:
@@ -2579,6 +2580,9 @@ class FoundryAdapter:
             normalization_kind = str(criterion['normalization_kind'])
             if normalization_kind == 'scalar':
                 score = entry.get('score')
+                if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(float(score)):
+                    scores = row_scores.get(name, ())
+                    score = math.fsum(scores) / len(scores) if scores else None
                 if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(float(score)):
                     raise FoundryPrerequisiteError('scalar activation criterion reported no finite score', kind='prerequisite')
                 measurement = ActivationCaseFinalization(
@@ -2608,6 +2612,44 @@ class FoundryAdapter:
         if missing:
             raise FoundryPrerequisiteError('activation run did not measure every approved evaluator', kind='prerequisite')
         return tuple(measurements)
+
+    def run_criterion_scores(self, *, run_id: str, definition_id: str) -> Mapping[str, tuple[float, ...]]:
+        """Extract only finite per-criterion scores from bounded output items."""
+
+        client = self._openai_observer_client()
+        output_items = getattr(getattr(client.evals, 'runs', None), 'output_items', None)
+        lister = getattr(output_items, 'list', None)
+        if not callable(lister):
+            return {}
+        scores: dict[str, list[float]] = {}
+        try:
+            items = lister(run_id=run_id, eval_id=definition_id)
+            count = 0
+            for item in items:
+                count += 1
+                if count > _MAX_RUN_OUTPUT_ITEMS:
+                    raise FoundryPrerequisiteError('evaluation run reported more output items than the supported budget', kind='prerequisite')
+                entry = _as_mapping(item)
+                results = entry.get('results')
+                if not isinstance(results, Sequence) or isinstance(results, (str, bytes, bytearray)):
+                    continue
+                for result in results:
+                    result_entry = _as_mapping(result)
+                    name = result_entry.get('name') or result_entry.get('testing_criteria')
+                    score = result_entry.get('score')
+                    if (
+                        isinstance(name, str)
+                        and name
+                        and not isinstance(score, bool)
+                        and isinstance(score, (int, float))
+                        and math.isfinite(float(score))
+                    ):
+                        scores.setdefault(name, []).append(float(score))
+        except FoundryAdapterError:
+            raise
+        except Exception as exc:
+            raise self._classify_error(exc) from exc
+        return {name: tuple(values) for name, values in scores.items()}
 
     def create_or_adopt_onboarding_definition(self, *, role: str, definition_name: str, dataset: Mapping[str, object], criteria: Mapping[str, Mapping[str, object]]) -> Mapping[str, object]:
         """Create or adopt the immutable definition that measures every approved evaluator.

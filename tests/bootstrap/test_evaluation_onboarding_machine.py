@@ -551,6 +551,39 @@ def test_activation_submission_reconciles_a_run_before_create_returns() -> None:
     assert _finalization(adapter, receipt).activation.status == "succeeded"
 
 
+def test_scalar_activation_score_is_aggregated_from_output_items() -> None:
+    contract = build_contract()
+    adapter, fakes = build_fake_adapter()
+    for phase in ("development", "validating"):
+        fakes["runs"].measurements[phase][0].pop("score")
+
+    def _output_items(*, run_id, eval_id):
+        del run_id, eval_id
+        return [
+            {
+                "results": [
+                    {
+                        "type": "azure_ai_evaluator",
+                        "name": "quality-eval",
+                        "score": score,
+                    }
+                ]
+            }
+            for score in (0.5, 0.7, 0.9)
+        ]
+
+    fakes["runs"].output_items.list = _output_items
+
+    receipt = adapter.apply_resources(_plan(contract, operation_id="op-row-scores"))
+    objective_cases = [
+        item
+        for item in _finalization(adapter, receipt).activation.cases
+        if item.evaluator_id.endswith("/evaluators/quality-eval/versions/2")
+    ]
+
+    assert [item.score for item in objective_cases] == pytest.approx([0.7, 0.7])
+
+
 def test_synthetic_generation_uses_the_real_agent_run_and_output_dataset_id() -> None:
     contract = build_contract()
     adapter, fakes = build_fake_adapter(generated_samples=30)
