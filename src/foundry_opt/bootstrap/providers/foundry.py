@@ -117,6 +117,7 @@ _MAX_AGENT_CODE_ENTRIES = 2000
 _MAX_DATASET_BYTES = 32 * 1024 * 1024
 _MAX_DATASET_FILES = 32
 _MAX_DATASET_ROWS = 5000
+_MAX_ACTIVATION_ATTEMPTS = 2
 _DATASET_ROW_ID_FIELDS = ('row_id', 'rowId', 'id', 'case_id', 'caseId', 'sample_id', 'sampleId', 'item_id', 'itemId')
 _SUPPORTED_DATASET_SUFFIXES = ('.jsonl', '.ndjson', '.csv')
 
@@ -3588,17 +3589,39 @@ class FoundryAdapter:
                     draft_agent_name=contract.activation_plan.draft_agent_name,
                     draft_agent_version=contract.activation_plan.draft_agent_version,
                 )
-                run_id = self._submit_eval_run(
-                    definition_id=definition_ids[role],
-                    data_source=data_source,
-                    run_name=self._operation_run_name(
-                        f'{role}-activation',
-                        plan.operation_id,
-                    ),
-                )
-                run_ids[role] = run_id
-                record(_ResourceDraft(suffix=f'activation-run:{role}', resource_id=run_id, name=definition_ids[role], version=role, kind='activation_run', disposition='created'))
-                measurements.extend(self.activation_measurements(run_id=run_id, definition_id=definition_ids[role], phase=role, criteria=criteria))
+                for attempt in range(1, _MAX_ACTIVATION_ATTEMPTS + 1):
+                    run_id = self._submit_eval_run(
+                        definition_id=definition_ids[role],
+                        data_source=data_source,
+                        run_name=self._operation_run_name(
+                            f'{role}-activation-{attempt}',
+                            plan.operation_id,
+                        ),
+                    )
+                    record(
+                        _ResourceDraft(
+                            suffix=f'activation-run:{role}:attempt-{attempt}',
+                            resource_id=run_id,
+                            name=definition_ids[role],
+                            version=role,
+                            kind='activation_run',
+                            disposition='created',
+                        )
+                    )
+                    try:
+                        phase_measurements = self.activation_measurements(
+                            run_id=run_id,
+                            definition_id=definition_ids[role],
+                            phase=role,
+                            criteria=criteria,
+                        )
+                    except FoundryPrerequisiteError as exc:
+                        if attempt < _MAX_ACTIVATION_ATTEMPTS and 'reported execution errors' in str(exc):
+                            continue
+                        raise
+                    run_ids[role] = run_id
+                    measurements.extend(phase_measurements)
+                    break
             self._assert_activation_gates(bounds, measurements)
         finally:
             # The owned draft is always cleaned up, whether or not the gates passed. Only a

@@ -564,6 +564,35 @@ def test_activation_submission_reconciles_a_run_before_create_returns() -> None:
     assert _finalization(adapter, receipt).activation.status == "succeeded"
 
 
+def test_activation_retries_one_execution_error_run() -> None:
+    contract = build_contract()
+    adapter, fakes = build_fake_adapter()
+    original = adapter.activation_measurements
+    failed_once = False
+
+    def _flaky_measurements(**kwargs):
+        nonlocal failed_once
+        if kwargs["phase"] == "development" and not failed_once:
+            failed_once = True
+            raise FoundryPrerequisiteError(
+                "activation criterion quality-eval reported execution errors: 1",
+                kind="prerequisite",
+            )
+        return original(**kwargs)
+
+    adapter.activation_measurements = _flaky_measurements
+
+    receipt = adapter.apply_resources(_plan(contract, operation_id="op-retry-errors"))
+
+    activation_runs = [
+        call
+        for call in fakes["runs"].create_calls
+        if call[1]["type"] == "azure_ai_target_completions"
+    ]
+    assert receipt.error_info is None
+    assert len(activation_runs) == 3
+
+
 def test_scalar_activation_score_is_aggregated_from_output_items() -> None:
     contract = build_contract()
     adapter, fakes = build_fake_adapter()
