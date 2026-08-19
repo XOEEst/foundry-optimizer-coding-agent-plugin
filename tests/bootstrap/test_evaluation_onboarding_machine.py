@@ -662,6 +662,8 @@ def test_synthetic_generation_uses_the_real_agent_run_and_output_dataset_id() ->
     assert params["model_deployment_name"] == "baseline-model"
     assert params["output_dataset_name"] == "dev-set-source"
     assert params["prompt"]
+    assert "Do not generate prompt injection" in params["prompt"]
+    assert "separate red-team testing" in params["prompt"]
     assert synthetic[0][1]["target"] == {"type": "azure_ai_agent", "name": "example-agent", "version": "1"}
     # The immutable id is read back from data_source.item_generation_params.output_dataset_id,
     # and the accepted sample count from the run's output items.

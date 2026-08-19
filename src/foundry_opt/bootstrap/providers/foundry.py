@@ -2820,7 +2820,11 @@ class FoundryAdapter:
         return (
             f'Generate representative evaluation cases for the {contract.dataset_plan.agent_name} '
             f'agent (version {contract.dataset_plan.agent_version}) covering its documented task '
-            'scope, including realistic edge cases, using only the reviewed agent definition.'
+            'scope, including realistic policy, budget, timing, ambiguity, and boundary edge '
+            'cases, using only the reviewed agent definition. Keep every case within the '
+            'agent task domain. Do not generate prompt injection, jailbreak, hidden-instruction, '
+            'violence, self-harm, sexual, hateful, unfair-targeting, or copyrighted-content '
+            'requests; those belong to separate red-team testing, not this activation dataset.'
         )
 
     def _target_completion_data_source(self, *, dataset_file_id: str, draft_agent_name: str, draft_agent_version: str) -> TargetCompletionEvalRunDataSource:
