@@ -17,8 +17,10 @@ Every operation must:
 5. record the runtime commit in its receipt
 6. reuse the recorded commit when resuming
 
-Customer templates currently demonstrate the exact-pin compatibility contract.
-The guided bootstrap will add a channel option while preserving explicit pins.
+Customer templates and generated bootstrap plans use this exact-pin contract.
+The current reviewed customer runtime is
+`6f6e5249356b4680184cd4b3376b60c33b2fa4fb`; later upgrades must select a new
+reviewed commit explicitly and refresh the managed lock.
 
 ## Rollback
 
