@@ -1097,6 +1097,71 @@ def test_preflight_checks_foundry_route_when_online(
     assert len(captured_calls) == 1
 
 
+def test_preflight_accepts_exact_copilot_git_proxy_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repository, _, environment = _create_runtime_repository(tmp_path)
+    _git(
+        repository,
+        "remote",
+        "add",
+        "origin",
+        "http://localhost:26831/example-org/example-agent",
+    )
+    environment.update(
+        {
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_EVENT_NAME": "dynamic",
+            "GITHUB_REPOSITORY": "example-org/example-agent",
+            "GITHUB_REPOSITORY_ID": "123456789",
+        }
+    )
+    monkeypatch.setattr(cli_module, "detect_github_actions_oidc", lambda: True)
+    monkeypatch.setattr(
+        cli_module,
+        "capture_route_fingerprint",
+        lambda **_: _route(),
+    )
+
+    result = _invoke(
+        ["preflight", "--repository", str(repository)],
+        environment,
+    )
+
+    assert result.exit_code == 0, result.stdout
+
+
+def test_preflight_rejects_copilot_proxy_with_wrong_repository_id(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repository, _, environment = _create_runtime_repository(tmp_path)
+    _git(
+        repository,
+        "remote",
+        "add",
+        "origin",
+        "http://localhost:26831/example-org/example-agent",
+    )
+    environment.update(
+        {
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_EVENT_NAME": "dynamic",
+            "GITHUB_REPOSITORY": "example-org/example-agent",
+            "GITHUB_REPOSITORY_ID": "987654321",
+        }
+    )
+    monkeypatch.setattr(cli_module, "detect_github_actions_oidc", lambda: True)
+
+    result = _invoke(
+        ["preflight", "--repository", str(repository)],
+        environment,
+    )
+
+    assert result.exit_code != 0
+
+
 def test_job_start_two_candidates_winner_and_finish(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
