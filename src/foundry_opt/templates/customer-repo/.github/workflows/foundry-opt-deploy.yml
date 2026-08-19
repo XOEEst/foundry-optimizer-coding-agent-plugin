@@ -43,7 +43,7 @@ jobs:
         run: |
           set -euo pipefail
           repository="https://github.com/XOEEst/foundry-optimizer-coding-agent-plugin.git"
-          commit="6f6e5249356b4680184cd4b3376b60c33b2fa4fb"
+          commit="0ed83d9b8add3e3bf565e76a9789fd9e6fe267d1"
           shared_root="$RUNNER_TEMP/foundry-opt-shared"
           rm -rf "$shared_root"
           git init "$shared_root"
@@ -150,7 +150,7 @@ jobs:
         run: |
           set -euo pipefail
           repository="https://github.com/XOEEst/foundry-optimizer-coding-agent-plugin.git"
-          commit="6f6e5249356b4680184cd4b3376b60c33b2fa4fb"
+          commit="0ed83d9b8add3e3bf565e76a9789fd9e6fe267d1"
           shared_root="$RUNNER_TEMP/foundry-opt-shared"
           rm -rf "$shared_root"
           git init "$shared_root"

@@ -102,7 +102,7 @@ evaluation_lineage:
     plan_hash: d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3
     approval_hash: d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4
     receipt_hash: d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5
-    runtime_commit: 6f6e5249356b4680184cd4b3376b60c33b2fa4fb
+    runtime_commit: 0ed83d9b8add3e3bf565e76a9789fd9e6fe267d1
 max_issue_evaluators: 8
 hard_guardrails:
   - schema_version: 1

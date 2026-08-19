@@ -19,7 +19,7 @@ repository until the public documentation is complete.
 
 Pre-release. Do not use floating `main` for privileged workflows until the
 documented branch-protection policy is enabled. Generated customer templates
-currently pin reviewed runtime `6f6e5249356b4680184cd4b3376b60c33b2fa4fb`.
+currently pin reviewed runtime `0ed83d9b8add3e3bf565e76a9789fd9e6fe267d1`.
 
 The retained development pilot completed repository bootstrap, evaluation
 activation, validation, and Copilot setup. GitHub-hosted Foundry publication is
