@@ -19,7 +19,7 @@ ISSUE_FORM_PATH = CUSTOMER_TEMPLATE_ROOT / ".github" / "ISSUE_TEMPLATE" / "found
 WORKFLOW_ROOT = CUSTOMER_TEMPLATE_ROOT / ".github" / "workflows"
 EXPECTED_WORKFLOWS = {"agent-ci.yml", "copilot-setup-steps.yml", "foundry-opt-validation.yml", "foundry-opt-deploy.yml"}
 FIXTURE_ROOT = REPOSITORY_ROOT / "tests" / "bootstrap" / "fixtures" / "templates"
-RUNTIME_SHA = "7972654051b9cce644836c69ef94a43c0f68ded1"
+RUNTIME_SHA = "b36321a2893d4e9717b85ea12b8f5206c91845b8"
 LEGACY_RUNTIME_SHA = "c899b718f3baebcfd08209ee5184d0cf61d8153d"
 FORBIDDEN_STRINGS = ("FOUNDRY_OPT_SHARED_REPO_SSH_KEY", "git@github.com", "known_hosts", "StrictHostKeyChecking")
 
