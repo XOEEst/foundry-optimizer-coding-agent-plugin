@@ -26,6 +26,57 @@ def test_discovery_is_deterministic_and_json_uses_relative_root(tmp_path: Path) 
     assert str(repo) not in discovery_result_json(first)
 
 
+def test_root_metadata_infers_source_root_from_legacy_policy(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _write(
+        repo / ".foundry" / "agent-metadata.yaml",
+        "\n".join(
+            (
+                "schema_version: 1",
+                "project_endpoint: https://example",
+                "agent_name: luffy",
+            )
+        )
+        + "\n",
+    )
+    _write(
+        repo / ".github" / "foundry-optimizer.yaml",
+        "\n".join(
+            (
+                "schema_version: 1",
+                "source_root: agent",
+                "editable_paths: [agent/**]",
+                "metadata_path: .foundry/agent-metadata.yaml",
+            )
+        )
+        + "\n",
+    )
+    _write(
+        repo / "agent" / "main.py",
+        "\n".join(
+            (
+                "from agent_framework import Agent",
+                "from agent_framework_foundry_hosting import ResponsesHostServer",
+                "def create_responses_host():",
+                "    return ResponsesHostServer(Agent())",
+            )
+        )
+        + "\n",
+    )
+
+    result = discover_repository_agents(repo)
+
+    assert len(result.agents) == 1
+    agent = result.agents[0]
+    assert agent.root == "."
+    assert agent.sourceRoot == "agent"
+    assert agent.packageRoot == "agent"
+    assert agent.configPath == ".foundry/agent-metadata.yaml"
+    assert agent.bindingAssessment.classification == "bound-unknown"
+    assert agent.blockers == ()
+    assert any(item.kind == "repository-policy" for item in agent.evidence)
+
+
 def test_exact_allowlist_and_blocked_declared_roots(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _write(repo / ".hidden" / "main.py", "import fastapi\n")
