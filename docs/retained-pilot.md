@@ -54,6 +54,19 @@ The Copilot workflow reports `cancelled` after the no-winner path closes its own
 draft PR, but the broker had already persisted baseline, both candidate
 results, and the final receipt-backed decision.
 
+A subsequent bounded issue proved the complete winner path on the same private
+enterprise-owned repository:
+
+- fresh baseline `0.5000`
+- exactly two candidates; winner development score `1.0000`
+- validating score `0.8889`, safety `1.0000`, zero focused regressions
+- reviewed PR containing only the evaluated winner
+- automatic exact-merge deployment from previous version 15 to active version
+  16
+- deployment draft cleanup, latest-version verification, and no route mutation
+- managed-session invocation confirmed the new behavior; the verification
+  session was deleted
+
 ## Retained resources and cost posture
 
 - public pilot repository and public runtime repository: no paid GitHub Actions
