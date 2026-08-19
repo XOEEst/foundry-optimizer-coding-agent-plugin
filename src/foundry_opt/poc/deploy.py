@@ -868,8 +868,14 @@ def load_registered_deployment_settings(
     tenant_id = _required_environment_value(env, REGISTERED_TENANT_ID_ENV)
     subscription_id = _subscription_id(sidecar.foundry_project.account_resource_id)
     deployment_environment = sidecar.deployment.environment
+    subject_prefix = _registered_oidc_subject_prefix(
+        registry,
+        environment=env,
+        repository_identity=repository_identity,
+        repository_id=repository_id,
+    )
     expected_subject = (
-        f"repo:{repository_identity}:environment:{deployment_environment}"
+        f"{subject_prefix}:environment:{deployment_environment}"
     )
     oidc_config = GitHubActionsOidcConfig(
         tenant_id=tenant_id,
@@ -887,6 +893,7 @@ def load_registered_deployment_settings(
         subscription_id=subscription_id,
         client_id=trusted_client_id,
         client_id_variable=registry.github.client_id_variable,
+        oidc_subject_prefix=subject_prefix,
     )
     return RegisteredDeploymentSettings(
         repository_root=root,
@@ -1097,6 +1104,7 @@ def _registered_agent_metadata(
     subscription_id: str,
     client_id: str,
     client_id_variable: str,
+    oidc_subject_prefix: str,
 ) -> AgentMetadata:
     sidecar = selection.sidecar
     evaluator_ids = tuple(
@@ -1111,7 +1119,7 @@ def _registered_agent_metadata(
         )
     )
     deployment_environment = sidecar.deployment.environment
-    subject = f"repo:{repository_identity}:environment:{deployment_environment}"
+    subject = f"{oidc_subject_prefix}:environment:{deployment_environment}"
     return AgentMetadata.model_validate(
         {
             "schema_version": 1,
@@ -1222,6 +1230,32 @@ def _subscription_id(resource_id: str) -> str:
     raise RuntimeIntegrationError(
         "Foundry account resource id omitted the subscription id"
     )
+
+
+def _registered_oidc_subject_prefix(
+    registry: RootRegistry,
+    *,
+    environment: Mapping[str, str],
+    repository_identity: str,
+    repository_id: int,
+) -> str:
+    configured = (
+        registry.github.oidc_subject_prefix
+        or f"repo:{repository_identity}"
+    )
+    owner, repository = repository_identity.split("/", 1)
+    legacy = f"repo:{repository_identity}"
+    owner_id = environment.get("GITHUB_REPOSITORY_OWNER_ID")
+    immutable = (
+        None
+        if not isinstance(owner_id, str) or not owner_id.isdigit()
+        else f"repo:{owner}@{owner_id}/{repository}@{repository_id}"
+    )
+    if configured != legacy and configured != immutable:
+        raise RuntimeIntegrationError(
+            "committed OIDC subject prefix does not match GitHub repository identity"
+        )
+    return configured
 
 
 def _normalized_text_bytes(value: bytes) -> bytes:

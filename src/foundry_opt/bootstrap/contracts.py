@@ -16,6 +16,15 @@ Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 GitCommit = Annotated[str, StringConstraints(pattern=r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")]
 RepositoryIdentity = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")]
 RepositoryUrl = Annotated[str, StringConstraints(pattern=r"^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?$")]
+GitHubOidcSubjectPrefix = Annotated[
+    str,
+    StringConstraints(
+        pattern=(
+            r"^repo:[A-Za-z0-9_.-]+(?:@[0-9]+)?/"
+            r"[A-Za-z0-9_.-]+(?:@[0-9]+)?$"
+        )
+    ),
+]
 AgentId = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")]
 DatasetUri = Annotated[str, StringConstraints(pattern=r"^azureai://accounts/[^/]+/projects/[^/]+/data/[^/]+/versions/[^/]+$")]
 VersionedEvaluatorUri = Annotated[str, StringConstraints(pattern=r"^azureai://accounts/[^/]+/projects/[^/]+/evaluators/[^/]+/versions/[^/]+$")]
@@ -117,6 +126,19 @@ class GitHubSettings(BootstrapDocument):
     optimizer_environment: str
     deployment_environment: str
     client_id_variable: str
+    oidc_subject_prefix: GitHubOidcSubjectPrefix | None = None
+
+    @field_validator("oidc_subject_prefix")
+    @classmethod
+    def validate_oidc_subject_prefix(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        owner, repository = value.removeprefix("repo:").split("/", 1)
+        if ("@" in owner) != ("@" in repository):
+            raise BootstrapConfigError(
+                "immutable OIDC subject prefixes require both owner and repository ids"
+            )
+        return value
 
 
 class IdentitySettings(BootstrapDocument):

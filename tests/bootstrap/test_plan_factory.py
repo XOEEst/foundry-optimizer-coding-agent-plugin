@@ -24,6 +24,7 @@ def _plan_input(
     branch_policy_intent: str = "preserve_repository_default",
     default_branch: str = "main",
     include_azure: bool = False,
+    oidc_subject_prefix: str | None = None,
 ) -> BootstrapPlanInput:
     payload: dict[str, object] = {
         "schema_version": 1,
@@ -70,6 +71,7 @@ def _plan_input(
             "deployment_environment": deployment_environment,
             "shared_client_id": shared_client_id,
             "client_id_variable_name": client_id_variable_name,
+            "oidc_subject_prefix": oidc_subject_prefix,
             "default_branch_policy_intent": branch_policy_intent,
         },
     }
@@ -147,6 +149,32 @@ def test_build_phase_actions_provisions_tenant_id_in_each_environment() -> None:
     } == {
         ("copilot", "AZURE_TENANT_ID", _TENANT_ID),
         ("foundry-production", "AZURE_TENANT_ID", _TENANT_ID),
+    }
+
+
+def test_azure_federation_uses_immutable_github_subject_prefix() -> None:
+    prefix = "repo:example-org@123/example-repo@456"
+    actions = build_phase_actions(
+        _plan_input(
+            optimizer_environment="copilot",
+            deployment_environment="foundry-production",
+            include_azure=True,
+            oidc_subject_prefix=prefix,
+        )
+    )
+    federation = {
+        action.action_id: action.diagnostics
+        for action in actions
+        if action.kind == "federated-credential"
+    }
+
+    assert federation == {
+        "azure-fic-copilot": (
+            f"subject={prefix}:environment:copilot",
+        ),
+        "azure-fic-foundry-production": (
+            f"subject={prefix}:environment:foundry-production",
+        ),
     }
 
 
