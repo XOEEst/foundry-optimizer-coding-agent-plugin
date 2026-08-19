@@ -91,12 +91,13 @@ def test_setup_uses_venv_python_and_offline_unsets_broker() -> None:
     assert '--head-ref' in text and '--ref-name' in text
 
 
-def test_setup_and_validation_validate_registry_config_paths_dynamically() -> None:
+def test_setup_and_validation_allow_missing_inactive_sidecars() -> None:
     for name in ("copilot-setup-steps.yml", "foundry-opt-validation.yml"):
         text = _workflow_text(WORKFLOW_ROOT / name)
         assert 'for agent in registry.agents' in text
+        assert 'if not sidecar_path.exists()' in text
+        assert 'assert not agent.enabled' in text
         assert 'BootstrapSidecar.from_document' in text
-        assert 'for agent in registry.agents' in text
 
 
 def test_deploy_workflow_computes_dynamic_noop_matrix() -> None:

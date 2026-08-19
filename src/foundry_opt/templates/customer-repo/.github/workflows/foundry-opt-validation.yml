@@ -69,7 +69,11 @@ jobs:
           root = Path('.')
           registry = RootRegistry.from_document((root / '.foundry-opt' / 'registry.yaml').read_text(encoding='utf-8'))
           for agent in registry.agents:
-              sidecar = BootstrapSidecar.from_document((root / agent.config_path).read_text(encoding='utf-8'))
+              sidecar_path = root / agent.config_path
+              if not sidecar_path.exists():
+                  assert not agent.enabled, f'enabled agent sidecar is missing: {agent.config_path}'
+                  continue
+              sidecar = BootstrapSidecar.from_document(sidecar_path.read_text(encoding='utf-8'))
               assert all(not value.startswith('.foundry-opt/') for value in sidecar.editable_paths)
               assert all(not value.startswith('agent/.foundry/') for value in sidecar.editable_paths)
           assert (root / '.github' / 'copilot-instructions.md').exists() or True
