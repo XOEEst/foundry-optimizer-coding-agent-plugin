@@ -234,11 +234,15 @@ class _ResourceDraft:
 def _as_mapping(value: object) -> Mapping[str, object]:
     if isinstance(value, Mapping):
         return value
-    as_dict = getattr(value, 'as_dict', None)
-    if callable(as_dict):
-        data = as_dict()
-        if isinstance(data, Mapping):
-            return data
+    for accessor in ('as_dict', 'model_dump', 'to_dict'):
+        method = getattr(value, accessor, None)
+        if callable(method):
+            try:
+                data = method(mode='json') if accessor == 'model_dump' else method()
+            except TypeError:
+                data = method()
+            if isinstance(data, Mapping):
+                return data
     raise BootstrapProviderError('provider returned a non-mapping SDK value')
 
 
