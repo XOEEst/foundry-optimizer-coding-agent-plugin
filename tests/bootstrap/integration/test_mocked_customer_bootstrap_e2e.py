@@ -3,11 +3,11 @@
 Drives the full customer bootstrap surface -- discovery, repository template
 apply, GitHub/Azure/Foundry phase apply, evaluation onboarding/activation,
 and deployment-matrix resolution -- against a temporary `git clone` of the
-real, frozen pilot baseline repository (tag `pilot-baseline-bound`), using
+real, frozen public pilot baseline repository (tag `pilot-baseline-bound`), using
 only fake GitHub/Azure/Foundry transports and providers. No live cloud,
 GitHub, or Foundry mutation happens anywhere in this module; the pilot
-repository at ``Q:\\GIT\\foundry-bootstrap-pilot`` is only ever read via a
-throwaway clone under `tmp_path` and is never modified in place.
+repository is only ever read via a throwaway clone under `tmp_path` and is
+never modified in place.
 """
 
 from __future__ import annotations
@@ -54,7 +54,12 @@ from tests.bootstrap.fakes.live_dataset_blob import install_live_datasets, synth
 # task and TODOs/006-bootstrap-implementation-plan.md.
 # ---------------------------------------------------------------------------
 
-PILOT_REPO_SOURCE = Path("Q:/GIT/foundry-bootstrap-pilot")
+PILOT_LOCAL_REPO_SOURCE = Path("Q:/GIT/foundry-bootstrap-pilot")
+PILOT_REPO_SOURCE = (
+    str(PILOT_LOCAL_REPO_SOURCE)
+    if PILOT_LOCAL_REPO_SOURCE.is_dir()
+    else "https://github.com/XOEEst/foundry-bootstrap-pilot.git"
+)
 PILOT_BASELINE_TAG = "pilot-baseline-bound"
 PILOT_BASELINE_COMMIT = "f54b3702971fabbd27eb01a24e4379899cfd1ffb"
 
@@ -528,7 +533,8 @@ def test_mocked_customer_bootstrap_end_to_end(tmp_path: Path, request: pytest.Fi
     Everything below only ever talks to (1) a throwaway `git clone` of the read-only
     pilot baseline repository, and (2) hand-built stateful fakes standing in for the
     GitHub REST API, the Azure Resource Manager REST API, and the Foundry SDK. No
-    network egress and no live GitHub/Azure/Foundry mutation happens anywhere here.
+    live GitHub/Azure/Foundry mutation happens anywhere here. Hosted CI may clone the
+    frozen public pilot fixture over HTTPS when the local Windows checkout is unavailable.
     """
 
     # -- 0. Clone the pinned pilot baseline; confirm reviewed discovery classification --
