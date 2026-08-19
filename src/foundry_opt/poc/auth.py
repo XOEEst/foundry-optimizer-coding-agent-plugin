@@ -14,6 +14,7 @@ from typing import Any, Protocol
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
+from azure.core.exceptions import ClientAuthenticationError
 
 from foundry_opt._tls import system_ssl_context
 
@@ -388,7 +389,18 @@ class GitHubActionsClientAssertionCredential:
         getter = getattr(self._credential, "get_token", None)
         if not callable(getter):
             raise TypeError("wrapped credential does not define get_token")
-        return getter(*scopes, **kwargs)
+        try:
+            return getter(*scopes, **kwargs)
+        except ClientAuthenticationError as error:
+            response = getattr(error, "response", None)
+            status_code = getattr(response, "status_code", None)
+            raise AuthError(
+                "Microsoft Entra rejected the GitHub Actions OIDC credential",
+                stage="entra_token",
+                status_code=(
+                    status_code if isinstance(status_code, int) else None
+                ),
+            ) from None
 
     def close(self) -> None:
         self.assertion_provider.close()
