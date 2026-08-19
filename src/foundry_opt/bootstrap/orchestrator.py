@@ -11,6 +11,7 @@ from foundry_opt.bootstrap.errors import BootstrapApplyError
 from foundry_opt.bootstrap.operation_state import DiscoveredAgentRecord, DiscoveryBlockerRecord, OperationStateEnvelope, SelectionPlan, next_generation, read_operation_state, status_from_state, write_operation_state
 from foundry_opt.bootstrap.providers.foundry import (
     FoundryAdapterError,
+    FoundryPrerequisiteError,
     rollback_failure_details as foundry_rollback_failure_details,
 )
 from foundry_opt.bootstrap.providers.github import (
@@ -321,6 +322,10 @@ class BootstrapOrchestrator:
                 details.append(f"status={exc.status_code}")
             if exc.code:
                 details.append(f"code={exc.code[:64]}")
+            if isinstance(exc, FoundryPrerequisiteError):
+                reason = str(exc).replace("\n", " ").strip()
+                if reason:
+                    details.append(f"reason={reason[:160]}")
             return "provider-invalid", " ".join(details)[:256]
         for error_type, code in _SANITIZED_ERROR_CODES.items():
             if isinstance(exc, error_type):
