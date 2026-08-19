@@ -109,6 +109,10 @@ def test_deploy_workflow_computes_dynamic_noop_matrix() -> None:
     assert "manual repo_agent_id" in text
     assert "MANUAL_REPO_AGENT_ID" in text
     assert "${{ github.event.inputs.repo_agent_id" not in text
+    assert "foundry-opt deploy publish-registered" in text
+    assert "FOUNDRY_OPT_DEPLOYMENT_CLIENT_ID" in text
+    assert "AZURE_TENANT_ID" in text
+    assert "AZURE_DEPLOYMENT_CLIENT_ID" not in text
 
 
 def test_issue_form_uses_built_in_parser_contract() -> None:

@@ -124,3 +124,58 @@ def test_deploy_publish_reports_superseded_as_success(monkeypatch, tmp_path) -> 
     assert payload["status"] == "superseded"
     assert payload["published"] is False
     assert json.loads(receipt.read_text(encoding="utf-8")) == payload
+
+
+def test_deploy_publish_registered_writes_receipt(monkeypatch, tmp_path) -> None:
+    settings = object()
+    monkeypatch.setattr(
+        cli_module,
+        "load_registered_deployment_settings",
+        lambda *args, **kwargs: settings,
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "publish_registered_deployment",
+        lambda loaded, **kwargs: DeploymentReceipt(
+            repository="example-org/example-agent",
+            release_commit="a" * 40,
+            project_endpoint="https://example.services.ai.azure.com/api/projects/example",
+            agent_name="example-agent",
+            previous_version="14",
+            published_version="15",
+            operation_id="deploy-registered",
+            reconciled=False,
+            source_root="agent",
+            source_tree_sha256="b" * 64,
+            source_zip_sha256="c" * 64,
+            evaluation_link="https://example.invalid/evaluations/run",
+            guardrails=(
+                DeploymentGuardrail(
+                    name="safety",
+                    score=1.0,
+                    required_pass_rate=1.0,
+                    passed=True,
+                ),
+            ),
+        ),
+    )
+    receipt = tmp_path / "registered-deployment-receipt.json"
+
+    result = runner.invoke(
+        app,
+        [
+            "deploy",
+            "publish-registered",
+            "--repo-agent-id",
+            "example-agent",
+            "--exact-source",
+            "a" * 40,
+            "--receipt",
+            str(receipt),
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["published_version"] == "15"
+    assert json.loads(receipt.read_text(encoding="utf-8")) == payload

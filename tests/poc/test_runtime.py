@@ -521,6 +521,7 @@ def test_build_hosted_definition_emits_exact_payload(tmp_path: Path) -> None:
         "memory": "1Gi",
         "environment_variables": {
             "AZURE_AI_MODEL_DEPLOYMENT_NAME": "dep-candidate",
+            "AZURE_AI_PROJECT_ENDPOINT": settings.metadata.project_endpoint,
         },
         "protocol_versions": (
             {"protocol": "responses", "version": "2.0.0"},
@@ -690,7 +691,8 @@ def test_controller_foundry_operations_candidate_resume_validating_and_cleanup(
     assert candidate.evaluation.focused_cases_improved == 2
     assert candidate.evaluation.focused_cases_regressed == 0
     assert foundry.created[1]["definition"]["environment_variables"] == {
-        "AZURE_AI_MODEL_DEPLOYMENT_NAME": "dep-candidate"
+        "AZURE_AI_MODEL_DEPLOYMENT_NAME": "dep-candidate",
+        "AZURE_AI_PROJECT_ENDPOINT": settings.metadata.project_endpoint,
     }
 
     cached = operations.evaluate_candidate(finalized)

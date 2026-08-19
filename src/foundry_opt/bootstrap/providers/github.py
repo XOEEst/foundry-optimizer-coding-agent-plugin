@@ -562,10 +562,18 @@ class GitHubBootstrapProvider:
             # already-planned/persisted actions keep working unchanged.
             if len(action.diagnostics) == 4:
                 variable_name = _validate_variable_name(action.diagnostics[1])
-                value = _bounded_text(action.diagnostics[2], field="client_id", max_length=512)
+                value = _bounded_text(
+                    action.diagnostics[2],
+                    field="variable_value",
+                    max_length=512,
+                )
             elif len(action.diagnostics) == 3:
                 variable_name = _VAR_NAME
-                value = _bounded_text(action.diagnostics[1], field="client_id", max_length=512)
+                value = _bounded_text(
+                    action.diagnostics[1],
+                    field="variable_value",
+                    max_length=512,
+                )
             else:
                 raise GitHubProviderError("github-variable action diagnostics are invalid")
             env = self._inventory_environment(owner, repo, env_name, default_branch, variable_name=variable_name)

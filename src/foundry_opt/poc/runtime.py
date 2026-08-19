@@ -683,6 +683,7 @@ def build_hosted_definition(metadata: AgentMetadata, model: str) -> HostedDefini
             "memory": runtime.memory,
             "environment_variables": {
                 runtime.model_environment_variable: deployment.deployment_name,
+                "AZURE_AI_PROJECT_ENDPOINT": metadata.project_endpoint,
             },
             "protocol_versions": [
                 {

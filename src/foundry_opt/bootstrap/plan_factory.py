@@ -28,6 +28,7 @@ _TEMPLATE_RUNTIME_COMMIT = "7972654051b9cce644836c69ef94a43c0f68ded1"
 _TEMPLATE_LOCK_SHA256 = (
     "74d7bb534c53e71a61ce197f3d5fa3169f2413373c2e42617280e78e83d6c681"
 )
+_TENANT_VARIABLE_NAME = "AZURE_TENANT_ID"
 
 
 def load_trusted_manifest(plan_input: BootstrapPlanInput) -> tuple[TemplatePayloadSpec, ...]:
@@ -78,6 +79,24 @@ def load_trusted_manifest(plan_input: BootstrapPlanInput) -> tuple[TemplatePaylo
                 _TEMPLATE_LOCK_SHA256,
                 plan_input.runtime_provenance.uv_lock_sha256,
             )
+            if (
+                payload.template_id == "deploy-workflow"
+                and plan_input.github_phase is not None
+            ):
+                rendered = rendered.replace(
+                    "vars.AZURE_OPTIMIZER_CLIENT_ID",
+                    f"vars.{plan_input.github_phase.client_id_variable_name}",
+                ).replace(
+                    "      - main\n",
+                    f"      - {plan_input.repository.default_branch}\n",
+                    1,
+                ).replace(
+                    'test "$GITHUB_REF" = "refs/heads/main"',
+                    (
+                        'test "$GITHUB_REF" = "refs/heads/'
+                        f'{plan_input.repository.default_branch}"'
+                    ),
+                )
             patches: tuple[SemanticPatchSpec, ...] = ()
             if payload.template_id == "setup-semantic-patch":
                 rendered = rendered.replace(
@@ -227,15 +246,12 @@ def build_phase_actions(plan_input: BootstrapPlanInput, inventories: Mapping[str
                     ),
                 )
             )
-        if gh.shared_client_id != "azure_identity_resolution_required":
-            seen_environments: list[str] = []
-            for environment in (gh.optimizer_environment, gh.deployment_environment):
-                if environment in seen_environments:
-                    # The shared identity is bound to a single client_id, so a
-                    # variable action is only emitted once per distinct
-                    # environment even when optimizer and deployment share one.
-                    continue
-                seen_environments.append(environment)
+        seen_environments: list[str] = []
+        for environment in (gh.optimizer_environment, gh.deployment_environment):
+            if environment in seen_environments:
+                continue
+            seen_environments.append(environment)
+            if gh.shared_client_id != "azure_identity_resolution_required":
                 actions.append(
                     BootstrapAction(
                         action_id=f"github-variable-client-id-{environment}",
@@ -243,6 +259,20 @@ def build_phase_actions(plan_input: BootstrapPlanInput, inventories: Mapping[str
                         stage="planned",
                         kind="github-variable",
                         diagnostics=(environment, gh.client_id_variable_name, gh.shared_client_id),
+                    )
+                )
+            if plan_input.azure_phase is not None:
+                actions.append(
+                    BootstrapAction(
+                        action_id=f"github-variable-tenant-id-{environment}",
+                        phase="github",
+                        stage="planned",
+                        kind="github-variable",
+                        diagnostics=(
+                            environment,
+                            _TENANT_VARIABLE_NAME,
+                            plan_input.azure_phase.tenant_id,
+                        ),
                     )
                 )
     if "azure" in plan_input.required_phases and plan_input.azure_phase is not None:

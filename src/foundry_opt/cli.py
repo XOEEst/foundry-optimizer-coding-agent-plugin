@@ -51,7 +51,9 @@ from foundry_opt.poc.deploy import (
     DeploymentPostPublishError,
     DeploymentSupersededError,
     load_deployment_settings,
+    load_registered_deployment_settings,
     publish_deployment,
+    publish_registered_deployment,
     run_deployment_preflight,
 )
 from foundry_opt.poc.foundry import (
@@ -498,6 +500,80 @@ def deploy_publish(
         _echo_json(
             {
                 "error": _redact_text(str(error)) or "post-publish verification failed",
+                "published_version": error.reference.version,
+                "status": "blocked",
+            }
+        )
+        raise typer.Exit(code=2)
+    except _JOB_COMMAND_ERRORS as error:
+        _emit_blocked(error)
+
+
+@deploy_app.command("publish-registered")
+def deploy_publish_registered(
+    repository: Path = typer.Option(Path("."), "--repository"),
+    repo_agent_id: str = typer.Option(..., "--repo-agent-id"),
+    exact_source: str = typer.Option(..., "--exact-source"),
+    receipt: Path | None = typer.Option(None, "--receipt"),
+    artifact_root: Path | None = typer.Option(
+        None,
+        "--artifact-root",
+        envvar=DEPLOYMENT_ROOT_ENV,
+    ),
+    deadline_seconds: float = typer.Option(
+        DEFAULT_DEADLINE_SECONDS,
+        "--deadline-seconds",
+        envvar=DEADLINE_SECONDS_ENV,
+    ),
+) -> None:
+    """Evaluate and publish one exact registry-selected merge commit."""
+
+    try:
+        settings = load_registered_deployment_settings(
+            repository,
+            repo_agent_id=repo_agent_id,
+            exact_source=exact_source,
+            environment=os.environ,
+            artifact_root=artifact_root,
+            deadline_seconds=deadline_seconds,
+        )
+        result = publish_registered_deployment(
+            settings,
+            environment=os.environ,
+        )
+        payload = result.model_dump(mode="json")
+        if receipt is not None:
+            _write_json_document(receipt, payload)
+        _echo_json(payload)
+    except DeploymentGuardrailError as error:
+        _echo_json(
+            {
+                "error": _redact_text(str(error))
+                or "deployment guardrails failed",
+                "evaluation_link": error.evaluation_link,
+                "guardrails": [
+                    item.model_dump(mode="json")
+                    for item in error.guardrails
+                ],
+                "status": "blocked",
+            }
+        )
+        raise typer.Exit(code=2)
+    except DeploymentSupersededError as error:
+        payload = {
+            "current_main_commit": error.current_main_commit,
+            "published": False,
+            "release_commit": error.release_commit,
+            "status": "superseded",
+        }
+        if receipt is not None:
+            _write_json_document(receipt, payload)
+        _echo_json(payload)
+    except DeploymentPostPublishError as error:
+        _echo_json(
+            {
+                "error": _redact_text(str(error))
+                or "post-publish verification failed",
                 "published_version": error.reference.version,
                 "status": "blocked",
             }

@@ -123,7 +123,9 @@ jobs:
       contents: read
       id-token: write
     env:
-      AZURE_DEPLOYMENT_CLIENT_ID: ${{ vars.AZURE_DEPLOYMENT_CLIENT_ID }}
+      FOUNDRY_OPT_DEPLOYMENT_CLIENT_ID: ${{ vars.AZURE_OPTIMIZER_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Check out exact source without credentials
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
@@ -169,4 +171,28 @@ jobs:
         run: |
           set -euo pipefail
           test "$GITHUB_REF" = "refs/heads/main"
-          foundry-opt deploy plan             --repository .             --changed-root "${{ matrix.changed_root }}"             --repo-agent-id "${{ matrix.repo_agent_id }}"             --sidecar "${{ matrix.config_path }}"             --exact-source "$GITHUB_SHA"             --check-eligibility             --use-repository-default-evaluators
+          foundry-opt deploy plan \
+            --repository . \
+            --changed-root "${{ matrix.changed_root }}" \
+            --repo-agent-id "${{ matrix.repo_agent_id }}" \
+            --sidecar "${{ matrix.config_path }}" \
+            --exact-source "$GITHUB_SHA" \
+            --check-eligibility \
+            --use-repository-default-evaluators
+
+      - name: Evaluate and publish the exact registered agent
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt="$RUNNER_TEMP/foundry-opt-deployment-${{ matrix.repo_agent_id }}.json"
+          foundry-opt deploy publish-registered \
+            --repository . \
+            --repo-agent-id "${{ matrix.repo_agent_id }}" \
+            --exact-source "$GITHUB_SHA" \
+            --receipt "$receipt"
+          {
+            echo "### Foundry deployment: ${{ matrix.repo_agent_id }}"
+            echo '```json'
+            cat "$receipt"
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"

@@ -138,6 +138,7 @@ FIC_NAMES = {
 GITHUB_OPTIMIZER_ENVIRONMENT = "copilot"
 GITHUB_DEPLOYMENT_ENVIRONMENT = "foundry-production"
 GITHUB_VARIABLE_NAME = "AZURE_OPTIMIZER_CLIENT_ID"
+GITHUB_TENANT_VARIABLE_NAME = "AZURE_TENANT_ID"
 
 
 def _clone_pilot_repo(dest: Path) -> Path:
@@ -312,7 +313,13 @@ def _github_body(request: httpx.Request) -> dict:
 
 
 def _fresh_environment_state() -> dict[str, object]:
-    return {"exists": False, "policy": None, "variable_value": None, "branch_policies": [], "next_policy_id": 101}
+    return {
+        "exists": False,
+        "policy": None,
+        "variables": {},
+        "branch_policies": [],
+        "next_policy_id": 101,
+    }
 
 
 def _github_state() -> dict[str, dict[str, object]]:
@@ -341,28 +348,54 @@ def _github_stateful_handler(state: dict[str, dict[str, object]], log: list[tupl
                 return _github_response(200, {})
             if path.endswith(f"/environments/{env}") and method == "DELETE":
                 log.append((method, path, None))
-                env_state.update({"exists": False, "policy": None, "variable_value": None, "branch_policies": []})
+                env_state.update(
+                    {
+                        "exists": False,
+                        "policy": None,
+                        "variables": {},
+                        "branch_policies": [],
+                    }
+                )
                 return _github_response(204, {})
-            if path.endswith(f"/environments/{env}/variables/{GITHUB_VARIABLE_NAME}") and method == "GET":
-                if not env_state["exists"] or env_state["variable_value"] is None:
-                    return _github_response(404, {})
-                return _github_response(200, {"name": GITHUB_VARIABLE_NAME, "value": env_state["variable_value"]})
-            if path.endswith(f"/environments/{env}/variables/{GITHUB_VARIABLE_NAME}") and method == "PATCH":
+            variable_root = f"/environments/{env}/variables"
+            if f"{variable_root}/" in path:
+                variable_name = path.rsplit("/", 1)[-1]
+                variables = env_state["variables"]
+                assert isinstance(variables, dict)
+                if method == "GET":
+                    if not env_state["exists"] or variable_name not in variables:
+                        return _github_response(404, {})
+                    return _github_response(
+                        200,
+                        {"name": variable_name, "value": variables[variable_name]},
+                    )
+                if method == "PATCH":
+                    payload = _github_body(request)
+                    log.append((method, path, payload))
+                    variables[variable_name] = payload["value"]
+                    return _github_response(204, {})
+                if method == "DELETE":
+                    log.append((method, path, None))
+                    variables.pop(variable_name, None)
+                    return _github_response(204, {})
+            if path.endswith(variable_root) and method == "GET":
+                variables = env_state["variables"]
+                assert isinstance(variables, dict)
+                return _github_response(
+                    200,
+                    {
+                        "variables": [
+                            {"name": name, "value": value}
+                            for name, value in sorted(variables.items())
+                        ]
+                    },
+                )
+            if path.endswith(variable_root) and method == "POST":
                 payload = _github_body(request)
                 log.append((method, path, payload))
-                env_state["variable_value"] = payload["value"]
-                return _github_response(204, {})
-            if path.endswith(f"/environments/{env}/variables/{GITHUB_VARIABLE_NAME}") and method == "DELETE":
-                log.append((method, path, None))
-                env_state["variable_value"] = None
-                return _github_response(204, {})
-            if path.endswith(f"/environments/{env}/variables") and method == "GET":
-                variables = [] if env_state["variable_value"] is None else [{"name": GITHUB_VARIABLE_NAME, "value": env_state["variable_value"]}]
-                return _github_response(200, {"variables": variables})
-            if path.endswith(f"/environments/{env}/variables") and method == "POST":
-                payload = _github_body(request)
-                log.append((method, path, payload))
-                env_state["variable_value"] = payload["value"]
+                variables = env_state["variables"]
+                assert isinstance(variables, dict)
+                variables[payload["name"]] = payload["value"]
                 return _github_response(201, {})
             if path.endswith(f"/environments/{env}/deployment_branch_policies") and method == "GET":
                 return _github_response(200, {"branch_policies": env_state["branch_policies"]})
@@ -685,15 +718,18 @@ def test_mocked_customer_bootstrap_end_to_end(tmp_path: Path, request: pytest.Fi
     assert proposed_path.exists()
 
     # -- 5. op-initial continued: GitHub environments and shared variables plan+apply. --
-    # Both environments get the shared UAMI client id. Repository-default branch policy intent
-    # creates no custom environment branch-policy action.
+    # Both environments get the shared UAMI client id and Azure tenant id.
+    # Repository-default branch policy intent creates no custom environment policy action.
     github_receipt = _approve_and_apply(orch, envelope_initial, operation_id="op-initial", phase="github")
     assert github_receipt.state == "applied"
     assert len(github_receipt.receipt.created_actions) > 0
     for env in (GITHUB_OPTIMIZER_ENVIRONMENT, GITHUB_DEPLOYMENT_ENVIRONMENT):
         assert github_state[env]["exists"] is True
         assert github_state[env]["policy"] is not None
-        assert github_state[env]["variable_value"] == CLIENT_ID
+        assert github_state[env]["variables"] == {
+            GITHUB_TENANT_VARIABLE_NAME: TENANT_ID,
+            GITHUB_VARIABLE_NAME: CLIENT_ID,
+        }
         assert not github_state[env]["branch_policies"]
 
     # -- 6. op-initial continued: Azure create-if-missing shared UAMI, two OIDC subjects, role. --
@@ -821,7 +857,7 @@ def test_mocked_customer_bootstrap_end_to_end(tmp_path: Path, request: pytest.Fi
     assert github_state[GITHUB_OPTIMIZER_ENVIRONMENT]["exists"] is False
     assert github_state[GITHUB_DEPLOYMENT_ENVIRONMENT]["exists"] is False
     for env in (GITHUB_OPTIMIZER_ENVIRONMENT, GITHUB_DEPLOYMENT_ENVIRONMENT):
-        assert github_state[env]["variable_value"] is None
+        assert github_state[env]["variables"] == {}
         assert github_state[env]["branch_policies"] == []
 
     # -- 12. Rollback: Azure (op-initial) -- only what this operation created is removed. --
