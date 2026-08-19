@@ -2602,7 +2602,10 @@ class FoundryAdapter:
             if not isinstance(passed, int) or not isinstance(failed, int) or isinstance(passed, bool) or isinstance(failed, bool):
                 raise FoundryPrerequisiteError('activation criterion counts are invalid', kind='prerequisite')
             if not isinstance(errored, int) or isinstance(errored, bool) or errored > 0:
-                raise FoundryPrerequisiteError('activation criterion reported execution errors', kind='prerequisite')
+                raise FoundryPrerequisiteError(
+                    f'activation criterion {name} reported execution errors: {errored}',
+                    kind='prerequisite',
+                )
             total = passed + failed
             if total <= 0:
                 raise FoundryPrerequisiteError('activation criterion executed no cases', kind='prerequisite')
