@@ -10,9 +10,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from foundry_opt.poc.auth import AuthError, build_client_assertion_credential
+from foundry_opt.bootstrap.contracts import BootstrapLock, RootRegistry
+from foundry_opt.bootstrap.workflow_integration import (
+    RegistrySelection,
+    resolve_registry_selection,
+)
+from foundry_opt.poc.auth import (
+    AuthError,
+    GitHubActionsOidcConfig,
+    build_client_assertion_credential,
+)
 from foundry_opt.poc.bootstrap import (
     BootstrapReceipt,
     read_bootstrap_receipt,
@@ -57,6 +66,8 @@ from foundry_opt.poc.source import PackagedSource, package_git_source
 
 DEPLOYMENT_ROOT_ENV = "FOUNDRY_OPT_DEPLOY_ROOT"
 DEFAULT_DEPLOYMENT_ENVIRONMENT = "foundry-production"
+REGISTERED_CLIENT_ID_ENV = "FOUNDRY_OPT_DEPLOYMENT_CLIENT_ID"
+REGISTERED_TENANT_ID_ENV = "AZURE_TENANT_ID"
 RELEASE_COMMIT_METADATA_KEY = "foundry_opt_release_commit"
 REPOSITORY_METADATA_KEY = "foundry_opt_repository"
 SOURCE_ROOT_METADATA_KEY = "foundry_opt_source_root"
@@ -171,6 +182,18 @@ class DeploymentSettings(_FrozenModel):
         if not path.is_absolute():
             raise ValueError("deployment paths must be absolute")
         return path
+
+
+@dataclass(frozen=True, slots=True)
+class RegisteredDeploymentSettings:
+    repository_root: Path
+    selection: RegistrySelection
+    policy: RepositoryPolicy
+    metadata: AgentMetadata
+    oidc_config: GitHubActionsOidcConfig
+    release_commit: str
+    artifact_root: Path
+    deadline_seconds: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -635,8 +658,9 @@ def create_deployment_handle(
             metadata=settings.metadata,
             deadline_seconds=settings.deadline_seconds,
             freshness_check=(
-                _deployment_freshness_check(
-                    settings,
+                deployment_freshness_check(
+                    repository=settings.metadata.repository_identity,
+                    branch=settings.metadata.default_branch,
                     environment=environment,
                 )
                 if require_freshness_check
@@ -691,6 +715,257 @@ def publish_deployment(
         handle.close()
 
 
+def load_registered_deployment_settings(
+    repository: Path,
+    *,
+    repo_agent_id: str,
+    exact_source: str,
+    environment: Mapping[str, str] | None = None,
+    artifact_root: Path | None = None,
+    deadline_seconds: float | str | None = None,
+) -> RegisteredDeploymentSettings:
+    env = os.environ if environment is None else environment
+    if env.get("GITHUB_ACTIONS", "").casefold() != "true":
+        raise RuntimeIntegrationError(
+            "registered deployment requires GitHub Actions OIDC"
+        )
+    root = _repository_root(repository)
+    release_commit = _resolve_release_commit(root, exact_source)
+    selection = resolve_registry_selection(root, repo_agent_id=repo_agent_id)
+    sidecar = selection.sidecar
+    if not sidecar.deployment.enabled:
+        raise RuntimeIntegrationError("selected registered agent deployment is disabled")
+    if (
+        sidecar.deployment.require_aligned_binding
+        and (
+            sidecar.evaluation_lineage is None
+            or sidecar.evaluation_lineage.activation_binding is None
+        )
+    ):
+        raise RuntimeIntegrationError(
+            "selected registered agent has no receipt-bound aligned activation"
+        )
+
+    registry_path = root / ".foundry-opt" / "registry.yaml"
+    sidecar_path = root / selection.config_path
+    lock_path = root / ".foundry-opt" / "bootstrap.lock.json"
+    registry_bytes = registry_path.read_bytes()
+    sidecar_bytes = sidecar_path.read_bytes()
+    try:
+        lock_bytes = lock_path.read_bytes()
+    except OSError as error:
+        raise RuntimeIntegrationError(
+            "registered deployment managed lock is missing"
+        ) from error
+    if hashlib.sha256(registry_bytes).hexdigest() != selection.registry_hash:
+        raise RuntimeIntegrationError(
+            "registered deployment registry changed during selection"
+        )
+    if hashlib.sha256(sidecar_bytes).hexdigest() != selection.sidecar_hash:
+        raise RuntimeIntegrationError(
+            "registered deployment sidecar changed during selection"
+        )
+    if _normalized_text_bytes(registry_bytes) != _normalized_text_bytes(
+        _git_bytes(
+            root,
+            "show",
+            f"{release_commit}:.foundry-opt/registry.yaml",
+        )
+    ):
+        raise RuntimeIntegrationError(
+            "registered deployment registry does not match the exact source commit"
+        )
+    if _normalized_text_bytes(sidecar_bytes) != _normalized_text_bytes(
+        _git_bytes(
+            root,
+            "show",
+            f"{release_commit}:{selection.config_path}",
+        )
+    ):
+        raise RuntimeIntegrationError(
+            "registered deployment sidecar does not match the exact source commit"
+        )
+    if _normalized_text_bytes(lock_bytes) != _normalized_text_bytes(
+        _git_bytes(
+            root,
+            "show",
+            f"{release_commit}:.foundry-opt/bootstrap.lock.json",
+        )
+    ):
+        raise RuntimeIntegrationError(
+            "registered deployment managed lock does not match the exact source commit"
+        )
+    registry = RootRegistry.from_document(registry_bytes.decode("utf-8"))
+    try:
+        lock = BootstrapLock.model_validate_json(lock_bytes)
+    except ValidationError as error:
+        raise RuntimeIntegrationError(
+            "registered deployment managed lock is invalid"
+        ) from error
+    if (
+        lock.runtime_repository != registry.distribution.repository
+        or lock.runtime_commit != registry.distribution.pin
+    ):
+        raise RuntimeIntegrationError(
+            "registered deployment lock and distribution pin do not match"
+        )
+    managed = {entry.path: entry for entry in lock.managed_files}
+    for path, content in (
+        (".foundry-opt/registry.yaml", registry_bytes),
+        (selection.config_path, sidecar_bytes),
+    ):
+        entry = managed.get(path)
+        if entry is None or hashlib.sha256(content).hexdigest() != entry.applied_sha256:
+            raise RuntimeIntegrationError(
+                f"registered deployment managed digest does not match: {path}"
+            )
+    if registry.github.deployment_environment != sidecar.deployment.environment:
+        raise RuntimeIntegrationError(
+            "registry and sidecar deployment environments do not match"
+        )
+    if registry.identity.kind == "unresolved_migration":
+        raise RuntimeIntegrationError(
+            "registered deployment requires a resolved repository identity"
+        )
+    trusted_client_id = registry.identity.client_id
+    if not trusted_client_id:
+        raise RuntimeIntegrationError(
+            "registered deployment identity is missing its client id"
+        )
+    configured_client_id = _required_environment_value(
+        env,
+        REGISTERED_CLIENT_ID_ENV,
+    )
+    if configured_client_id != trusted_client_id:
+        raise RuntimeIntegrationError(
+            "deployment client id does not match the committed registry identity"
+        )
+
+    repository_identity = _required_environment_value(env, "GITHUB_REPOSITORY")
+    repository_id_text = _required_environment_value(env, "GITHUB_REPOSITORY_ID")
+    try:
+        repository_id = int(repository_id_text)
+    except ValueError as error:
+        raise RuntimeIntegrationError(
+            "GITHUB_REPOSITORY_ID must be a positive integer"
+        ) from error
+    if repository_id <= 0:
+        raise RuntimeIntegrationError(
+            "GITHUB_REPOSITORY_ID must be a positive integer"
+        )
+    default_branch = _required_environment_value(env, "GITHUB_REF_NAME")
+    if env.get("GITHUB_REF") != f"refs/heads/{default_branch}":
+        raise RuntimeIntegrationError(
+            "registered deployment requires an exact branch push ref"
+        )
+
+    github_sha = env.get("GITHUB_SHA")
+    if github_sha is not None and github_sha != release_commit:
+        raise RuntimeIntegrationError(
+            "GITHUB_SHA does not match the exact registered deployment source"
+        )
+
+    tenant_id = _required_environment_value(env, REGISTERED_TENANT_ID_ENV)
+    subscription_id = _subscription_id(sidecar.foundry_project.account_resource_id)
+    deployment_environment = sidecar.deployment.environment
+    expected_subject = (
+        f"repo:{repository_identity}:environment:{deployment_environment}"
+    )
+    oidc_config = GitHubActionsOidcConfig(
+        tenant_id=tenant_id,
+        client_id=trusted_client_id,
+        expected_subject=expected_subject,
+        expected_repository_id=str(repository_id),
+    )
+    policy = _registered_repository_policy(selection)
+    metadata = _registered_agent_metadata(
+        selection,
+        repository_identity=repository_identity,
+        repository_id=repository_id,
+        default_branch=default_branch,
+        tenant_id=tenant_id,
+        subscription_id=subscription_id,
+        client_id=trusted_client_id,
+        client_id_variable=registry.github.client_id_variable,
+    )
+    return RegisteredDeploymentSettings(
+        repository_root=root,
+        selection=selection,
+        policy=policy,
+        metadata=metadata,
+        oidc_config=oidc_config,
+        release_commit=release_commit,
+        artifact_root=_deployment_artifact_root(
+            root,
+            environment=env,
+            explicit=artifact_root,
+        ),
+        deadline_seconds=load_deadline_seconds(
+            environment=env,
+            deadline_seconds=deadline_seconds,
+        ),
+    )
+
+
+def publish_registered_deployment(
+    settings: RegisteredDeploymentSettings,
+    *,
+    environment: Mapping[str, str] | None = None,
+    credential_builder: Callable[..., object] = build_client_assertion_credential,
+    evaluation_backend_factory: Callable[..., AzureProjectsEvaluationBackend] = (
+        AzureProjectsEvaluationBackend
+    ),
+    foundry_client_factory: Callable[..., FoundryPocClient] = FoundryPocClient,
+    service_factory: Callable[..., DeploymentService] = DeploymentService,
+) -> DeploymentReceipt:
+    packaged = package_git_source(
+        settings.repository_root,
+        commit=settings.release_commit,
+        source_root=settings.policy.source_root,
+        work_root=settings.artifact_root,
+    )
+    credential = credential_builder(
+        settings.oidc_config,
+        environment=environment,
+    )
+    client: object | None = None
+    try:
+        backend = evaluation_backend_factory(
+            project_endpoint=settings.metadata.project_endpoint,
+            credential=credential,
+        )
+        client = foundry_client_factory(
+            settings.metadata.project_endpoint,
+            credential,
+            evaluation_backend=backend,
+        )
+        service = service_factory(
+            client=client,
+            policy=settings.policy,
+            metadata=settings.metadata,
+            deadline_seconds=settings.deadline_seconds,
+            freshness_check=deployment_freshness_check(
+                repository=settings.metadata.repository_identity,
+                branch=settings.metadata.default_branch,
+                environment=environment,
+            ),
+        )
+        return service.publish(
+            repository=settings.metadata.repository_identity,
+            release_commit=settings.release_commit,
+            packaged=packaged,
+        )
+    finally:
+        try:
+            client_closer = getattr(client, "close", None)
+            if callable(client_closer):
+                client_closer()
+        finally:
+            credential_closer = getattr(credential, "close", None)
+            if callable(credential_closer):
+                credential_closer()
+
+
 def deployment_operation_id(
     *,
     repository: str,
@@ -710,9 +985,10 @@ def _metric_by_name(evidence: EvaluationEvidence, name: str) -> object:
     raise ContractError("evaluation evidence omitted a policy-required metric")
 
 
-def _deployment_freshness_check(
-    settings: DeploymentSettings,
+def deployment_freshness_check(
     *,
+    repository: str,
+    branch: str,
     environment: Mapping[str, str] | None,
 ) -> Callable[[str], None] | None:
     env = os.environ if environment is None else environment
@@ -721,10 +997,8 @@ def _deployment_freshness_check(
     token = env.get("GH_TOKEN") or env.get("GITHUB_TOKEN")
     if not token:
         raise RuntimeIntegrationError(
-            "GitHub token is required to verify main immediately before publication"
+            "GitHub token is required to verify the default branch before publication"
         )
-    repository = settings.metadata.repository_identity
-    branch = settings.metadata.default_branch
 
     def check(release_commit: str) -> None:
         command_environment = os.environ.copy()
@@ -748,20 +1022,20 @@ def _deployment_freshness_check(
             )
         except subprocess.TimeoutExpired as error:
             raise RuntimeIntegrationError(
-                "GitHub main-head verification timed out"
+                "GitHub default-branch verification timed out"
             ) from error
         except OSError as error:
             raise RuntimeIntegrationError(
-                "GitHub main-head verification could not run"
+                "GitHub default-branch verification could not run"
             ) from error
         if completed.returncode != 0:
             raise RuntimeIntegrationError(
-                "GitHub main-head verification failed"
+                "GitHub default-branch verification failed"
             )
         current = completed.stdout.strip()
         if not _valid_commit(current):
             raise RuntimeIntegrationError(
-                "GitHub main-head verification returned an invalid commit"
+                "GitHub default-branch verification returned an invalid commit"
             )
         if current != release_commit:
             raise DeploymentSupersededError(
@@ -770,6 +1044,194 @@ def _deployment_freshness_check(
             )
 
     return check
+
+
+def _registered_repository_policy(
+    selection: RegistrySelection,
+) -> RepositoryPolicy:
+    sidecar = selection.sidecar
+    required_guardrails = [
+        {
+            "metric": guardrail.evaluator_name,
+            "required_pass_rate": guardrail.required_pass_rate,
+        }
+        for guardrail in sidecar.hard_guardrails
+        if guardrail.required
+    ]
+    if not required_guardrails:
+        raise RuntimeIntegrationError(
+            "registered deployment requires at least one mandatory hard guardrail"
+        )
+    return RepositoryPolicy.model_validate(
+        {
+            "schema_version": 1,
+            "source_root": sidecar.package_root,
+            "editable_paths": sidecar.editable_paths,
+            "min_candidates": sidecar.min_candidates,
+            "max_candidates": sidecar.max_candidates,
+            "baseline_model": sidecar.baseline_model,
+            "allowed_models": sidecar.allowed_models,
+            "primary_metric": sidecar.primary_metric,
+            "decision_rules": {
+                "minimum_aggregate_delta": (
+                    sidecar.decision_policy.minimum_aggregate_delta
+                ),
+                "focused_cases_required": (
+                    sidecar.decision_policy.focused_cases_required
+                ),
+                "max_regressions": sidecar.decision_policy.max_regressions,
+            },
+            "hard_guardrails": required_guardrails,
+            "metadata_path": selection.config_path,
+        }
+    )
+
+
+def _registered_agent_metadata(
+    selection: RegistrySelection,
+    *,
+    repository_identity: str,
+    repository_id: int,
+    default_branch: str,
+    tenant_id: str,
+    subscription_id: str,
+    client_id: str,
+    client_id_variable: str,
+) -> AgentMetadata:
+    sidecar = selection.sidecar
+    evaluator_ids = tuple(
+        dict.fromkeys(
+            (
+                *(
+                    evaluator.reference.evaluator_id
+                    for evaluator in sidecar.default_evaluator_bundle.objective.evaluators
+                ),
+                *(guardrail.evaluator_name for guardrail in sidecar.hard_guardrails),
+            )
+        )
+    )
+    deployment_environment = sidecar.deployment.environment
+    subject = f"repo:{repository_identity}:environment:{deployment_environment}"
+    return AgentMetadata.model_validate(
+        {
+            "schema_version": 1,
+            "repository_identity": repository_identity,
+            "repository_id": repository_id,
+            "default_branch": default_branch,
+            "project_endpoint": sidecar.foundry_project.project_endpoint,
+            "foundry_account_resource_id": (
+                sidecar.foundry_project.account_resource_id
+            ),
+            "agent_name": sidecar.foundry_project.agent_name,
+            "authentication_method": "oidc",
+            "static_credentials_allowed": False,
+            "hosted_runtime": {
+                "kind": "hosted",
+                "runtime": sidecar.runtime.runtime,
+                "entry_point": sidecar.runtime.entrypoint,
+                "dependency_resolution": sidecar.runtime.dependency_resolution,
+                "protocol_name": sidecar.runtime.protocol_name,
+                "protocol_version": sidecar.runtime.protocol_version,
+                "cpu": sidecar.runtime.cpu or "1",
+                "memory": sidecar.runtime.memory or "2Gi",
+                "model_environment_variable": (
+                    sidecar.runtime.model_environment_variable
+                    or "AZURE_AI_MODEL_DEPLOYMENT_NAME"
+                ),
+            },
+            "oidc": {
+                "issuer": "https://token.actions.githubusercontent.com",
+                "audience": "api://AzureADTokenExchange",
+                "tenant_id": tenant_id,
+                "subscription_id": subscription_id,
+                "repository_id_claim": str(repository_id),
+                "workflow_variables": (
+                    {
+                        "alias": "deployment",
+                        "name": client_id_variable,
+                        "value": client_id,
+                        "scope": "environment",
+                        "environment": deployment_environment,
+                    },
+                ),
+                "principals": (
+                    {
+                        "role": "deployment",
+                        "client_id": client_id,
+                        "client_id_variable": "deployment",
+                        "environment": deployment_environment,
+                        "subjects": (
+                            {
+                                "name": "environment",
+                                "subject": subject,
+                                "environment": deployment_environment,
+                            },
+                        ),
+                    },
+                ),
+            },
+            "model_deployments": (
+                {
+                    "alias": sidecar.baseline_model,
+                    "deployment_name": sidecar.baseline_model,
+                    "model_format": "OpenAI",
+                    "model_name": sidecar.baseline_model,
+                    "model_version": "pinned",
+                    "required_capabilities": (
+                        {"name": "responses", "enabled": True},
+                    ),
+                },
+            ),
+            "development_evaluation": {
+                "name": "development",
+                "split": "development",
+                "resolved_evaluation_id": (
+                    sidecar.development_definition.definition_id
+                ),
+                "dataset_id": sidecar.development_dataset.dataset_id,
+                "custom_evaluator_ids": evaluator_ids,
+            },
+            "validating_evaluation": {
+                "name": "validating",
+                "split": "validating",
+                "resolved_evaluation_id": (
+                    sidecar.validating_definition.definition_id
+                ),
+                "dataset_id": sidecar.validating_dataset.dataset_id,
+                "custom_evaluator_ids": evaluator_ids,
+            },
+        }
+    )
+
+
+def _required_environment_value(
+    environment: Mapping[str, str],
+    name: str,
+) -> str:
+    value = environment.get(name)
+    if not isinstance(value, str) or not value.strip():
+        raise RuntimeIntegrationError(f"{name} is required")
+    return value.strip()
+
+
+def _subscription_id(resource_id: str) -> str:
+    parts = [part for part in resource_id.split("/") if part]
+    for index, part in enumerate(parts[:-1]):
+        if part.casefold() == "subscriptions":
+            return parts[index + 1]
+    raise RuntimeIntegrationError(
+        "Foundry account resource id omitted the subscription id"
+    )
+
+
+def _normalized_text_bytes(value: bytes) -> bytes:
+    try:
+        text = value.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise RuntimeIntegrationError(
+            "registered deployment contract is not UTF-8"
+        ) from error
+    return text.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")
 
 
 def _repository_root(repository: Path) -> Path:
@@ -911,6 +1373,25 @@ def _git_text(repository: Path, *arguments: str) -> str:
             f"git command failed: {detail or 'unknown failure'}"
         )
     return completed.stdout.rstrip("\n")
+
+
+def _git_bytes(repository: Path, *arguments: str) -> bytes:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(repository), *arguments],
+            check=False,
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            timeout=30,
+            env=_git_environment(),
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeIntegrationError("git command timed out") from error
+    except OSError as error:
+        raise RuntimeIntegrationError("git could not be executed") from error
+    if completed.returncode != 0:
+        raise RuntimeIntegrationError("git command failed")
+    return completed.stdout
 
 
 def _git_environment() -> dict[str, str]:
