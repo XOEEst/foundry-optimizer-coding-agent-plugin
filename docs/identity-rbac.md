@@ -54,11 +54,33 @@ where the id is the reviewed creation target. Plans, receipts, and provider stat
 name the exact resource that Azure returns, with no placeholder. Adopted Entra applications
 have no ARM resource id, so their exact client id is used as the identity label.
 
+## GitHub OIDC subjects
+
+The registry records the exact GitHub `sub` prefix used by both runtime
+validation and Azure federation. It accepts the legacy name-based form
+`repo:<owner>/<repository>` and GitHub's immutable form
+`repo:<owner>@<owner-id>/<repository>@<repository-id>`.
+
+Repositories created, renamed, or transferred after July 15, 2026 can emit the
+immutable form. Bootstrap must inventory GitHub's OIDC settings, freeze the
+reported prefix in the reviewed plan, and create one exact environment subject
+per configured GitHub environment. It must not silently retain a mutable
+name-based credential when GitHub emits an immutable subject.
+
+Some Microsoft Entra tenants additionally require the GitHub OIDC token's
+`enterprise` claim to be `microsoft`, `github`, or `microsoftopensource`.
+Personal repositories emit an empty enterprise claim and cannot satisfy that
+tenant policy, even with a correct immutable subject. Bootstrap stops at the
+OIDC boundary in that case. The supported remedies are a qualifying
+enterprise-owned repository or a development tenant/project whose federation
+policy accepts the repository; static Azure credentials are not a fallback.
+
 ## Pilot policy
 
-The retained development pilot assigns **project-scoped `Foundry User` only**. The remaining
-approved roles stay available for reviewed rollouts that need hosted runtime execution,
-agent invocation, or telemetry probes, but they are not part of the pilot baseline.
+The retained development pilot assigns **project-scoped `Foundry User` only**.
+Repository bootstrap and evaluation activation succeeded. GitHub-hosted
+publication is retained as a fail-closed tenant-policy result because the
+personal pilot repository has no qualifying enterprise claim.
 
 ## Accepted residual risk
 

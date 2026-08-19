@@ -3,8 +3,7 @@
 `foundry-opt` provides a guided bootstrap and issue-driven optimization
 workflow for Microsoft Foundry agent repositories.
 
-This public repository is being initialized from the reviewed generic runtime.
-The first supported release will provide:
+This public repository is the authoritative reviewed runtime. It provides:
 
 - local `discover -> plan -> apply` repository bootstrap
 - multi-agent registry and per-agent configuration
@@ -19,7 +18,13 @@ repository until the public documentation is complete.
 ## Status
 
 Pre-release. Do not use floating `main` for privileged workflows until the
-documented branch-protection policy is enabled. Pin an exact reviewed commit.
+documented branch-protection policy is enabled. Generated customer templates
+currently pin reviewed runtime `6f6e5249356b4680184cd4b3376b60c33b2fa4fb`.
+
+The retained development pilot completed repository bootstrap, evaluation
+activation, validation, and Copilot setup. GitHub-hosted Foundry publication is
+blocked by the selected Microsoft tenant's enterprise-claim policy; no static
+credential fallback is provided.
 
 ## Distribution trust
 
@@ -34,6 +39,7 @@ See:
 - [Identity and RBAC](docs/identity-rbac.md)
 - [Binding evidence](docs/binding-evidence.md)
 - [Evaluation onboarding](docs/evaluation-onboarding.md)
+- [Retained pilot status](docs/retained-pilot.md)
 
 ## License
 
