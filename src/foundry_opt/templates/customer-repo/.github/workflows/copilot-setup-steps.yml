@@ -51,7 +51,7 @@ jobs:
         run: |
           set -euo pipefail
           repository="https://github.com/XOEEst/foundry-optimizer-coding-agent-plugin.git"
-          commit="60c289bf816261a94c8c69643cdc4bfac86e7002"
+          commit="17e3b3c41c6c1299837981d3cff4d6ef01fdccdc"
           shared_root="$RUNNER_TEMP/foundry-opt-shared"
           rm -rf "$shared_root"
           git init "$shared_root"
@@ -95,7 +95,7 @@ jobs:
           echo "FOUNDRY_OPT_GITHUB_BINDING=$trusted_root/broker/binding.json" >>"$GITHUB_ENV"
           echo "FOUNDRY_OPT_BROKER_SOCKET=$trusted_root/broker/github.sock" >>"$GITHUB_ENV"
           echo "FOUNDRY_OPT_STATE_ROOT=$trusted_root/jobs" >>"$GITHUB_ENV"
-          echo "FOUNDRY_OPT_RUNTIME_SHA=60c289bf816261a94c8c69643cdc4bfac86e7002" >>"$GITHUB_ENV"
+          echo "FOUNDRY_OPT_RUNTIME_SHA=17e3b3c41c6c1299837981d3cff4d6ef01fdccdc" >>"$GITHUB_ENV"
           echo "FOUNDRY_OPT_RESUME_RECORD=$trusted_root/resume.json" >>"$GITHUB_ENV"
 
       - name: Validate bootstrap contracts and registry sidecars
