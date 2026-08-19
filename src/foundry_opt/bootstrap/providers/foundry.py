@@ -3510,7 +3510,8 @@ class FoundryAdapter:
             },
         }
         for guardrail in guardrails:
-            criteria[guardrail.evaluator_name] = {
+            criterion_name = guardrail.safety_name or guardrail.evaluator_name.removeprefix('builtin.')
+            criteria[criterion_name] = {
                 'evaluator_name': guardrail.evaluator_name,
                 'evaluator_version': guardrail.evaluator_version,
                 'evaluator_id': guardrail.evaluator_id,

@@ -82,7 +82,7 @@ def onboarding_definition_criteria(
         criteria.append(
             {
                 "type": "azure_ai_evaluator",
-                "name": f"builtin.{name}",
+                "name": name,
                 "evaluator_name": f"builtin.{name}",
                 "evaluator_version": safety_version,
                 "data_mapping": dict(safety_mapping),
@@ -613,12 +613,12 @@ def _measurements(
             "score": quality_score,
         }
     ]
-    for short_name, catalog_name, _version in safety_entries:
+    for short_name, _catalog_name, _version in safety_entries:
         rate = safety_pass_rate if degraded_safety_name in (None, short_name) else 1.0
         passed = round(rate * total)
         measurements.append(
             {
-                "testing_criteria": catalog_name,
+                "testing_criteria": short_name,
                 "passed": passed,
                 "failed": total - passed,
                 "errored": 0,
