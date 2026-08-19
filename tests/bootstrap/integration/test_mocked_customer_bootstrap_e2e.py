@@ -59,7 +59,7 @@ PILOT_BASELINE_TAG = "pilot-baseline-bound"
 PILOT_BASELINE_COMMIT = "f54b3702971fabbd27eb01a24e4379899cfd1ffb"
 
 RUNTIME_REPOSITORY = "https://github.com/XOEEst/foundry-optimizer-coding-agent-plugin.git"
-RUNTIME_COMMIT = "3e47ec5cd54f0aaa3702ed38cc6c4d995a310ba4"
+RUNTIME_COMMIT = "5f03a9188eb720489404980458d94fb3c353469c"
 UV_LOCK_SHA256 = "74d7bb534c53e71a61ce197f3d5fa3169f2413373c2e42617280e78e83d6c681"
 
 REPOSITORY_ID = "example-customer/foundry-bootstrap-pilot"
@@ -268,7 +268,7 @@ def _build_plan_input(
             "deployment_environment": GITHUB_DEPLOYMENT_ENVIRONMENT,
             "shared_client_id": shared_client_id,
             "client_id_variable_name": GITHUB_VARIABLE_NAME,
-            "default_branch_policy_intent": "require_main",
+            "default_branch_policy_intent": "preserve_repository_default",
         },
         "azure_phase": {
             "schema_version": 1,
@@ -678,20 +678,17 @@ def test_mocked_customer_bootstrap_end_to_end(tmp_path: Path, request: pytest.Fi
     proposed_path = instructions_path.with_name(instructions_path.name + ".foundry-proposed")
     assert proposed_path.exists()
 
-    # -- 5. op-initial continued: GitHub environments/variables/branch-policy plan+apply. --
-    # Both environments get created, but the shared OIDC client-id variable and the default
-    # branch protection policy are scoped to the deployment environment only -- the optimizer
-    # (Copilot agent) environment never needs a deployment credential or branch restriction.
+    # -- 5. op-initial continued: GitHub environments and shared variables plan+apply. --
+    # Both environments get the shared UAMI client id. Repository-default branch policy intent
+    # creates no custom environment branch-policy action.
     github_receipt = _approve_and_apply(orch, envelope_initial, operation_id="op-initial", phase="github")
     assert github_receipt.state == "applied"
     assert len(github_receipt.receipt.created_actions) > 0
     for env in (GITHUB_OPTIMIZER_ENVIRONMENT, GITHUB_DEPLOYMENT_ENVIRONMENT):
         assert github_state[env]["exists"] is True
         assert github_state[env]["policy"] is not None
-    assert github_state[GITHUB_OPTIMIZER_ENVIRONMENT]["variable_value"] is None
-    assert not github_state[GITHUB_OPTIMIZER_ENVIRONMENT]["branch_policies"]
-    assert github_state[GITHUB_DEPLOYMENT_ENVIRONMENT]["variable_value"] == CLIENT_ID
-    assert github_state[GITHUB_DEPLOYMENT_ENVIRONMENT]["branch_policies"], "deployment environment missing a branch policy"
+        assert github_state[env]["variable_value"] == CLIENT_ID
+        assert not github_state[env]["branch_policies"]
 
     # -- 6. op-initial continued: Azure create-if-missing shared UAMI, two OIDC subjects, role. --
     azure_receipt = _approve_and_apply(orch, envelope_initial, operation_id="op-initial", phase="azure")
@@ -812,17 +809,11 @@ def test_mocked_customer_bootstrap_end_to_end(tmp_path: Path, request: pytest.Fi
     github_state[GITHUB_DEPLOYMENT_ENVIRONMENT]["policy"] = original_policy
 
     # -- 11. Rollback: GitHub (op-initial) -- created components are compensated. --
-    # `copilot` was created directly by its own environment action, so rollback deletes it
-    # outright. `foundry-production` was implicitly brought into existence as a side effect
-    # of the branch-policy action (which ran first in action-id order) -- its own environment
-    # action therefore only *adopted* an already-live environment and carries no rollback of
-    # its own, so rollback surgically compensates just the branch-policy/variable it created
-    # and leaves the (pre-existing, from this operation's point of view) environment in place.
+    # Both environments were created directly by this operation, so rollback removes both.
     rolled_github = orch.rollback_phase(repository_id=REPOSITORY_ID, operation_id="op-initial", phase="github", runtime_commit=RUNTIME_COMMIT)
     assert rolled_github.state == "rolled_back"
     assert github_state[GITHUB_OPTIMIZER_ENVIRONMENT]["exists"] is False
-    assert github_state[GITHUB_DEPLOYMENT_ENVIRONMENT]["exists"] is True
-    assert github_state[GITHUB_DEPLOYMENT_ENVIRONMENT]["policy"] is None
+    assert github_state[GITHUB_DEPLOYMENT_ENVIRONMENT]["exists"] is False
     for env in (GITHUB_OPTIMIZER_ENVIRONMENT, GITHUB_DEPLOYMENT_ENVIRONMENT):
         assert github_state[env]["variable_value"] is None
         assert github_state[env]["branch_policies"] == []
