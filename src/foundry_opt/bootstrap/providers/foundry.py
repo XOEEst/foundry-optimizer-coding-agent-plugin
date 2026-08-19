@@ -110,7 +110,6 @@ _EVAL_SCENARIO = 'synthetic_data_gen_preview'
 _SYNTHETIC_ITEM_GENERATION_TYPE = 'synthetic_data_gen_preview'
 _ITEM_QUERY_REFERENCE = 'item.query'
 _EVALUATOR_DATA_MAPPING = {'query': '{{item.query}}', 'response': '{{sample.output_text}}'}
-_OBJECTIVE_DATA_MAPPING = {'query': '{{item.query}}', 'response': '{{sample.output_items}}'}
 _MAX_RUN_OUTPUT_ITEMS = 5000
 _MAX_AGENT_CODE_BYTES = 32 * 1024 * 1024
 _MAX_AGENT_CODE_ENTRIES = 2000
@@ -2572,6 +2571,26 @@ class FoundryAdapter:
             )
         return {'deployment_name': model_deployment}
 
+    @staticmethod
+    def _evaluator_data_mapping(evaluator: Mapping[str, object]) -> Mapping[str, str]:
+        raw = evaluator.get('raw')
+        definition = (
+            raw.get('definition') or raw.get('rubric')
+            if isinstance(raw, Mapping)
+            else None
+        )
+        schema = definition.get('data_schema') if isinstance(definition, Mapping) else None
+        properties = schema.get('properties') if isinstance(schema, Mapping) else None
+        property_names = set(properties) if isinstance(properties, Mapping) else set()
+        mapping = {'query': '{{item.query}}'}
+        if 'response' in property_names:
+            mapping['response'] = '{{sample.output_text}}'
+        elif 'messages' in property_names:
+            mapping['messages'] = '{{sample.output_items}}'
+        else:
+            mapping['response'] = '{{sample.output_text}}'
+        return mapping
+
     def _await_activation_run(self, run_id: str, definition_id: str, *, deadline_monotonic: float | None = None) -> Mapping[str, object]:
         client = self._openai_observer_client()
         if deadline_monotonic is None:
@@ -3524,7 +3543,7 @@ class FoundryAdapter:
                     existing,
                     contract.activation_plan.model_deployment,
                 ),
-                'data_mapping': dict(_OBJECTIVE_DATA_MAPPING),
+                'data_mapping': dict(self._evaluator_data_mapping(existing)),
             },
         }
         for guardrail in guardrails:

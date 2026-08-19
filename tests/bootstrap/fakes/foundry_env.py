@@ -73,7 +73,7 @@ def onboarding_definition_criteria(
             "evaluator_version": objective_version,
             "data_mapping": {
                 "query": "{{item.query}}",
-                "response": "{{sample.output_items}}",
+                "response": "{{sample.output_text}}",
             },
             "initialization_parameters": {"deployment_name": model_deployment},
         }
