@@ -347,6 +347,49 @@ def test_live_agent_status_uses_timeout_bound_httpx(monkeypatch) -> None:
     assert observed["headers"]["Authorization"] == "Bearer token"
 
 
+def test_live_agent_cleanup_uses_httpx_and_verifies_absence(monkeypatch) -> None:
+    class _TokenCredential:
+        def get_token(self, *scopes, **kwargs):
+            return AccessToken("token", 4102444800)
+
+    class _Client:
+        def __init__(self, endpoint, credential):
+            self.agents = object()
+
+    observed = {}
+
+    def _delete(url, **kwargs):
+        observed["url"] = url
+        observed.update(kwargs)
+        return httpx.Response(204, request=httpx.Request("DELETE", url))
+
+    monkeypatch.setattr(
+        "foundry_opt.bootstrap.providers.foundry.AIProjectClient",
+        _Client,
+    )
+    monkeypatch.setattr(
+        "foundry_opt.bootstrap.providers.foundry.httpx.delete",
+        _delete,
+    )
+    adapter = FoundryAdapter(
+        "https://example.services.ai.azure.com/api/projects/example",
+        _TokenCredential(),
+        request_timeout=42,
+    )
+    adapter._created_drafts[("draft", "1")] = "a" * 64
+    monkeypatch.setattr(adapter, "_get_agent_version", lambda *_args: None)
+
+    result = adapter.cleanup_activation_draft(
+        draft_agent_name="draft",
+        draft_agent_version="1",
+    )
+
+    assert result["completed"] is True
+    assert observed["timeout"] == 42
+    assert observed["params"] == {"force": "true", "api-version": "v1"}
+    assert observed["headers"]["Authorization"] == "Bearer token"
+
+
 def test_a_failed_safety_gate_still_deletes_the_owned_draft() -> None:
     contract = build_contract()
     adapter, fakes = build_fake_adapter(safety_pass_rate=0.9)
