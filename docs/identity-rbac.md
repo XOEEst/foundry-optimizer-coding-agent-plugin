@@ -84,6 +84,14 @@ Azure provider must consume those exact subjects; it never reconstructs them fro
 `owner/repository` name. Before approval, confirm the Azure action summary contains exactly two
 subjects and that both begin with the reviewed registry `oidc_subject_prefix`.
 
+For adopted Entra applications, the credential's display `name` is not its identity. Bootstrap
+inventories the application's federated credentials and adopts one unique exact
+issuer/subject/audience match even when it has a legacy human-readable name. The deterministic
+subject hash is used only as the name for a newly created credential. A duplicate match, a
+same-subject credential with different issuer/audience, or a deterministic-name collision fails
+closed before mutation. Graph deletion and rollback use the credential object ID returned by
+inventory.
+
 Some Microsoft Entra tenants additionally require the GitHub OIDC token's
 `enterprise` claim to be `microsoft`, `github`, or `microsoftopensource`.
 Personal repositories emit an empty enterprise claim and cannot satisfy that

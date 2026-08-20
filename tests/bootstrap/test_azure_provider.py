@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import hashlib
 
+import httpx
 import pytest
 
 from foundry_opt.bootstrap.contracts import BootstrapAction, BootstrapPlan
-from foundry_opt.bootstrap.providers.azure import AzureArmRestProvider, AzureProviderError
-from tests.bootstrap.fakes import AzureTransportRecorder
+from foundry_opt.bootstrap.providers.azure import (
+    AzureArmRestProvider,
+    AzureIdentityReference,
+    AzureProviderError,
+)
+from tests.bootstrap.fakes import AzureTransportRecorder, json_body
 
 SUB = "55555555-5555-5555-5555-555555555555"
 TENANT = "44444444-4444-4444-4444-444444444444"
@@ -18,6 +23,11 @@ SCOPE = f"/subscriptions/{SUB}/resourceGroups/rg/providers/Microsoft.CognitiveSe
 ROLE = f"/subscriptions/{SUB}/providers/Microsoft.Authorization/roleDefinitions/00000000-0000-0000-0000-000000000111"
 ASSIGNMENT_ID = "763b639a-9ee2-570d-b5c4-d6f92b269bbe"
 ROLE_URL = f"https://management.azure.com{SCOPE}/providers/Microsoft.Authorization/roleAssignments/{ASSIGNMENT_ID}?api-version=2022-04-01"
+APPLICATION_OBJECT_ID = "33333333-3333-3333-3333-333333333333"
+GRAPH_FIC_COLLECTION = (
+    "https://graph.microsoft.com/v1.0/applications/"
+    f"{APPLICATION_OBJECT_ID}/federatedIdentityCredentials"
+)
 
 
 def _plan(*actions: BootstrapAction) -> BootstrapPlan:
@@ -66,6 +76,37 @@ def _uami_payload() -> dict[str, object]:
 
 def _fic_payload(subject: str) -> dict[str, object]:
     return {"properties": {"issuer": "https://token.actions.githubusercontent.com", "subject": subject, "audiences": ["api://AzureADTokenExchange"]}}
+
+
+def _entra_identity() -> AzureIdentityReference:
+    return AzureIdentityReference(
+        kind="entra_application",
+        client_id=CLIENT,
+        resource_id=None,
+        object_id=APPLICATION_OBJECT_ID,
+        principal_id=PRINCIPAL,
+        tenant_id=TENANT,
+        subscription_id=SUB,
+        name="existing-app",
+        adopted=True,
+    )
+
+
+def _entra_action() -> BootstrapAction:
+    return BootstrapAction(
+        action_id="identity",
+        phase="azure",
+        stage="planned",
+        kind="entra-application",
+        diagnostics=(
+            f"subscription_id={SUB}",
+            f"tenant_id={TENANT}",
+            f"client_id={CLIENT}",
+            f"object_id={APPLICATION_OBJECT_ID}",
+            f"name={CLIENT}",
+            "adopted=true",
+        ),
+    )
 
 
 def _role_payload(*, condition: str | None = None, condition_version: str | None = None, delegated_id: str | None = None) -> dict[str, object]:
@@ -176,6 +217,185 @@ def test_planned_bindings_require_exactly_two_explicit_subjects() -> None:
                 actions=(identity, one_subject),
             )
         )
+
+
+def test_entra_fic_adopts_exact_subject_regardless_of_legacy_name() -> None:
+    recorder = AzureTransportRecorder()
+    provider = _provider(recorder)
+    subject = _subjects()[0]
+    existing = {
+        "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        "name": "github-octo-repo-copilot",
+        "issuer": "https://token.actions.githubusercontent.com",
+        "subject": subject,
+        "audiences": ["api://AzureADTokenExchange"],
+    }
+    recorder.add(
+        "GET",
+        GRAPH_FIC_COLLECTION,
+        (200, {"value": [existing]}),
+    )
+
+    observed = provider._get_fic(_entra_identity(), subject)
+
+    assert observed == existing
+    assert [str(request.url) for request in recorder.requests] == [
+        GRAPH_FIC_COLLECTION
+    ]
+
+
+def test_entra_apply_adopts_legacy_name_and_creates_only_missing_subject() -> None:
+    subjects = _subjects()
+    credentials: list[dict[str, object]] = [
+        {
+            "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "name": "github-octo-repo-copilot",
+            "issuer": "https://token.actions.githubusercontent.com",
+            "subject": subjects[0],
+            "audiences": ["api://AzureADTokenExchange"],
+        }
+    ]
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        url = str(request.url)
+        if request.method == "GET" and url == (
+            "https://graph.microsoft.com/v1.0/applications/"
+            f"{APPLICATION_OBJECT_ID}"
+        ):
+            return httpx.Response(
+                200,
+                json={
+                    "id": APPLICATION_OBJECT_ID,
+                    "appId": CLIENT,
+                    "displayName": "existing-app",
+                },
+                request=request,
+            )
+        if request.method == "GET" and request.url.path.endswith(
+            "/servicePrincipals"
+        ):
+            return httpx.Response(
+                200,
+                json={
+                    "value": [
+                        {
+                            "id": PRINCIPAL,
+                            "appOwnerOrganizationId": TENANT,
+                        }
+                    ]
+                },
+                request=request,
+            )
+        if request.method == "GET" and url == GRAPH_FIC_COLLECTION:
+            return httpx.Response(
+                200,
+                json={"value": list(credentials)},
+                request=request,
+            )
+        if request.method == "POST" and url == GRAPH_FIC_COLLECTION:
+            body = dict(json_body(request))
+            created = {
+                "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                **body,
+            }
+            credentials.append(created)
+            return httpx.Response(201, json=created, request=request)
+        return httpx.Response(
+            404,
+            json={"error": {"code": "not_found"}},
+            request=request,
+        )
+
+    provider = AzureArmRestProvider(
+        token_provider=lambda scope: "token",
+        transport=httpx.MockTransport(handler),
+    )
+
+    receipt = provider.apply_bindings(
+        _plan(
+            _entra_action(),
+            *(_fic_action(subject) for subject in subjects),
+        )
+    )
+    state = provider.export_provider_state(receipt)
+
+    assert receipt.adopted_actions == ("azure-fic-copilot",)
+    assert receipt.created_actions == ("azure-fic-foundry-production",)
+    assert len([request for request in requests if request.method == "POST"]) == 1
+    assert state["federated_credentials"][0]["resource_id"].endswith(
+        "/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    )
+    assert state["federated_credentials"][1]["resource_id"].endswith(
+        "/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    )
+
+
+def test_entra_fic_inventory_fails_closed_on_subject_mismatch() -> None:
+    recorder = AzureTransportRecorder()
+    provider = _provider(recorder)
+    subject = _subjects()[0]
+    recorder.add(
+        "GET",
+        GRAPH_FIC_COLLECTION,
+        (
+            200,
+            {
+                "value": [
+                    {
+                        "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                        "name": "legacy",
+                        "issuer": "https://token.actions.githubusercontent.com",
+                        "subject": subject,
+                        "audiences": ["unexpected"],
+                    }
+                ]
+            },
+        ),
+    )
+
+    with pytest.raises(
+        AzureProviderError,
+        match="unexpected issuer or audience",
+    ):
+        provider._get_fic(_entra_identity(), subject)
+
+
+def test_entra_fic_delete_uses_graph_credential_id() -> None:
+    recorder = AzureTransportRecorder()
+    provider = _provider(recorder)
+    subject = _subjects()[0]
+    credential_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    recorder.add(
+        "GET",
+        GRAPH_FIC_COLLECTION,
+        (
+            200,
+            {
+                "value": [
+                    {
+                        "id": credential_id,
+                        "name": "legacy",
+                        "issuer": "https://token.actions.githubusercontent.com",
+                        "subject": subject,
+                        "audiences": ["api://AzureADTokenExchange"],
+                    }
+                ]
+            },
+        ),
+    )
+    recorder.add(
+        "DELETE",
+        f"{GRAPH_FIC_COLLECTION}/{credential_id}",
+        (204, {}),
+    )
+
+    provider._delete_fic(_entra_identity(), subject)
+
+    assert str(recorder.requests[-1].url) == (
+        f"{GRAPH_FIC_COLLECTION}/{credential_id}"
+    )
 
 
 def test_restore_reconciles_ambiguous_uami_before_verify_rollback() -> None:

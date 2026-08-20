@@ -230,8 +230,8 @@ class AzureArmRestProvider:
             self._append_attempt(state, action_id=action, kind="fic", target_resource_id=fic_url, target={"subject": subject})
             if preimage is None:
                 compensation.append(action)
-            disposition = self._ensure_fic(identity, subject, state, action)
-            record = {"action_id": action, "resource_id": fic_url, "scope": fic_scope, "subject": subject, "issuer": _ACTIONS_ISSUER, "audience": _ACTIONS_AUDIENCE, "preimage": preimage, "disposition": disposition}
+            disposition, live_fic = self._ensure_fic(identity, subject, preimage)
+            record = {"action_id": action, "resource_id": self._fic_resource_url(identity, subject, live_fic), "scope": fic_scope, "subject": subject, "issuer": _ACTIONS_ISSUER, "audience": _ACTIONS_AUDIENCE, "preimage": preimage, "disposition": disposition}
             state["federated_credentials"].append(_binding(record))
             if disposition == "created":
                 created.append(action)
@@ -447,30 +447,108 @@ class AzureArmRestProvider:
         return live, ("created" if response.status_code == 201 else "changed")
 
     def _fic_url(self, identity: AzureIdentityReference, subject: str) -> tuple[str, str]:
-        name = _fic_name(subject)
         if identity.kind == "user_assigned_managed_identity":
-            return (f"https://management.azure.com{identity.resource_id}/federatedIdentityCredentials/{name}", _ARM_SCOPE)
-        return (f"{_GRAPH_APPLICATIONS}/{identity.object_id}/federatedIdentityCredentials/{name}", _GRAPH_SCOPE)
+            return (f"https://management.azure.com{identity.resource_id}/federatedIdentityCredentials/{_fic_name(subject)}", _ARM_SCOPE)
+        object_id = _text(identity.object_id, field="identity.object_id")
+        return (f"{_GRAPH_APPLICATIONS}/{object_id}/federatedIdentityCredentials", _GRAPH_SCOPE)
 
     def _get_fic(self, identity: AzureIdentityReference, subject: str) -> Mapping[str, object] | None:
         url, scope = self._fic_url(identity, subject)
-        response = self._response("GET", url, scope=scope, params={"api-version": _FIC_API_VERSION} if scope == _ARM_SCOPE else None)
-        if response.status_code == 404:
-            return None
-        return _json_response(response)
+        if scope == _ARM_SCOPE:
+            response = self._response("GET", url, scope=scope, params={"api-version": _FIC_API_VERSION})
+            if response.status_code == 404:
+                return None
+            return _json_response(response)
+        payload = self._request("GET", url, scope=scope)
+        if payload.get("@odata.nextLink") is not None:
+            raise AzureProviderError(
+                "paginated federated credential inventory is not supported"
+            )
+        values = payload.get("value")
+        if not isinstance(values, list):
+            raise AzureProviderError(
+                "federated credential inventory must contain a value list"
+            )
+        credentials: list[Mapping[str, object]] = []
+        for item in values:
+            if not isinstance(item, Mapping):
+                raise AzureProviderError(
+                    "federated credential inventory contains a non-object item"
+                )
+            credentials.append(item)
+        subject_matches = [
+            item for item in credentials if item.get("subject") == subject
+        ]
+        exact_matches = [
+            item
+            for item in subject_matches
+            if item.get("issuer") == _ACTIONS_ISSUER
+            and item.get("audiences") == [_ACTIONS_AUDIENCE]
+        ]
+        if len(exact_matches) > 1 or len(subject_matches) > 1:
+            raise AzureProviderError(
+                "federated credential subject resolved ambiguously"
+            )
+        expected_name = _fic_name(subject)
+        name_conflicts = [
+            item
+            for item in credentials
+            if item.get("name") == expected_name and item not in exact_matches
+        ]
+        if name_conflicts:
+            raise AzureProviderError(
+                "deterministic federated credential name is already in use"
+            )
+        if exact_matches:
+            return exact_matches[0]
+        if subject_matches:
+            raise AzureProviderError(
+                "existing federated credential subject has unexpected issuer or audience"
+            )
+        return None
 
-    def _ensure_fic(self, identity: AzureIdentityReference, subject: str, state: dict[str, object], action_id: str) -> str:
-        existing = self._get_fic(identity, subject)
+    def _fic_resource_url(
+        self,
+        identity: AzureIdentityReference,
+        subject: str,
+        credential: Mapping[str, object],
+    ) -> str:
+        url, scope = self._fic_url(identity, subject)
+        if scope == _ARM_SCOPE:
+            return url
+        credential_id = _text(
+            credential.get("id"),
+            field="federatedCredential.id",
+        )
+        return f"{url}/{credential_id}"
+
+    def _ensure_fic(
+        self,
+        identity: AzureIdentityReference,
+        subject: str,
+        existing: Mapping[str, object] | None,
+    ) -> tuple[str, Mapping[str, object]]:
         if existing is not None:
             props = existing.get("properties", existing)
             assert isinstance(props, Mapping)
-            if props.get("issuer") == _ACTIONS_ISSUER and props.get("subject") == subject and props.get("audiences") == [_ACTIONS_AUDIENCE]:
-                return "adopted"
+            if (
+                props.get("issuer") == _ACTIONS_ISSUER
+                and props.get("subject") == subject
+                and props.get("audiences") == [_ACTIONS_AUDIENCE]
+            ):
+                return "adopted", existing
+            if identity.kind != "user_assigned_managed_identity":
+                raise AzureProviderError(
+                    "existing federated credential does not match the approved contract"
+                )
         url, scope = self._fic_url(identity, subject)
         response = self._response("PUT" if scope == _ARM_SCOPE else "POST", url if scope == _ARM_SCOPE else f"{_GRAPH_APPLICATIONS}/{identity.object_id}/federatedIdentityCredentials", scope=scope, params={"api-version": _FIC_API_VERSION} if scope == _ARM_SCOPE else None, json_body={"properties": {"issuer": _ACTIONS_ISSUER, "subject": subject, "audiences": [_ACTIONS_AUDIENCE]}} if scope == _ARM_SCOPE else {"name": _fic_name(subject), "issuer": _ACTIONS_ISSUER, "subject": subject, "audiences": [_ACTIONS_AUDIENCE]})
         if response.status_code not in {200, 201}:
             raise AzureProviderError(f"Azure request failed with HTTP {response.status_code}")
-        return "created" if existing is None and response.status_code == 201 else "changed"
+        return (
+            "created" if response.status_code == 201 else "changed",
+            _json_response(response),
+        )
 
     def _get_role(self, scope: str, assignment_id: str) -> Mapping[str, object] | None:
         response = self._response("GET", f"https://management.azure.com{scope}/{_ROLE_ASSIGNMENTS_SEGMENT}/{assignment_id}", scope=_ARM_SCOPE, params={"api-version": _AUTHZ_API_VERSION})
@@ -556,6 +634,11 @@ class AzureArmRestProvider:
 
     def _delete_fic(self, identity: AzureIdentityReference, subject: str) -> None:
         url, scope = self._fic_url(identity, subject)
+        if scope == _GRAPH_SCOPE:
+            existing = self._get_fic(identity, subject)
+            if existing is None:
+                return
+            url = self._fic_resource_url(identity, subject, existing)
         response = self._response("DELETE", url, scope=scope, params={"api-version": _FIC_API_VERSION} if scope == _ARM_SCOPE else None)
         if response.status_code not in {200, 202, 204, 404}:
             raise AzureProviderError(f"Azure request failed with HTTP {response.status_code}")
@@ -564,7 +647,7 @@ class AzureArmRestProvider:
         props = preimage.get("properties", preimage)
         assert isinstance(props, Mapping)
         url, scope = self._fic_url(identity, subject)
-        response = self._response("PUT" if scope == _ARM_SCOPE else "POST", url if scope == _ARM_SCOPE else f"{_GRAPH_APPLICATIONS}/{identity.object_id}/federatedIdentityCredentials", scope=scope, params={"api-version": _FIC_API_VERSION} if scope == _ARM_SCOPE else None, json_body={"properties": {"issuer": props.get("issuer"), "subject": props.get("subject"), "audiences": props.get("audiences")}} if scope == _ARM_SCOPE else {"name": _fic_name(subject), "issuer": props.get("issuer"), "subject": props.get("subject"), "audiences": props.get("audiences")})
+        response = self._response("PUT" if scope == _ARM_SCOPE else "POST", url, scope=scope, params={"api-version": _FIC_API_VERSION} if scope == _ARM_SCOPE else None, json_body={"properties": {"issuer": props.get("issuer"), "subject": props.get("subject"), "audiences": props.get("audiences")}} if scope == _ARM_SCOPE else {"name": _text(preimage.get("name"), field="federatedCredential.name"), "issuer": props.get("issuer"), "subject": props.get("subject"), "audiences": props.get("audiences")})
         if response.status_code not in {200, 201}:
             raise AzureProviderError(f"Azure request failed with HTTP {response.status_code}")
 
