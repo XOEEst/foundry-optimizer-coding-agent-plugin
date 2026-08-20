@@ -15,7 +15,7 @@ import yaml
 from pydantic import ValidationError
 
 from foundry_opt.bootstrap.command_io import BootstrapCliError, BootstrapExitCode, emit_json, load_json_file, write_json_file
-from foundry_opt.bootstrap.contracts import RootRegistry
+from foundry_opt.bootstrap.contracts import BootstrapSidecar, RootRegistry
 from foundry_opt.bootstrap.drivers import AzurePhaseDriver, EvaluationPhaseDriver, GitHubPhaseDriver, RepositoryPhaseDriver
 from foundry_opt.bootstrap.errors import (
     BootstrapApplyError,
@@ -306,15 +306,26 @@ def _persisted_sidecar(repo_root: Path, sidecar_path: str) -> dict[str, object] 
         data = target.read_bytes()
     except (FileNotFoundError, NotADirectoryError):
         return None
-    document = yaml.safe_load(data.decode("utf-8"))
-    lineage = document.get("evaluation_lineage") if isinstance(document, dict) else None
-    bundle = document.get("default_evaluator_bundle") if isinstance(document, dict) else None
-    objective = bundle.get("objective") if isinstance(bundle, dict) else None
+    try:
+        profile = BootstrapSidecar.from_document(data.decode("utf-8"))
+    except (UnicodeDecodeError, BootstrapConfigError, ValidationError):
+        document = yaml.safe_load(data.decode("utf-8"))
+        lineage = document.get("evaluation_lineage") if isinstance(document, dict) else None
+        bundle = document.get("default_evaluator_bundle") if isinstance(document, dict) else None
+        objective = bundle.get("objective") if isinstance(bundle, dict) else None
+        return {
+            "path": sidecar_path,
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "bundle_objective_hash": objective.get("objective_hash") if isinstance(objective, dict) else None,
+            "evaluation_lineage": lineage,
+        }
+    bundle = profile.default_evaluator_bundle
+    payload = profile.model_dump(mode="json")
     return {
         "path": sidecar_path,
         "sha256": hashlib.sha256(data).hexdigest(),
-        "bundle_objective_hash": objective.get("objective_hash") if isinstance(objective, dict) else None,
-        "evaluation_lineage": lineage,
+        "bundle_objective_hash": bundle.objective.objective_hash if bundle is not None else None,
+        **payload,
     }
 
 
@@ -802,9 +813,9 @@ def register_bootstrap_commands(app: typer.Typer) -> None:
                     "receipt": receipt.model_dump(mode="json"),
                     "sidecar_written": False,
                     "next_action": (
-                        "run bootstrap evaluation activate to atomically write the sidecar"
+                        "run bootstrap evaluation activate to atomically attach verification to the profile"
                         if receipt.state == "applied"
-                        else "resolve the failed evaluation activation before any repository sidecar mutation"
+                        else "resolve the failed evaluation activation before any repository profile verification mutation"
                     ),
                 }
             )
@@ -844,7 +855,7 @@ def register_bootstrap_commands(app: typer.Typer) -> None:
                     "runtime_commit": resolved_commit,
                     "receipt": receipt.model_dump(mode="json"),
                     "sidecar_written": True,
-                    "next_action": "commit the reviewed registry, sidecar, and managed lock changes",
+                    "next_action": "commit the reviewed registry, profile, and managed lock changes",
                 }
             )
         except Exception as exc:
@@ -871,7 +882,7 @@ def register_bootstrap_commands(app: typer.Typer) -> None:
             elif sidecar_state != "completed":
                 next_action = "run bootstrap evaluation activate"
             else:
-                next_action = "commit the reviewed registry, sidecar, and managed lock changes"
+                next_action = "commit the reviewed registry, profile, and managed lock changes"
             emit_json(
                 {
                     "status": "ok",

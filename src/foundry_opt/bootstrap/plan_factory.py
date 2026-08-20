@@ -7,6 +7,7 @@ from pathlib import Path
 import yaml
 
 from foundry_opt.bootstrap.contracts import (
+    BootstrapSidecar,
     BootstrapAction,
     DistributionSettings,
     ExplicitAgentEntry,
@@ -43,13 +44,32 @@ def load_trusted_manifest(plan_input: BootstrapPlanInput) -> tuple[TemplatePaylo
     payloads: list[TemplatePayloadSpec] = []
     base = Path(__file__).resolve().parents[3]
     for payload in manifest.managed_payloads:
-        if payload.template_id == "sidecar":
-            # The sidecar is the only managed payload that depends on a successful cloud
-            # evaluation activation, so it is written by the receipt-bound finalize step
-            # (`foundry-opt bootstrap evaluation activate`), never by the repository phase.
-            continue
         targets = plan_input.repository.selected_agents if payload.scope == "agent" else (plan_input.repository.selected_agents[0],)
         for agent in targets:
+            if payload.template_id == "sidecar":
+                profile = _profile_for_selected_agent(plan_input, agent)
+                if profile is None:
+                    if agent.rendered_enabled:
+                        raise BootstrapPlanError(
+                            "enabled selected agent requires a renderable foundry profile"
+                        )
+                    continue
+                rendered = yaml.safe_dump(
+                    profile.model_dump(mode="json"),
+                    sort_keys=False,
+                    allow_unicode=False,
+                )
+                patches: tuple[SemanticPatchSpec, ...] = ()
+                destination = payload.destination_path.replace("{selected.root}", agent.root)
+                payloads.append(
+                    TemplatePayloadSpec(
+                        template_id=payload.template_id,
+                        destination_path=destination,
+                        rendered_template=rendered,
+                        semantic_patches=patches,
+                    )
+                )
+                continue
             source = (base / payload.source_template_path).read_text(encoding="utf-8")
             rendered = _render_managed_payload(
                 template_id=payload.template_id,
@@ -128,6 +148,47 @@ def load_trusted_manifest(plan_input: BootstrapPlanInput) -> tuple[TemplatePaylo
     return tuple(payloads)
 
 
+def _profile_for_selected_agent(
+    plan_input: BootstrapPlanInput,
+    selected_agent: SelectedAgent,
+) -> BootstrapSidecar | None:
+    if selected_agent.profile_document is not None:
+        return selected_agent.profile_document
+    if plan_input.evaluations_phase is None:
+        return None
+    evaluation = next(
+        (
+            agent
+            for agent in plan_input.evaluations_phase.agents
+            if agent.repo_agent_id.casefold() == selected_agent.repo_agent_id.casefold()
+            and agent.onboarding_contract is not None
+            and agent.onboarding_contract.sidecar_policy is not None
+        ),
+        None,
+    )
+    if evaluation is None or evaluation.onboarding_contract is None:
+        return None
+    policy = evaluation.onboarding_contract.sidecar_policy
+    assert policy is not None
+    return BootstrapSidecar(
+        repo_agent_id=selected_agent.repo_agent_id,
+        source_root=policy.source_root,
+        package_root=policy.package_root,
+        editable_paths=selected_agent.editable_paths,
+        runtime=policy.runtime,
+        foundry_project=policy.foundry_project,
+        baseline_model=policy.baseline_model,
+        allowed_models=policy.allowed_models,
+        min_candidates=policy.min_candidates,
+        max_candidates=policy.max_candidates,
+        primary_metric=policy.primary_metric,
+        decision_policy=policy.decision_policy,
+        max_issue_evaluators=policy.max_issue_evaluators,
+        hard_guardrails=policy.hard_guardrails,
+        deployment=policy.deployment,
+    )
+
+
 def _managed_step_fragment(document: str, step_id: str) -> str:
     lines = document.splitlines()
     start = next(
@@ -201,7 +262,7 @@ def _render_managed_payload(
                     agent_id=agent.repo_agent_id,
                     root=agent.root,
                     config_path=agent.config_path,
-                    enabled=False,
+                    enabled=agent.rendered_enabled,
                 )
                 for agent in plan_input.repository.selected_agents
             ),
@@ -210,11 +271,6 @@ def _render_managed_payload(
             registry.model_dump(mode="json"),
             sort_keys=False,
             allow_unicode=False,
-        )
-    if template_id == "sidecar":
-        raise BootstrapPlanError(
-            "sidecar documents are produced from the resolved evaluation execution contract "
-            "after successful activation, never rendered during the repository phase"
         )
     return source
 

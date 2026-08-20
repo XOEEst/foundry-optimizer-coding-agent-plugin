@@ -2,16 +2,16 @@
 
 Evaluation onboarding turns a reviewed agent into an activated optimizer target: immutable
 datasets, one default evaluator bundle, immutable development/validating definitions, an
-activation smoke run, and a per-agent sidecar that is written only after that activation
-succeeds.
+activation smoke run, and a per-agent v2 profile whose static policy may be committed during
+repository apply before receipt-bound verification is attached.
 
 ## Command flow
 
 ```text
 foundry-opt bootstrap evaluation inventory   # assess reusable assets, trace eligibility, split targets
 foundry-opt bootstrap evaluation plan        # show the single composite action built from the reviewed contract
-foundry-opt bootstrap evaluation apply       # run the staged onboarding machine (no repository mutation)
-foundry-opt bootstrap evaluation activate    # receipt-bound atomic sidecar + registry activation
+foundry-opt bootstrap evaluation apply       # run the staged onboarding machine (no verification/profile enrichment)
+foundry-opt bootstrap evaluation activate    # receipt-bound atomic profile verification enrichment + registry/lock finalization
 foundry-opt bootstrap evaluation status      # phase state, sidecar activation state, resume action
 foundry-opt bootstrap evaluation inspect     # approved bounds, receipt finalization, persisted sidecar
 foundry-opt bootstrap evaluation replace     # explicit replacement of an already active bundle
@@ -49,7 +49,7 @@ The contract carries only reviewable, deterministic inputs:
 | `dataset_plan` | requested development/validating names and version, dataset type, optional storage connection (omitted for project-managed storage), generation kind, deterministic generation job id, generation-context fingerprint, reviewed reuse candidates |
 | `evaluator_plan` | requested evaluator name/version, deterministic rubric generation job id *or* one reviewed reuse candidate, the required built-in safety evaluator **names**, objective normalization and weight |
 | `definition_plan` / `activation_plan` | requested definition names, model deployment, owned draft agent name/version |
-| `sidecar_policy` | static sidecar content: roots, editable paths, runtime/protocol, Foundry binding, models, candidate bounds, decision policy, hard guardrails, deployment policy |
+| `sidecar_policy` | static profile content: roots, editable paths, runtime/protocol, Foundry binding, models, candidate bounds, decision policy, hard guardrails, deployment policy |
 | `replacement` | previous bundle/sidecar lineage retained until an explicit replacement activates |
 
 It deliberately carries **no** dynamic immutable identifiers: no dataset ids (except approved
@@ -216,8 +216,9 @@ identifiers, counts, and digests do.
 
 ## Receipt-bound activation
 
-The repository phase never writes `<agent-root>/.foundry/foundry-opt.yaml`. After a successful
-evaluations phase, `evaluation activate` verifies:
+Repository apply may write a lightweight v2 `<agent-root>/.foundry/foundry-opt.yaml` with
+static policy plus `verification.mode: off`. After a successful evaluations phase,
+`evaluation activate` verifies:
 
 1. the applied evaluations phase receipt and its single approval record,
 2. the parent plan hash, the evaluations phase plan hash, and the provider receipt hash,
@@ -225,10 +226,11 @@ evaluations phase, `evaluation activate` verifies:
 4. that the reviewed plan input rebuilds the approved composite actions exactly, and
 5. that every recorded finalization satisfies its approved contract and gates.
 
-It then derives the sidecar from static policy plus receipt-recorded immutable ids, writes it
-atomically with `evaluation_lineage.activation_binding` (operation, plan, approval, receipt,
-runtime SHA, and the finalization binding hash), enables the activated agents in
-`.foundry-opt/registry.yaml`, and advances `.foundry-opt/bootstrap.lock.json`.
+It then derives the verification bundle from receipt-recorded immutable ids, enriches the
+existing profile (or creates the fallback v2 profile when no repository-phase profile exists),
+writes `verification.lineage.activation_binding` (operation, plan, approval, receipt, runtime
+SHA, and the finalization binding hash) atomically, preserves the reviewed registry enabled
+state, and advances `.foundry-opt/bootstrap.lock.json`.
 
 Agents that fail any gate keep their previous sidecar and default evaluator bundle. An
 explicit replacement additionally requires the reviewed previous sidecar digest and previous
@@ -239,8 +241,9 @@ contract.
 human decision: it re-verifies the single evaluations-phase approval already recorded, refuses
 anything it cannot bind to that approval, and is idempotent — replaying it with unchanged
 bytes is a no-op, and an interrupted run is recoverable from the finalization journal. Until
-it succeeds, no repository sidecar, registry enablement, or lock advance exists, so `apply`
-alone can never enable an agent.
+it succeeds, the profile carries no repository-default verification bundle and no receipt-bound
+lineage, so deployment and verification gates stay blocked even if the registry entry already
+exists.
 
 Per-agent lineage is recorded per agent: `evaluator_replacements` in the operation state (and
 `replacements`/`bundles`/`lineages` in `evaluation status`/`inspect`) carries one bundle and
@@ -267,12 +270,14 @@ non-drifted state; any other live drift between plan and apply still fails close
 
 ## Registry and deployment semantics
 
-`.foundry-opt/registry.yaml` records desired enabled configuration, not live status. Only
-agents with a successful activation become `enabled: true`. `bound-diverged` and
-`bound-unknown` agents may optimize drafts, but their sidecar keeps
+`.foundry-opt/registry.yaml` records desired enabled configuration, not live status. A
+reviewed profile may therefore be committed and enabled before evaluation activation; legacy
+inputs that omit an explicit enabled state still render `enabled: false` until activation.
+`bound-diverged` and `bound-unknown` agents may optimize drafts, but their profile keeps
 `deployment.require_aligned_binding: true` and `deployment.enabled: false`, so merge-time
 deployment stays blocked until alignment is proven. `ready-unbound` and `not-ready` agents
-stop before onboarding: they plan no action, receive no sidecar, and stay disabled.
+stop before onboarding: they plan no action, receive no verification bundle, and stay
+disabled unless an explicit reviewed profile was committed separately.
 
 Alignment is proven with reviewed binding evidence — see
 [Binding evidence](binding-evidence.md). When the plan input carries evidence,

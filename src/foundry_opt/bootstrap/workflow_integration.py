@@ -67,7 +67,10 @@ def resolve_registry_selection(
             raise BootstrapConfigError("repoAgentId must resolve exactly one enabled registry agent")
         selected = matches[0]
     sidecar_path = repository_root / selected.config_path
-    sidecar_bytes = sidecar_path.read_bytes()
+    try:
+        sidecar_bytes = sidecar_path.read_bytes()
+    except OSError as exc:
+        raise BootstrapConfigError("enabled registry entry requires a profile at config_path") from exc
     sidecar = BootstrapSidecar.from_document(sidecar_bytes.decode("utf-8"))
     if sidecar.repo_agent_id != selected.agent_id:
         raise BootstrapConfigError("registry config_path sidecar repo_agent_id does not match registry agent_id")
@@ -147,7 +150,7 @@ def build_changed_path_matrix(
     )
     sidecars = {
         agent.agent_id: BootstrapSidecar.from_document((repository_root / agent.config_path).read_text(encoding="utf-8"))
-        for agent in registry.agents
+        for agent in enabled
     }
     include: list[WorkflowMatrixEntry] = []
     for agent in sorted(enabled, key=lambda item: (item.root.casefold(), item.agent_id.casefold(), item.config_path.casefold())):
@@ -173,6 +176,10 @@ def build_registered_deployment_plan(
     if not use_repository_default_evaluators:
         raise BootstrapConfigError("deployment plans must use the repository default evaluator bundle")
     active = selection.sidecar.default_evaluator_bundle
+    if active is None:
+        raise BootstrapConfigError(
+            "deployment plans require an activated repository default evaluator bundle"
+        )
     receipt_inputs = {
         "repo_agent_id": selection.repo_agent_id,
         "changed_root": changed_root,

@@ -14,7 +14,7 @@ the manifest is refused if the set differs.
 | Template id | Destination | Ownership |
 | --- | --- | --- |
 | `registry` | `.foundry-opt/registry.yaml` | owned |
-| `sidecar` | `<agent-root>/.foundry/foundry-opt.yaml` | owned, written only by receipt-bound evaluation activation |
+| `sidecar` | `<agent-root>/.foundry/foundry-opt.yaml` | owned, lightweight v2 profile during repository apply; receipt-bound verification enrichment during evaluation activation |
 | `optimizer-instruction` | `.github/instructions/foundry-opt.instructions.md` | owned |
 | `optimizer-issue-form` | `.github/ISSUE_TEMPLATE/foundry-optimize-agent.yml` | owned |
 | `custom-agent` | `.github/agents/foundry-optimizer.agent.md` | owned |

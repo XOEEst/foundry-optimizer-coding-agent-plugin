@@ -745,6 +745,10 @@ def load_registered_deployment_settings(
         raise RuntimeIntegrationError(
             "selected registered agent has no receipt-bound aligned activation"
         )
+    if sidecar.default_evaluator_bundle is None:
+        raise RuntimeIntegrationError(
+            "selected registered agent has no activated repository default evaluator bundle"
+        )
 
     registry_path = root / ".foundry-opt" / "registry.yaml"
     sidecar_path = root / selection.config_path
@@ -1107,12 +1111,27 @@ def _registered_agent_metadata(
     oidc_subject_prefix: str,
 ) -> AgentMetadata:
     sidecar = selection.sidecar
+    bundle = sidecar.default_evaluator_bundle
+    development_definition = sidecar.development_definition
+    validating_definition = sidecar.validating_definition
+    development_dataset = sidecar.development_dataset
+    validating_dataset = sidecar.validating_dataset
+    if (
+        bundle is None
+        or development_definition is None
+        or validating_definition is None
+        or development_dataset is None
+        or validating_dataset is None
+    ):
+        raise RuntimeIntegrationError(
+            "registered agent metadata requires an activated repository default evaluator bundle"
+        )
     evaluator_ids = tuple(
         dict.fromkeys(
             (
                 *(
                     evaluator.reference.evaluator_id
-                    for evaluator in sidecar.default_evaluator_bundle.objective.evaluators
+                    for evaluator in bundle.objective.evaluators
                 ),
                 *(guardrail.evaluator_name for guardrail in sidecar.hard_guardrails),
             )
@@ -1193,19 +1212,15 @@ def _registered_agent_metadata(
             "development_evaluation": {
                 "name": "development",
                 "split": "development",
-                "resolved_evaluation_id": (
-                    sidecar.development_definition.definition_id
-                ),
-                "dataset_id": sidecar.development_dataset.dataset_id,
+                "resolved_evaluation_id": development_definition.definition_id,
+                "dataset_id": development_dataset.dataset_id,
                 "custom_evaluator_ids": evaluator_ids,
             },
             "validating_evaluation": {
                 "name": "validating",
                 "split": "validating",
-                "resolved_evaluation_id": (
-                    sidecar.validating_definition.definition_id
-                ),
-                "dataset_id": sidecar.validating_dataset.dataset_id,
+                "resolved_evaluation_id": validating_definition.definition_id,
+                "dataset_id": validating_dataset.dataset_id,
                 "custom_evaluator_ids": evaluator_ids,
             },
         }

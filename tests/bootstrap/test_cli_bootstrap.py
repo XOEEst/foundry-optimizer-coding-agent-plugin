@@ -8,6 +8,12 @@ import subprocess
 from typer.testing import CliRunner
 import yaml
 
+from foundry_opt.bootstrap.contracts import (
+    EvaluatorNormalization,
+    EvaluatorReference,
+    ResolvedEvaluator,
+    ResolvedWeightedObjective,
+)
 from foundry_opt.cli import app
 from foundry_opt.bootstrap import drivers
 from foundry_opt.bootstrap.input_contracts import TrustedTemplateManifest
@@ -306,7 +312,8 @@ def test_evaluation_cli_flow_plans_applies_activates_and_reports(tmp_path: Path,
     applied_payload = json.loads(applied.stdout)
     assert applied_payload["sidecar_written"] is False
     sidecar = repo / "app" / ".foundry" / "foundry-opt.yaml"
-    assert not sidecar.exists()
+    sidecar_payload = yaml.safe_load(sidecar.read_text(encoding="utf-8"))
+    assert sidecar_payload["verification"]["mode"] == "off"
 
     pending = runner.invoke(app, ["bootstrap", "evaluation", "status", "--repository-id", "org/repo", "--operation-id", "op-eval", "--repo-root", str(repo), "--state-root", str(state_root)])
     assert pending.exit_code == 0
@@ -332,7 +339,7 @@ def test_evaluation_cli_flow_plans_applies_activates_and_reports(tmp_path: Path,
     inspected_payload = json.loads(inspected.stdout)
     assert inspected_payload["human_rubric_editor"] is False
     contract = inspected_payload["contracts"][0]
-    assert contract["persisted_sidecar"]["evaluation_lineage"]["activation_binding"]["runtime_commit"] == sha
+    assert contract["persisted_sidecar"]["verification"]["lineage"]["activation_binding"]["runtime_commit"] == sha
     assert contract["bounds"]["required_safety_pass_rate"] == 1.0
     finalization = contract["finalization"]
     assert {item["provenance"] for item in finalization["evaluators"]} == {"auto_generated_unreviewed", "reused_existing"}
@@ -395,6 +402,124 @@ def test_registered_deploy_plan_command_uses_repository_defaults(tmp_path: Path)
     )
     repository = tmp_path / "repo"
     shutil.copytree(template, repository)
+    objective_hash = ResolvedWeightedObjective.create(
+        (
+            ResolvedEvaluator(
+                reference=EvaluatorReference(
+                    evaluator_id="azureai://built-in/evaluators/safety",
+                    provenance="reused_existing",
+                ),
+                normalization=EvaluatorNormalization(kind="pass_fail"),
+                weight=1.0,
+            ),
+        )
+    ).objective_hash
+    (repository / "agent" / ".foundry" / "foundry-opt.yaml").write_text(
+        "\n".join(
+            (
+                "schema_version: 1",
+                "repo_agent_id: example-agent",
+                "source_root: agent",
+                "package_root: agent",
+                "editable_paths:",
+                "  - agent/main.py",
+                "shared_source_relations: []",
+                "runtime:",
+                "  schema_version: 1",
+                "  kind: hosted",
+                "  runtime: python_3_13",
+                "  entrypoint:",
+                "    - python",
+                "    - main.py",
+                "  dependency_resolution: remote_build",
+                "  protocol_name: responses",
+                "  protocol_version: '2.0.0'",
+                "foundry_project:",
+                "  schema_version: 1",
+                "  project_endpoint: https://example.services.ai.azure.com/api/projects/example",
+                "  account_resource_id: /subscriptions/1/resourceGroups/rg/providers/Microsoft.CognitiveServices/accounts/a",
+                "  agent_name: example-agent",
+                "  model_deployment_aliases: [baseline]",
+                "baseline_model: baseline",
+                "allowed_models: [baseline]",
+                "min_candidates: 1",
+                "max_candidates: 1",
+                "primary_metric: quality",
+                "decision_policy:",
+                "  schema_version: 1",
+                "  minimum_aggregate_delta: 0.01",
+                "  focused_cases_required: true",
+                "  max_regressions: 0",
+                "development_dataset:",
+                "  schema_version: 1",
+                "  dataset_id: azureai://accounts/a/projects/p/data/dev/versions/1",
+                "validating_dataset:",
+                "  schema_version: 1",
+                "  dataset_id: azureai://accounts/a/projects/p/data/val/versions/1",
+                "development_definition:",
+                "  schema_version: 1",
+                "  definition_id: eval_development",
+                "validating_definition:",
+                "  schema_version: 1",
+                "  definition_id: eval_validating",
+                "default_evaluator_bundle:",
+                "  schema_version: 1",
+                "  objective:",
+                "    schema_version: 1",
+                "    evaluators:",
+                "      - schema_version: 1",
+                "        reference:",
+                "          schema_version: 1",
+                "          evaluator_id: azureai://built-in/evaluators/safety",
+                "          provenance: reused_existing",
+                "        normalization:",
+                "          schema_version: 1",
+                "          kind: pass_fail",
+                "        weight: 1.0",
+                f"    objective_hash: {objective_hash}",
+                "  datasets:",
+                "    - schema_version: 1",
+                "      dataset_id: azureai://accounts/a/projects/p/data/dev/versions/1",
+                "    - schema_version: 1",
+                "      dataset_id: azureai://accounts/a/projects/p/data/val/versions/1",
+                "  definitions:",
+                "    - schema_version: 1",
+                "      definition_id: eval_development",
+                "    - schema_version: 1",
+                "      definition_id: eval_validating",
+                "evaluation_lineage:",
+                "  schema_version: 1",
+                "  split_algorithm_version: evaluation-core-split/v4",
+                f"  split_hash: {'a' * 64}",
+                f"  split_lineage_hash: {'b' * 64}",
+                "  development_case_count: 20",
+                "  validating_case_count: 10",
+                "  dataset_strategy: synthetic_only",
+                f"  generation_context_fingerprint: {'c' * 64}",
+                "  evaluator_provenance: reused_existing",
+                f"  bundle_objective_hash: {objective_hash}",
+                "  activation_binding:",
+                "    schema_version: 1",
+                "    operation_id: op",
+                f"    plan_hash: {'d' * 64}",
+                f"    approval_hash: {'e' * 64}",
+                f"    receipt_hash: {'f' * 64}",
+                f"    runtime_commit: {'a' * 40}",
+                "max_issue_evaluators: 8",
+                "hard_guardrails:",
+                "  - schema_version: 1",
+                "    evaluator_name: safety",
+                "    required_pass_rate: 1.0",
+                "    required: true",
+                "deployment:",
+                "  schema_version: 1",
+                "  environment: foundry-production",
+                "  enabled: true",
+                "  require_aligned_binding: true",
+            )
+        ),
+        encoding="utf-8",
+    )
     subprocess.run(
         ["git", "-C", str(repository), "init", "--quiet"],
         check=True,

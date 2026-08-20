@@ -47,6 +47,7 @@ OwnerScope = Literal["repository", "agent", "shared-runtime"]
 ActivationOutcome = Literal["succeeded", "failed", "compensation_required", "unknown"]
 SemanticPatchOperation = Literal["replace", "insert_before", "insert_after", "delete"]
 NormalizationKind = Literal["pass_fail", "scalar"]
+VerificationMode = Literal["off", "optional", "required"]
 
 PROHIBITED_CONTENT_KEYS = frozenset({"prompt", "prompts", "response", "responses", "trace", "traces", "dataset_rows", "token", "tokens", "raw_prompt", "raw_response", "transcript", "content"})
 MAX_ISSUE_EVALUATORS = 8
@@ -372,7 +373,85 @@ class DeploymentSettings(BootstrapDocument):
     require_aligned_binding: bool
 
 
-class BootstrapSidecar(BootstrapDocument):
+class SelectedAgentProfile(BootstrapDocument):
+    package_root: str
+    shared_source_relations: tuple[SharedSourceRelation, ...] = ()
+    runtime: RuntimeProtocolSettings
+    foundry_project: FoundryProjectSettings
+    baseline_model: str
+    allowed_models: tuple[str, ...]
+    min_candidates: int
+    max_candidates: int
+    primary_metric: str
+    decision_policy: DecisionPolicy
+    max_issue_evaluators: int = MAX_ISSUE_EVALUATORS
+    hard_guardrails: tuple[HardGuardrail, ...]
+    deployment: DeploymentSettings
+
+    @field_validator('package_root')
+    @classmethod
+    def validate_package_root(cls, value: str) -> str:
+        return _validate_safe_path(value, field='package_root', allow_dot=True)
+
+    @model_validator(mode='after')
+    def validate_profile(self) -> Self:
+        if self.min_candidates <= 0 or self.max_candidates <= 0 or self.min_candidates > self.max_candidates:
+            raise BootstrapConfigError('candidate bounds must be positive and ordered')
+        if not 1 <= self.max_issue_evaluators <= MAX_ISSUE_EVALUATORS:
+            raise BootstrapConfigError('max_issue_evaluators must be between 1 and 8')
+        if not self.hard_guardrails:
+            raise BootstrapConfigError('hard_guardrails must not be empty')
+        return self
+
+
+class VerificationBundle(BootstrapDocument):
+    development_dataset: ImmutableDatasetReference
+    validating_dataset: ImmutableDatasetReference
+    development_definition: ImmutableDefinitionReference
+    validating_definition: ImmutableDefinitionReference
+    default_evaluator_bundle: DefaultEvaluatorBundle
+
+    @model_validator(mode='after')
+    def validate_bundle(self) -> Self:
+        bundle_dataset_ids = {item.dataset_id for item in self.default_evaluator_bundle.datasets}
+        explicit_dataset_ids = {self.development_dataset.dataset_id, self.validating_dataset.dataset_id}
+        if bundle_dataset_ids != explicit_dataset_ids:
+            raise BootstrapConfigError('default bundle datasets must match explicit development/validating datasets')
+        bundle_definition_ids = {item.definition_id for item in self.default_evaluator_bundle.definitions}
+        explicit_definition_ids = {self.development_definition.definition_id, self.validating_definition.definition_id}
+        if bundle_definition_ids != explicit_definition_ids:
+            raise BootstrapConfigError('default bundle definitions must match explicit development/validating definitions')
+        return self
+
+
+class VerificationSettings(BootstrapDocument):
+    mode: VerificationMode = 'off'
+    bundle: VerificationBundle | None = None
+    lineage: EvaluationLineage | None = None
+
+    @model_validator(mode='after')
+    def validate_verification(self) -> Self:
+        if self.mode == 'off':
+            if self.bundle is not None or self.lineage is not None:
+                raise BootstrapConfigError('verification mode off cannot persist bundle or lineage')
+            return self
+        if self.bundle is None:
+            raise BootstrapConfigError('verification bundle is required when verification mode is optional or required')
+        if (
+            self.lineage is not None
+            and self.lineage.bundle_objective_hash
+            != self.bundle.default_evaluator_bundle.objective.objective_hash
+        ):
+            raise BootstrapConfigError('verification lineage must match the persisted default evaluator bundle')
+        return self
+
+    def require_bundle(self, *, detail: str) -> VerificationBundle:
+        if self.bundle is None:
+            raise BootstrapConfigError(detail)
+        return self.bundle
+
+
+class _BootstrapSidecarV1(BootstrapDocument):
     repo_agent_id: AgentId
     source_root: str
     package_root: str
@@ -428,6 +507,178 @@ class BootstrapSidecar(BootstrapDocument):
         if not self.hard_guardrails:
             raise BootstrapConfigError('hard_guardrails must not be empty')
         return self
+
+
+class BootstrapSidecar(FrozenModel):
+    schema_version: Literal[2] = 2
+    repo_agent_id: AgentId
+    source_root: str
+    package_root: str
+    editable_paths: tuple[str, ...]
+    shared_source_relations: tuple[SharedSourceRelation, ...] = ()
+    runtime: RuntimeProtocolSettings
+    foundry_project: FoundryProjectSettings
+    baseline_model: str
+    allowed_models: tuple[str, ...]
+    min_candidates: int
+    max_candidates: int
+    primary_metric: str
+    decision_policy: DecisionPolicy
+    max_issue_evaluators: int = MAX_ISSUE_EVALUATORS
+    hard_guardrails: tuple[HardGuardrail, ...]
+    deployment: DeploymentSettings
+    verification: VerificationSettings = Field(default_factory=VerificationSettings)
+
+    @classmethod
+    def from_document(cls, document: str | bytes | Mapping[str, object]) -> Self:
+        try:
+            payload = load_strict_yaml_mapping(document, subject=cls.__name__)
+        except POCConfigurationError as exc:
+            raise BootstrapConfigError(str(exc)) from exc
+        try:
+            if payload.get('schema_version', 1) == 1:
+                return cls.from_legacy(_BootstrapSidecarV1.model_validate(payload))
+            return cls.model_validate(payload)
+        except ValidationError as exc:
+            raise BootstrapConfigError(str(exc)) from exc
+
+    @classmethod
+    def from_legacy(cls, legacy: _BootstrapSidecarV1) -> 'BootstrapSidecar':
+        verification_mode: VerificationMode = 'required' if legacy.deployment.enabled else 'optional'
+        return cls(
+            repo_agent_id=legacy.repo_agent_id,
+            source_root=legacy.source_root,
+            package_root=legacy.package_root,
+            editable_paths=legacy.editable_paths,
+            shared_source_relations=legacy.shared_source_relations,
+            runtime=legacy.runtime,
+            foundry_project=legacy.foundry_project,
+            baseline_model=legacy.baseline_model,
+            allowed_models=legacy.allowed_models,
+            min_candidates=legacy.min_candidates,
+            max_candidates=legacy.max_candidates,
+            primary_metric=legacy.primary_metric,
+            decision_policy=legacy.decision_policy,
+            max_issue_evaluators=legacy.max_issue_evaluators,
+            hard_guardrails=legacy.hard_guardrails,
+            deployment=legacy.deployment,
+            verification=VerificationSettings(
+                mode=verification_mode,
+                bundle=VerificationBundle(
+                    development_dataset=legacy.development_dataset,
+                    validating_dataset=legacy.validating_dataset,
+                    development_definition=legacy.development_definition,
+                    validating_definition=legacy.validating_definition,
+                    default_evaluator_bundle=legacy.default_evaluator_bundle,
+                ),
+                lineage=legacy.evaluation_lineage,
+            ),
+        )
+
+    @classmethod
+    def from_selected_agent_profile(
+        cls,
+        *,
+        repo_agent_id: str,
+        source_root: str,
+        editable_paths: Sequence[str],
+        profile: SelectedAgentProfile,
+    ) -> 'BootstrapSidecar':
+        return cls(
+            repo_agent_id=repo_agent_id,
+            source_root=source_root,
+            package_root=profile.package_root,
+            editable_paths=tuple(editable_paths),
+            shared_source_relations=profile.shared_source_relations,
+            runtime=profile.runtime,
+            foundry_project=profile.foundry_project,
+            baseline_model=profile.baseline_model,
+            allowed_models=profile.allowed_models,
+            min_candidates=profile.min_candidates,
+            max_candidates=profile.max_candidates,
+            primary_metric=profile.primary_metric,
+            decision_policy=profile.decision_policy,
+            max_issue_evaluators=profile.max_issue_evaluators,
+            hard_guardrails=profile.hard_guardrails,
+            deployment=profile.deployment,
+        )
+
+    @field_validator('source_root')
+    @classmethod
+    def validate_source_root(cls, value: str) -> str:
+        return _validate_safe_path(value, field='source_root')
+
+    @field_validator('package_root')
+    @classmethod
+    def validate_package_root(cls, value: str) -> str:
+        return _validate_safe_path(value, field='package_root', allow_dot=True)
+
+    @field_validator('editable_paths')
+    @classmethod
+    def validate_editable_paths(cls, value: Sequence[str]) -> tuple[str, ...]:
+        return validate_repository_relative_paths(value, field='editable_paths', allow_glob=True)
+
+    @model_validator(mode='after')
+    def validate_sidecar(self) -> Self:
+        if self.min_candidates <= 0 or self.max_candidates <= 0 or self.min_candidates > self.max_candidates:
+            raise BootstrapConfigError('candidate bounds must be positive and ordered')
+        if not 1 <= self.max_issue_evaluators <= MAX_ISSUE_EVALUATORS:
+            raise BootstrapConfigError('max_issue_evaluators must be between 1 and 8')
+        if not self.hard_guardrails:
+            raise BootstrapConfigError('hard_guardrails must not be empty')
+        return self
+
+    @property
+    def default_evaluator_bundle(self) -> DefaultEvaluatorBundle | None:
+        bundle = self.verification.bundle
+        return None if bundle is None else bundle.default_evaluator_bundle
+
+    @property
+    def development_dataset(self) -> ImmutableDatasetReference | None:
+        bundle = self.verification.bundle
+        return None if bundle is None else bundle.development_dataset
+
+    @property
+    def validating_dataset(self) -> ImmutableDatasetReference | None:
+        bundle = self.verification.bundle
+        return None if bundle is None else bundle.validating_dataset
+
+    @property
+    def development_definition(self) -> ImmutableDefinitionReference | None:
+        bundle = self.verification.bundle
+        return None if bundle is None else bundle.development_definition
+
+    @property
+    def validating_definition(self) -> ImmutableDefinitionReference | None:
+        bundle = self.verification.bundle
+        return None if bundle is None else bundle.validating_definition
+
+    @property
+    def evaluation_lineage(self) -> EvaluationLineage | None:
+        return self.verification.lineage
+
+    def require_verification_bundle(self, *, detail: str) -> VerificationBundle:
+        return self.verification.require_bundle(detail=detail)
+
+    def static_fingerprint(self) -> str:
+        return canonical_sha256(self.model_dump(mode='json', exclude={'verification'}))
+
+    def with_verification(
+        self,
+        *,
+        mode: VerificationMode,
+        bundle: VerificationBundle,
+        lineage: EvaluationLineage | None,
+    ) -> 'BootstrapSidecar':
+        return self.model_copy(
+            update={
+                'verification': VerificationSettings(
+                    mode=mode,
+                    bundle=bundle,
+                    lineage=lineage,
+                )
+            }
+        )
 
 
 class CloudResourceLedgerEntry(BootstrapDocument):

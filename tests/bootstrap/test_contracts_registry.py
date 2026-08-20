@@ -48,6 +48,14 @@ def _sidecar() -> BootstrapSidecar:
     })
 
 
+def test_v1_sidecar_parses_into_v2_profile() -> None:
+    sidecar = _sidecar()
+
+    assert sidecar.schema_version == 2
+    assert sidecar.verification.mode == 'required'
+    assert sidecar.default_evaluator_bundle is not None
+
+
 def test_root_registry_rejects_casefold_duplicate_agent_ids() -> None:
     with pytest.raises(BootstrapConfigError):
         RootRegistry.from_document({
@@ -63,7 +71,7 @@ def test_root_registry_rejects_casefold_duplicate_agent_ids() -> None:
 
 def test_sidecar_rejects_invalid_foundry_uri() -> None:
     document = _sidecar().model_dump(mode='json')
-    document['development_dataset']['dataset_id'] = 'dataset@1'
+    document['verification']['bundle']['development_dataset']['dataset_id'] = 'dataset@1'
     with pytest.raises(BootstrapConfigError):
         BootstrapSidecar.from_document(document)
 
@@ -77,6 +85,7 @@ def test_actual_template_legacy_import_succeeds() -> None:
     )
     assert proposal.registry.distribution.repository.endswith('foundry-optimizer-coding-agent-plugin.git')
     assert proposal.sidecars[0].development_definition.definition_id == 'eval_development'
+    assert proposal.sidecars[0].verification.bundle is not None
     assert proposal.actions[0].kind == 'unresolved-shared-identity'
 
 

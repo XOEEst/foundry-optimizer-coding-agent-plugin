@@ -16,6 +16,57 @@ def _manifest_hash() -> str:
     return TrustedTemplateManifest.load_pinned_manifest().manifest_hash
 
 
+def _selected_profile_payload(*, package_root: str = "agent") -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "package_root": package_root,
+        "runtime": {
+            "schema_version": 1,
+            "kind": "hosted",
+            "runtime": "python_3_13",
+            "entrypoint": ["python", "main.py"],
+            "dependency_resolution": "remote_build",
+            "protocol_name": "responses",
+            "protocol_version": "2.0.0",
+        },
+        "foundry_project": {
+            "schema_version": 1,
+            "project_endpoint": "https://example.services.ai.azure.com/api/projects/example",
+            "account_resource_id": (
+                f"/subscriptions/{_SUBSCRIPTION_ID}/resourceGroups/example-rg/"
+                "providers/Microsoft.CognitiveServices/accounts/example"
+            ),
+            "agent_name": "example-agent",
+            "model_deployment_aliases": ["baseline-model"],
+        },
+        "baseline_model": "baseline-model",
+        "allowed_models": ["baseline-model"],
+        "min_candidates": 1,
+        "max_candidates": 2,
+        "primary_metric": "quality",
+        "decision_policy": {
+            "schema_version": 1,
+            "minimum_aggregate_delta": 0.01,
+            "focused_cases_required": True,
+            "max_regressions": 0,
+        },
+        "hard_guardrails": [
+            {
+                "schema_version": 1,
+                "evaluator_name": "safety",
+                "required_pass_rate": 1.0,
+                "required": True,
+            }
+        ],
+        "deployment": {
+            "schema_version": 1,
+            "environment": "foundry-production",
+            "enabled": True,
+            "require_aligned_binding": True,
+        },
+    }
+
+
 def _plan_input(
     *,
     optimizer_environment: str,
@@ -28,6 +79,8 @@ def _plan_input(
     oidc_subject_prefix: str | None = None,
     selected_root: str = "agent",
     discovery_root: str | None = None,
+    include_profile: bool = False,
+    selected_enabled: bool | None = None,
 ) -> BootstrapPlanInput:
     payload: dict[str, object] = {
         "schema_version": 1,
@@ -49,6 +102,20 @@ def _plan_input(
                     ),
                     "config_path": "agent/.foundry/foundry-opt.yaml",
                     "editable_paths": ["agent/main.py"],
+                    **(
+                        {"enabled": selected_enabled}
+                        if selected_enabled is not None
+                        else {}
+                    ),
+                    **(
+                        {
+                            "profile": _selected_profile_payload(
+                                package_root="agent"
+                            )
+                        }
+                        if include_profile
+                        else {}
+                    ),
                 }
             ],
         },
@@ -136,6 +203,30 @@ def test_registry_uses_agent_directory_for_repository_root_discovery() -> None:
             "enabled": False,
         }
     ]
+
+
+def test_sidecar_payload_renders_quick_profile_and_explicit_enabled_state() -> None:
+    payloads = load_trusted_manifest(
+        _plan_input(
+            optimizer_environment="copilot",
+            deployment_environment="foundry-production",
+            include_profile=True,
+            selected_enabled=True,
+        )
+    )
+    sidecar = next(payload for payload in payloads if payload.template_id == "sidecar")
+    registry = next(payload for payload in payloads if payload.template_id == "registry")
+    sidecar_document = yaml.safe_load(sidecar.rendered_template)
+    registry_document = yaml.safe_load(registry.rendered_template)
+
+    assert sidecar_document["schema_version"] == 2
+    assert sidecar_document["verification"] == {
+        "schema_version": 1,
+        "mode": "off",
+        "bundle": None,
+        "lineage": None,
+    }
+    assert registry_document["agents"][0]["enabled"] is True
 
 
 def test_build_phase_actions_emits_a_variable_action_for_each_distinct_environment() -> None:

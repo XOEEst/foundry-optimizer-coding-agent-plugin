@@ -21,12 +21,13 @@ from foundry_opt.bootstrap.contracts import (
     BootstrapPlan,
     BootstrapPlanPayload,
     BootstrapReceipt,
+    BootstrapSidecar,
     FingerprintRecord,
     ManagedFileEntry,
     SemanticPatchSpec,
     TemplatePayloadSpec,
 )
-from foundry_opt.bootstrap.errors import BootstrapApplyError, BootstrapPlanError
+from foundry_opt.bootstrap.errors import BootstrapApplyError, BootstrapConfigError, BootstrapPlanError
 from foundry_opt.poc.config import validate_repository_relative_path
 
 LOCK_PATH = ".foundry-opt/bootstrap.lock.json"
@@ -359,9 +360,26 @@ def render_template_payload(payload: TemplatePayloadSpec, current_bytes: bytes |
         source = current_bytes if current_bytes is not None else payload.rendered_template.encode("utf-8")
         return _patch_reserved_workflow(source, payload.semantic_patches)
     rendered = payload.rendered_template.encode("utf-8")
+    if payload.template_id == "sidecar" and current_bytes is not None:
+        preserved = _preserve_enriched_sidecar(current_bytes, rendered)
+        if preserved is not None:
+            return preserved
     for patch in payload.semantic_patches:
         rendered = _apply_text_patch(rendered, patch)
     return rendered
+
+
+def _preserve_enriched_sidecar(current_bytes: bytes, rendered: bytes) -> bytes | None:
+    try:
+        current = BootstrapSidecar.from_document(current_bytes.decode("utf-8"))
+        desired = BootstrapSidecar.from_document(rendered.decode("utf-8"))
+    except (UnicodeDecodeError, BootstrapConfigError):
+        return None
+    if current.static_fingerprint() != desired.static_fingerprint():
+        return None
+    if current.verification.bundle is None and current.verification.lineage is None:
+        return None
+    return current_bytes
 
 
 def _planned_disposition(root: Path, payload: TemplatePayloadSpec, current_bytes: bytes | None, lock: BootstrapLock | None) -> _Disposition:

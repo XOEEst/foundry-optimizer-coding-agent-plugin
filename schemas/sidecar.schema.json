@@ -641,6 +641,86 @@
       ],
       "title": "SharedSourceRelation",
       "type": "object"
+    },
+    "VerificationBundle": {
+      "additionalProperties": false,
+      "properties": {
+        "default_evaluator_bundle": {
+          "$ref": "#/$defs/DefaultEvaluatorBundle"
+        },
+        "development_dataset": {
+          "$ref": "#/$defs/ImmutableDatasetReference"
+        },
+        "development_definition": {
+          "$ref": "#/$defs/ImmutableDefinitionReference"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "validating_dataset": {
+          "$ref": "#/$defs/ImmutableDatasetReference"
+        },
+        "validating_definition": {
+          "$ref": "#/$defs/ImmutableDefinitionReference"
+        }
+      },
+      "required": [
+        "development_dataset",
+        "validating_dataset",
+        "development_definition",
+        "validating_definition",
+        "default_evaluator_bundle"
+      ],
+      "title": "VerificationBundle",
+      "type": "object"
+    },
+    "VerificationSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "bundle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VerificationBundle"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "lineage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvaluationLineage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "mode": {
+          "default": "off",
+          "enum": [
+            "off",
+            "optional",
+            "required"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "title": "VerificationSettings",
+      "type": "object"
     }
   },
   "additionalProperties": false,
@@ -659,17 +739,8 @@
     "decision_policy": {
       "$ref": "#/$defs/DecisionPolicy"
     },
-    "default_evaluator_bundle": {
-      "$ref": "#/$defs/DefaultEvaluatorBundle"
-    },
     "deployment": {
       "$ref": "#/$defs/DeploymentSettings"
-    },
-    "development_dataset": {
-      "$ref": "#/$defs/ImmutableDatasetReference"
-    },
-    "development_definition": {
-      "$ref": "#/$defs/ImmutableDefinitionReference"
     },
     "editable_paths": {
       "items": {
@@ -677,17 +748,6 @@
       },
       "title": "Editable Paths",
       "type": "array"
-    },
-    "evaluation_lineage": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/EvaluationLineage"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null
     },
     "foundry_project": {
       "$ref": "#/$defs/FoundryProjectSettings"
@@ -729,8 +789,8 @@
       "$ref": "#/$defs/RuntimeProtocolSettings"
     },
     "schema_version": {
-      "const": 1,
-      "default": 1,
+      "const": 2,
+      "default": 2,
       "title": "Schema Version",
       "type": "integer"
     },
@@ -746,11 +806,8 @@
       "title": "Source Root",
       "type": "string"
     },
-    "validating_dataset": {
-      "$ref": "#/$defs/ImmutableDatasetReference"
-    },
-    "validating_definition": {
-      "$ref": "#/$defs/ImmutableDefinitionReference"
+    "verification": {
+      "$ref": "#/$defs/VerificationSettings"
     }
   },
   "required": [
@@ -766,11 +823,6 @@
     "max_candidates",
     "primary_metric",
     "decision_policy",
-    "development_dataset",
-    "validating_dataset",
-    "development_definition",
-    "validating_definition",
-    "default_evaluator_bundle",
     "hard_guardrails",
     "deployment"
   ],

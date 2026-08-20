@@ -8,7 +8,7 @@ This public repository is the authoritative reviewed runtime. It provides:
 - local `discover -> plan -> apply` repository bootstrap
 - multi-agent registry and per-agent configuration
 - OIDC-only GitHub and Azure setup
-- evaluation dataset and evaluator onboarding with a receipt-bound sidecar activation
+- evaluation dataset and evaluator onboarding with a receipt-bound profile verification activation
 - Copilot optimize-job instructions and workflows
 - exact-commit merge-time Foundry deployment
 

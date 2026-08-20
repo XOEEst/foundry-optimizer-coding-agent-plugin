@@ -1716,6 +1716,29 @@
           "title": "Editable Paths",
           "type": "array"
         },
+        "enabled": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Enabled"
+        },
+        "profile": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SelectedAgentProfile"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "repo_agent_id": {
           "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$",
           "title": "Repo Agent Id",
@@ -1741,6 +1764,118 @@
         "editable_paths"
       ],
       "title": "SelectedAgent",
+      "type": "object"
+    },
+    "SelectedAgentProfile": {
+      "additionalProperties": false,
+      "properties": {
+        "allowed_models": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Allowed Models",
+          "type": "array"
+        },
+        "baseline_model": {
+          "title": "Baseline Model",
+          "type": "string"
+        },
+        "decision_policy": {
+          "$ref": "#/$defs/DecisionPolicy"
+        },
+        "deployment": {
+          "$ref": "#/$defs/DeploymentSettings"
+        },
+        "foundry_project": {
+          "$ref": "#/$defs/FoundryProjectSettings"
+        },
+        "hard_guardrails": {
+          "items": {
+            "$ref": "#/$defs/HardGuardrail"
+          },
+          "title": "Hard Guardrails",
+          "type": "array"
+        },
+        "max_candidates": {
+          "title": "Max Candidates",
+          "type": "integer"
+        },
+        "max_issue_evaluators": {
+          "default": 8,
+          "title": "Max Issue Evaluators",
+          "type": "integer"
+        },
+        "min_candidates": {
+          "title": "Min Candidates",
+          "type": "integer"
+        },
+        "package_root": {
+          "title": "Package Root",
+          "type": "string"
+        },
+        "primary_metric": {
+          "title": "Primary Metric",
+          "type": "string"
+        },
+        "runtime": {
+          "$ref": "#/$defs/RuntimeProtocolSettings"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "shared_source_relations": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SharedSourceRelation"
+          },
+          "title": "Shared Source Relations",
+          "type": "array"
+        }
+      },
+      "required": [
+        "package_root",
+        "runtime",
+        "foundry_project",
+        "baseline_model",
+        "allowed_models",
+        "min_candidates",
+        "max_candidates",
+        "primary_metric",
+        "decision_policy",
+        "hard_guardrails",
+        "deployment"
+      ],
+      "title": "SelectedAgentProfile",
+      "type": "object"
+    },
+    "SharedSourceRelation": {
+      "additionalProperties": false,
+      "properties": {
+        "agent_id": {
+          "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$",
+          "title": "Agent Id",
+          "type": "string"
+        },
+        "relation": {
+          "const": "shared-source",
+          "title": "Relation",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "agent_id",
+        "relation"
+      ],
+      "title": "SharedSourceRelation",
       "type": "object"
     },
     "SidecarPolicy": {

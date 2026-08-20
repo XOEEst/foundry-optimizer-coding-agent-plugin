@@ -17,6 +17,7 @@ import typer
 from pydantic import ValidationError
 
 from foundry_opt import __version__
+from foundry_opt.bootstrap.errors import BootstrapConfigError
 from foundry_opt.bootstrap.cli import register_bootstrap_commands
 from foundry_opt.bootstrap.workflow_integration import (
     build_registered_deployment_plan,
@@ -151,6 +152,7 @@ _LINKED_ISSUE_REFERENCE_PATTERN = re.compile(
 
 _JOB_COMMAND_ERRORS = (
     AuthError,
+    BootstrapConfigError,
     CandidateError,
     CleanupError,
     ContractError,

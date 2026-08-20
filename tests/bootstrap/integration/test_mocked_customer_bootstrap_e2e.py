@@ -789,8 +789,12 @@ def test_mocked_customer_bootstrap_end_to_end(tmp_path: Path, request: pytest.Fi
 
     aligned_sidecar_path = repo / ALIGNED_ROOT / ".foundry" / "foundry-opt.yaml"
     unknown_sidecar_path = repo / UNKNOWN_ROOT / ".foundry" / "foundry-opt.yaml"
-    assert not aligned_sidecar_path.exists()  # never written by the repository phase
-    assert not unknown_sidecar_path.exists()
+    aligned_quick_sidecar = BootstrapSidecar.from_document(aligned_sidecar_path.read_text(encoding="utf-8"))
+    unknown_quick_sidecar = BootstrapSidecar.from_document(unknown_sidecar_path.read_text(encoding="utf-8"))
+    assert aligned_quick_sidecar.verification.mode == "off"
+    assert unknown_quick_sidecar.verification.mode == "off"
+    assert aligned_quick_sidecar.default_evaluator_bundle is None
+    assert unknown_quick_sidecar.default_evaluator_bundle is None
 
     # -- 8. Finalize activation: receipt-bound sidecars, registry enablement, safety bundle. --
     activation = finalize_evaluation_activation(

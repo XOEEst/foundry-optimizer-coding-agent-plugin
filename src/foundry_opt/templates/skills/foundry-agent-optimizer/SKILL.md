@@ -105,12 +105,12 @@ an agent optimize job.
    packages the reviewed agent source and creates a temporary owned draft to
    evaluate; a pre-existing agent version with the requested draft name is a
    conflict, never a target, and only the operation-created draft is deleted.
-   The repository
-   phase never writes a sidecar; only the receipt-bound `activate` step writes
-   it and enables that agent in the registry. `activate` is the finalization of
-   the same single approval — never a second approval — and is idempotent, so an
-   interrupted activation is safe to re-run. Agents may live in different
-   Foundry projects; each one is applied against its own project.
+   Repository apply may already commit the lightweight v2 profile; the
+   receipt-bound `activate` step enriches that profile with verification ids and
+   lineage and preserves the reviewed registry enabled state. `activate` is the
+   finalization of the same single approval — never a second approval — and is
+   idempotent, so an interrupted activation is safe to re-run. Agents may live
+   in different Foundry projects; each one is applied against its own project.
 10. Collect exactly one evaluations-phase approval. A generated rubric is
     auto-adopted without a second prompt, but only after structural, execution,
     headroom, activation, cleanup, and full safety-bundle gates pass against the

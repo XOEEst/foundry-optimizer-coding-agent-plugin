@@ -246,6 +246,19 @@ def test_selected_agents_and_evaluation_agents_must_align() -> None:
         BootstrapPlanInput.model_validate(payload)
 
 
+def test_enabled_selected_agent_requires_profile_or_reviewed_policy() -> None:
+    payload = _sample_payload()
+    payload["offline_plan"] = True
+    payload["required_phases"] = ["repository"]
+    payload.pop("github_phase", None)
+    payload.pop("azure_phase", None)
+    payload.pop("evaluations_phase", None)
+    payload["repository"]["selected_agents"][0]["enabled"] = True
+
+    with pytest.raises(ValidationError, match='enabled selected agents require'):
+        BootstrapPlanInput.model_validate(payload)
+
+
 def test_manifest_is_pinned_and_caller_cannot_override_payload_set() -> None:
     payload = _sample_payload()
     payload['repository_phase']['trusted_manifest_hash'] = '0' * 64

@@ -172,6 +172,102 @@ def _write_repo(tmp_path: Path, *, second_enabled: bool = False) -> Path:
     return root
 
 
+def _write_quick_repo(
+    tmp_path: Path,
+    *,
+    enabled: bool = True,
+    profile_exists: bool = True,
+) -> Path:
+    root = tmp_path / "quick-repo"
+    (root / ".foundry-opt").mkdir(parents=True)
+    (root / "agent" / ".foundry").mkdir(parents=True)
+    (root / ".foundry-opt" / "registry.yaml").write_text(
+        "\n".join(
+            (
+                "schema_version: 1",
+                "distribution:",
+                "  schema_version: 1",
+                "  repository: https://github.com/example/shared.git",
+                "  channel: wave4",
+                "  pin: " + ("a" * 40),
+                "github:",
+                "  schema_version: 1",
+                "  optimizer_environment: copilot",
+                "  deployment_environment: foundry-production",
+                "  client_id_variable: AZURE_OPTIMIZER_CLIENT_ID",
+                "identity:",
+                "  schema_version: 1",
+                "  kind: unresolved_migration",
+                "agents:",
+                "  - schema_version: 1",
+                "    agent_id: example-agent",
+                "    root: agent",
+                "    config_path: agent/.foundry/foundry-opt.yaml",
+                f"    enabled: {'true' if enabled else 'false'}",
+            )
+        ),
+        encoding="utf-8",
+    )
+    if profile_exists:
+        (root / "agent" / ".foundry" / "foundry-opt.yaml").write_text(
+            "\n".join(
+                (
+                    "schema_version: 2",
+                    "repo_agent_id: example-agent",
+                    "source_root: agent",
+                    "package_root: agent",
+                    "editable_paths:",
+                    "  - agent/main.py",
+                    "shared_source_relations: []",
+                    "runtime:",
+                    "  schema_version: 1",
+                    "  kind: hosted",
+                    "  runtime: python_3_13",
+                    "  entrypoint:",
+                    "    - python",
+                    "    - main.py",
+                    "  dependency_resolution: remote_build",
+                    "  protocol_name: responses",
+                    "  protocol_version: '2.0.0'",
+                    "foundry_project:",
+                    "  schema_version: 1",
+                    "  project_endpoint: https://example.services.ai.azure.com/api/projects/example",
+                    "  account_resource_id: /subscriptions/1/resourceGroups/rg/providers/Microsoft.CognitiveServices/accounts/a",
+                    "  agent_name: example-agent",
+                    "  model_deployment_aliases: [baseline]",
+                    "baseline_model: baseline",
+                    "allowed_models: [baseline]",
+                    "min_candidates: 1",
+                    "max_candidates: 1",
+                    "primary_metric: quality",
+                    "decision_policy:",
+                    "  schema_version: 1",
+                    "  minimum_aggregate_delta: 0.01",
+                    "  focused_cases_required: true",
+                    "  max_regressions: 0",
+                    "max_issue_evaluators: 8",
+                    "hard_guardrails:",
+                    "  - schema_version: 1",
+                    "    evaluator_name: safety",
+                    "    required_pass_rate: 1.0",
+                    "    required: true",
+                    "deployment:",
+                    "  schema_version: 1",
+                    "  environment: foundry-production",
+                    "  enabled: true",
+                    "  require_aligned_binding: true",
+                    "verification:",
+                    "  schema_version: 1",
+                    "  mode: 'off'",
+                    "  bundle: null",
+                    "  lineage: null",
+                )
+            ),
+            encoding="utf-8",
+        )
+    return root
+
+
 def test_registry_selection_requires_single_enabled_agent_when_implicit(tmp_path: Path) -> None:
     root = _write_repo(tmp_path, second_enabled=True)
     with pytest.raises(BootstrapConfigError, match="exactly one enabled agent"):
@@ -233,3 +329,25 @@ def test_registered_deployment_plan_uses_repository_defaults(tmp_path: Path) -> 
     assert plan.repo_agent_id == "example-agent"
     assert plan.default_evaluator_ids == ("azureai://built-in/evaluators/safety",)
     assert plan.registry_hash != plan.sidecar_hash
+
+
+def test_registry_selection_supports_enabled_quick_profile(tmp_path: Path) -> None:
+    root = _write_quick_repo(tmp_path)
+    selection = resolve_registry_selection(root)
+
+    assert selection.sidecar.schema_version == 2
+    assert selection.sidecar.verification.mode == "off"
+    with pytest.raises(BootstrapConfigError, match="activated repository default evaluator bundle"):
+        build_registered_deployment_plan(
+            selection,
+            changed_root="agent",
+            exact_source="c" * 40,
+            use_repository_default_evaluators=True,
+        )
+
+
+def test_enabled_registry_entry_without_profile_fails_closed(tmp_path: Path) -> None:
+    root = _write_quick_repo(tmp_path, profile_exists=False)
+
+    with pytest.raises(BootstrapConfigError, match="requires a profile"):
+        resolve_registry_selection(root)
