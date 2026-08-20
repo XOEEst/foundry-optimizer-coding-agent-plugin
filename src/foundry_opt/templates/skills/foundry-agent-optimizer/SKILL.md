@@ -87,6 +87,9 @@ an agent optimize job.
    the Azure plan contains exactly two federated-credential subjects and both
    preserve the reviewed immutable `oidc_subject_prefix`. Report existing
    broader Azure role assignments separately; bootstrap does not remove them.
+   Treat an existing credential's `name` as descriptive only: adoption is by one
+   exact issuer/subject/audience match. Stop on ambiguous or mismatched matches,
+   and never rename a credential merely to satisfy bootstrap.
 6. Create one approval record for one phase and run
    `foundry-opt bootstrap apply --phase ... --approval-file ... --plan-input ...`.
 7. Stop on stale plan/SHA drift or any failed/compensation-required receipt.
