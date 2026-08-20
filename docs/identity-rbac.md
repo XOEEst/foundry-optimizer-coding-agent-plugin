@@ -54,6 +54,18 @@ where the id is the reviewed creation target. Plans, receipts, and provider stat
 name the exact resource that Azure returns, with no placeholder. Adopted Entra applications
 have no ARM resource id, so their exact client id is used as the identity label.
 
+The two object identifiers have different meanings:
+
+- For a user-assigned managed identity, `existing_object_id` is the managed identity principal
+  object ID and is planned as `principal_id`.
+- For an adopted Entra application, `existing_object_id` is the **application registration**
+  object ID and is planned as `object_id`. The provider uses that ID for Microsoft Graph
+  federated-credential operations, then resolves the application's service principal object ID
+  separately for Azure RBAC.
+
+Do not substitute the service principal object ID for the application object ID in an
+`entra_application` plan input.
+
 ## GitHub OIDC subjects
 
 The registry records the exact GitHub `sub` prefix used by both runtime
@@ -66,6 +78,11 @@ immutable form. Bootstrap must inventory GitHub's OIDC settings, freeze the
 reported prefix in the reviewed plan, and create one exact environment subject
 per configured GitHub environment. It must not silently retain a mutable
 name-based credential when GitHub emits an immutable subject.
+
+The reviewed federated-credential actions are authoritative through planning and apply. The
+Azure provider must consume those exact subjects; it never reconstructs them from a mutable
+`owner/repository` name. Before approval, confirm the Azure action summary contains exactly two
+subjects and that both begin with the reviewed registry `oidc_subject_prefix`.
 
 Some Microsoft Entra tenants additionally require the GitHub OIDC token's
 `enterprise` claim to be `microsoft`, `github`, or `microsoftopensource`.
@@ -88,3 +105,7 @@ One shared principal means the Copilot-session token carries the same Azure publ
 as deployment. Separate OIDC subjects constrain token issuance contexts, not Azure role blast
 radius, and CLI draft-only enforcement is not principal isolation. Future migration to
 separate identities is preserved.
+
+Bootstrap adds or adopts only the reviewed least-privilege assignments. It does not silently
+remove broader role assignments that already exist on the identity; owners should review those
+legacy assignments separately before considering the identity least-privilege.

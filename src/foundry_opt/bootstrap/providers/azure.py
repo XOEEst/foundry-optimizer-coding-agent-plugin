@@ -139,10 +139,6 @@ def _diagnostics_map(action: BootstrapAction) -> dict[str, str]:
     return {entry.split("=", 1)[0]: entry.split("=", 1)[1] for entry in action.diagnostics if "=" in entry}
 
 
-def _subjects(repository_identity: str) -> tuple[str, str]:
-    return (f"repo:{repository_identity}:environment:copilot", f"repo:{repository_identity}:environment:foundry-production")
-
-
 def _fic_name(subject: str) -> str:
     return hashlib.sha256(subject.encode("utf-8")).hexdigest()[:24]
 
@@ -638,11 +634,22 @@ class AzureArmRestProvider:
         identity = self._select_identity(plan)
         if not identity.subscription_id:
             raise AzureProviderError("identity must include subscription_id")
+        subjects: list[str] = []
         roles: list[PlannedRoleAssignment] = []
         for action in plan.actions:
-            if action.phase != "azure" or action.kind != "role-assignment":
+            if action.phase != "azure":
                 continue
             data = _diagnostics_map(action)
+            if action.kind == "federated-credential":
+                subject = _text(data.get("subject"), field="subject")
+                if subject in subjects:
+                    raise AzureProviderError(
+                        "federated credential subjects must be unique"
+                    )
+                subjects.append(subject)
+                continue
+            if action.kind != "role-assignment":
+                continue
             role_key = _text(data.get("role"), field="role")
             if role_key not in self._approved_role_definitions:
                 raise AzureProviderError(f"approved_role_definitions.{role_key} must be configured")
@@ -653,7 +660,15 @@ class AzureArmRestProvider:
             if planned_fingerprint is not None and planned_fingerprint != approval_fingerprint:
                 raise AzureProviderError("approved role mapping drifted from planned approval fingerprint")
             roles.append(PlannedRoleAssignment(role_key=role_key, scope=scope, role_definition_id=role_definition_id, approval_fingerprint=approval_fingerprint))
-        return PlannedBindingSet(identity=identity, roles=tuple(roles), subjects=_subjects(plan.repository_identity))
+        if len(subjects) != 2:
+            raise AzureProviderError(
+                "Azure plan must contain exactly two federated credential subjects"
+            )
+        return PlannedBindingSet(
+            identity=identity,
+            roles=tuple(roles),
+            subjects=(subjects[0], subjects[1]),
+        )
 
     def _assert_role_approval(self, role: PlannedRoleAssignment) -> None:
         current = self._approved_role_definitions.get(role.role_key)

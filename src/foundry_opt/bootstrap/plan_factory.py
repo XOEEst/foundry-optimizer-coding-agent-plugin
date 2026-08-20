@@ -295,7 +295,14 @@ def build_phase_actions(plan_input: BootstrapPlanInput, inventories: Mapping[str
         if identity.existing_client_id:
             diagnostics.append(f"client_id={identity.existing_client_id}")
         if identity.existing_object_id:
-            diagnostics.append(f"principal_id={identity.existing_object_id}")
+            identity_id_field = (
+                "object_id"
+                if identity.identity_kind == "entra_application"
+                else "principal_id"
+            )
+            diagnostics.append(
+                f"{identity_id_field}={identity.existing_object_id}"
+            )
         identity_kind = (
             "entra-application"
             if identity.identity_kind == "entra_application"
