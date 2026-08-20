@@ -34,6 +34,38 @@ JOURNAL_DIR = ".foundry-opt/journal"
 RECEIPT_DIR = ".foundry-opt/receipts"
 SUPPORTED_YAML_PATH = ".github/workflows/copilot-setup-steps.yml"
 SUPPORTED_YAML_STEP_IDS = frozenset({"foundry-opt-checkout", "foundry-opt-bootstrap"})
+SUPPORTED_YAML_LEGACY_STEP_NAMES = {
+    "foundry-opt-checkout": frozenset(
+        {
+            "Fetch exact v1-capable shared revision",
+            "Fetch the exact shared revision",
+        }
+    ),
+    "foundry-opt-bootstrap": frozenset(
+        {
+            "Install the exact shared CLI and skill",
+            "Install the frozen shared environment and skill",
+        }
+    ),
+}
+SUPPORTED_YAML_LEGACY_WORKFLOW_STEP_NAMES = (
+    "Check out the agent repository",
+    "Canonicalize the repository origin",
+    "Set up Python",
+    "Set up uv",
+    "Record trusted state paths",
+    "Detect trusted optimize job context",
+    "Fetch the exact shared revision",
+    "Install the frozen shared environment and skill",
+    "Verify bootstrap receipt and target configuration",
+    "Launch the minimal GitHub issue broker",
+    "Validate the complete setup contract",
+)
+SUPPORTED_YAML_LEGACY_WORKFLOW_MARKERS = (
+    b'pin=".github/foundry-opt.lock.yml"',
+    b"--pin .github/foundry-opt.lock.yml",
+    b"foundry-opt validate-config",
+)
 LEGACY_FETCH_MARKERS = ("FOUNDRY_OPT_SHARED_REPO_SSH_KEY", "git@github.com", "known_hosts")
 _OPERATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
@@ -317,6 +349,13 @@ def drift_status(root: Path, lock: BootstrapLock) -> tuple[str, ...]:
 
 def render_template_payload(payload: TemplatePayloadSpec, current_bytes: bytes | None = None) -> bytes:
     if payload.destination_path == SUPPORTED_YAML_PATH:
+        if (
+            current_bytes is not None
+            and _is_recognized_legacy_setup_workflow(current_bytes)
+        ):
+            rendered = payload.rendered_template.encode("utf-8")
+            _validate_workflow_yaml(rendered)
+            return rendered
         source = current_bytes if current_bytes is not None else payload.rendered_template.encode("utf-8")
         return _patch_reserved_workflow(source, payload.semantic_patches)
     rendered = payload.rendered_template.encode("utf-8")
@@ -333,11 +372,18 @@ def _planned_disposition(root: Path, payload: TemplatePayloadSpec, current_bytes
     sibling_path = f"{payload.destination_path}.foundry-proposed"
     sibling_hash = _hash_if_exists(root, sibling_path)
     normalized_equal = _hash_bytes(current_bytes) == _hash_bytes(rendered) and current_bytes is not None
+    recognized_legacy_conversion = (
+        payload.destination_path == SUPPORTED_YAML_PATH
+        and current_bytes is not None
+        and _is_recognized_legacy_setup_workflow(current_bytes)
+    )
     if entry is None:
         if current_bytes is None:
             mode = "write"
         elif normalized_equal:
             mode = "skip"
+        elif recognized_legacy_conversion:
+            mode = "write"
         else:
             mode = "conflict"
         diff = "" if current_bytes is None and mode == "write" else _unified_diff(payload.destination_path, current_bytes or b"", rendered)
@@ -357,10 +403,16 @@ def _patch_reserved_workflow(base_bytes: bytes, patches: Sequence[SemanticPatchS
         step_id = _extract_step_id(patch)
         if step_id not in SUPPORTED_YAML_STEP_IDS:
             raise BootstrapPlanError("unrecognized managed copilot step id")
-        existing = next((block for block in blocks if block["id"] == step_id), None)
+        existing = _find_managed_step_block(
+            blocks,
+            step_id,
+            allow_legacy_name=patch.operation == "replace",
+        )
         if patch.operation == "replace":
             if existing is None or patch.replacement_text is None:
-                raise BootstrapPlanError("managed workflow replace requires existing step and replacement_text")
+                raise BootstrapPlanError(
+                    "managed workflow replace requires a reserved step id or supported legacy step name"
+                )
             replacement = _indent_block(
                 existing["indent"],
                 patch.replacement_text,
@@ -439,9 +491,11 @@ def _scan_step_blocks(document: bytes) -> list[dict[str, int | str]]:
                 index += 1
             block_text = "".join(lines[start:index])
             step_id = _extract_block_id(block_text)
+            step_name = _extract_block_name(block_text)
             blocks.append(
                 {
                     "id": step_id,
+                    "name": step_name,
                     "start": offsets[start],
                     "end": offsets[index],
                     "indent": item_indent,
@@ -460,6 +514,59 @@ def _extract_block_id(block_text: str) -> str:
         if candidate.startswith("id:"):
             return candidate[3:].strip()
     return ""
+
+
+def _extract_block_name(block_text: str) -> str:
+    for line in block_text.splitlines():
+        stripped = line.lstrip()
+        candidate = stripped[2:] if stripped.startswith("- ") else stripped
+        if candidate.startswith("name:"):
+            return candidate[5:].strip()
+    return ""
+
+
+def _is_recognized_legacy_setup_workflow(document: bytes) -> bool:
+    try:
+        _validate_workflow_yaml(document)
+        step_names = tuple(str(block["name"]) for block in _scan_step_blocks(document))
+    except BootstrapPlanError:
+        return False
+    return (
+        step_names == SUPPORTED_YAML_LEGACY_WORKFLOW_STEP_NAMES
+        and all(marker in document for marker in SUPPORTED_YAML_LEGACY_WORKFLOW_MARKERS)
+    )
+
+
+def _find_managed_step_block(
+    blocks: Sequence[dict[str, int | str]],
+    step_id: str,
+    *,
+    allow_legacy_name: bool,
+) -> dict[str, int | str] | None:
+    id_matches = [block for block in blocks if block["id"] == step_id]
+    if len(id_matches) > 1:
+        raise BootstrapPlanError("managed workflow step id must match exactly one step")
+    legacy_matches = (
+        [
+            block
+            for block in blocks
+            if block["name"] in SUPPORTED_YAML_LEGACY_STEP_NAMES[step_id]
+        ]
+        if allow_legacy_name
+        else []
+    )
+    if id_matches:
+        selected = id_matches[0]
+        if any(block["start"] != selected["start"] for block in legacy_matches):
+            raise BootstrapPlanError(
+                "managed workflow contains both reserved and legacy bootstrap steps"
+            )
+        return selected
+    if len(legacy_matches) > 1:
+        raise BootstrapPlanError(
+            "supported legacy workflow step name must match exactly one step"
+        )
+    return legacy_matches[0] if legacy_matches else None
 
 
 def _extract_step_id(patch: SemanticPatchSpec) -> str:

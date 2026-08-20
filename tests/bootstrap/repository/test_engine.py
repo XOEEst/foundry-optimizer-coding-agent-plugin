@@ -120,6 +120,216 @@ def test_canonical_workflow_path_and_surgical_patch(tmp_path: Path) -> None:
     assert b"echo new" in rendered
 
 
+def test_legacy_luffy_setup_step_names_migrate_to_reserved_ids(tmp_path: Path) -> None:
+    workflow = tmp_path / ".github" / "workflows" / "copilot-setup-steps.yml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text(
+        "\n".join(
+            (
+                "name: Copilot Setup Steps",
+                "jobs:",
+                "  setup:",
+                "    runs-on: ubuntu-latest",
+                "    steps:",
+                "      - name: Keep customer preflight",
+                "        run: echo keep",
+                "      - name: Fetch the exact shared revision",
+                "        run: echo old-fetch",
+                "      - name: Install the frozen shared environment and skill",
+                "        run: echo old-install",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    payload = _payload(
+        ".github/workflows/copilot-setup-steps.yml",
+        "ignored\n",
+        patches=(
+            SemanticPatchSpec(
+                target_path=".github/workflows/copilot-setup-steps.yml",
+                operation="replace",
+                match_text="id: foundry-opt-checkout",
+                replacement_text=(
+                    "id: foundry-opt-checkout\n"
+                    "name: Fetch exact v1-capable shared revision\n"
+                    "run: echo new-fetch\n"
+                ),
+            ),
+            SemanticPatchSpec(
+                target_path=".github/workflows/copilot-setup-steps.yml",
+                operation="replace",
+                match_text="id: foundry-opt-bootstrap",
+                replacement_text=(
+                    "id: foundry-opt-bootstrap\n"
+                    "name: Install the exact shared CLI and skill\n"
+                    "run: echo new-install\n"
+                ),
+            ),
+        ),
+    )
+
+    rendered = render_template_payload(payload, workflow.read_bytes())
+
+    assert b"id: foundry-opt-checkout" in rendered
+    assert b"id: foundry-opt-bootstrap" in rendered
+    assert b"echo new-fetch" in rendered
+    assert b"echo new-install" in rendered
+    assert b"echo keep" in rendered
+
+
+def test_legacy_setup_step_name_migration_rejects_ambiguity(tmp_path: Path) -> None:
+    workflow = tmp_path / ".github" / "workflows" / "copilot-setup-steps.yml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text(
+        "\n".join(
+            (
+                "name: Copilot Setup Steps",
+                "jobs:",
+                "  setup:",
+                "    runs-on: ubuntu-latest",
+                "    steps:",
+                "      - name: Fetch the exact shared revision",
+                "        run: echo first",
+                "      - name: Fetch the exact shared revision",
+                "        run: echo second",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    payload = _payload(
+        ".github/workflows/copilot-setup-steps.yml",
+        "ignored\n",
+        patches=(
+            SemanticPatchSpec(
+                target_path=".github/workflows/copilot-setup-steps.yml",
+                operation="replace",
+                match_text="id: foundry-opt-checkout",
+                replacement_text=(
+                    "id: foundry-opt-checkout\n"
+                    "name: Fetch exact v1-capable shared revision\n"
+                    "run: echo new-fetch\n"
+                ),
+            ),
+        ),
+    )
+
+    with pytest.raises(
+        BootstrapPlanError,
+        match="legacy workflow step name must match exactly one",
+    ):
+        render_template_payload(payload, workflow.read_bytes())
+
+
+def test_recognized_legacy_setup_workflow_converts_to_managed_template(tmp_path: Path) -> None:
+    workflow = tmp_path / ".github" / "workflows" / "copilot-setup-steps.yml"
+    workflow.parent.mkdir(parents=True)
+    names = (
+        "Check out the agent repository",
+        "Canonicalize the repository origin",
+        "Set up Python",
+        "Set up uv",
+        "Record trusted state paths",
+        "Detect trusted optimize job context",
+        "Fetch the exact shared revision",
+        "Install the frozen shared environment and skill",
+        "Verify bootstrap receipt and target configuration",
+        "Launch the minimal GitHub issue broker",
+        "Validate the complete setup contract",
+    )
+    steps = []
+    for name in names:
+        run = f"echo {name}"
+        if name == "Fetch the exact shared revision":
+            run = 'pin=".github/foundry-opt.lock.yml"'
+        elif name == "Verify bootstrap receipt and target configuration":
+            run = (
+                "foundry-opt bootstrap verify "
+                "--pin .github/foundry-opt.lock.yml\n"
+                "foundry-opt validate-config"
+            )
+        steps.extend(
+            (
+                f"      - name: {name}",
+                "        shell: bash",
+                "        run: |",
+                *(f"          {line}" for line in run.splitlines()),
+            )
+        )
+    workflow.write_text(
+        "\n".join(
+            (
+                "name: Copilot Setup Steps",
+                "jobs:",
+                "  setup:",
+                "    runs-on: ubuntu-latest",
+                "    steps:",
+                *steps,
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    managed = (
+        "name: Foundry v1 Copilot Setup Steps\n"
+        "jobs:\n"
+        "  setup:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - id: foundry-opt-checkout\n"
+        "        name: Fetch exact v1-capable shared revision\n"
+        "        run: echo new-fetch\n"
+        "      - id: foundry-opt-bootstrap\n"
+        "        name: Install the exact shared CLI and skill\n"
+        "        run: echo new-install\n"
+    )
+    payload = _payload(
+        ".github/workflows/copilot-setup-steps.yml",
+        managed,
+        template_id="setup-semantic-patch",
+        patches=(
+            SemanticPatchSpec(
+                target_path=".github/workflows/copilot-setup-steps.yml",
+                operation="replace",
+                match_text="id: foundry-opt-checkout",
+                replacement_text=(
+                    "id: foundry-opt-checkout\n"
+                    "name: Fetch exact v1-capable shared revision\n"
+                    "run: echo new-fetch\n"
+                ),
+            ),
+            SemanticPatchSpec(
+                target_path=".github/workflows/copilot-setup-steps.yml",
+                operation="replace",
+                match_text="id: foundry-opt-bootstrap",
+                replacement_text=(
+                    "id: foundry-opt-bootstrap\n"
+                    "name: Install the exact shared CLI and skill\n"
+                    "run: echo new-install\n"
+                ),
+            ),
+        ),
+    )
+
+    plan = plan_repository(
+        tmp_path,
+        operation_id="legacy-conversion",
+        runtime_repository="https://github.com/example/runtime.git",
+        runtime_commit="a" * 40,
+        repository_identity="org/repo",
+        payloads=(payload,),
+    )
+
+    assert "mode:write" in plan.actions[0].diagnostics
+    receipt, _ = apply_repository(tmp_path, plan)
+    assert receipt.changed_actions == (plan.actions[0].action_id,)
+    assert workflow.read_text(encoding="utf-8") == managed
+    assert not workflow.with_name(
+        "copilot-setup-steps.yml.foundry-proposed"
+    ).exists()
+
+
 def test_duplicate_destinations_and_derived_collisions_rejected(tmp_path: Path) -> None:
     one = _payload(".foundry/app.yaml", "name: one\n")
     two = _payload(".foundry/app.yaml", "name: two\n", template_id="other")

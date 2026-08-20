@@ -29,6 +29,12 @@ candidate root. When repository-level metadata is discovered at `.` but names `a
 `sourceRoot`, the plan input retains `discovery_root: "."` for evidence while the registry uses
 `root: agent`.
 
+The approved repository phase converts the exact recognized pre-v1
+`.github/workflows/copilot-setup-steps.yml` contract to the v1 managed workflow. Recognition is
+fail-closed: the full legacy step sequence and legacy pin/validation markers must match. A
+customized, missing, or ambiguous workflow is not overwritten; bootstrap writes the proposed
+managed result to `.github/workflows/copilot-setup-steps.yml.foundry-proposed` for human review.
+
 `.foundry-opt/bootstrap.lock.json` is the authoritative committed ownership ledger. Repository
 apply generates it from the applied plan; it is **not** a managed payload and cannot be
 declared as one. It records the engine and schema version, the runtime repository, channel and
