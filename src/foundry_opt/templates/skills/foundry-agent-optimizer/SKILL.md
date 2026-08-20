@@ -82,6 +82,11 @@ an agent optimize job.
 4. Run `foundry-opt bootstrap plan --plan-input ...`; offline plans contain only
    the repository phase.
 5. Show exact repository diffs and GitHub/Azure/evaluation action summaries.
+   For an adopted Entra application, confirm the identity action carries the
+   application registration `object_id` (not the service-principal ID). Confirm
+   the Azure plan contains exactly two federated-credential subjects and both
+   preserve the reviewed immutable `oidc_subject_prefix`. Report existing
+   broader Azure role assignments separately; bootstrap does not remove them.
 6. Create one approval record for one phase and run
    `foundry-opt bootstrap apply --phase ... --approval-file ... --plan-input ...`.
 7. Stop on stale plan/SHA drift or any failed/compensation-required receipt.

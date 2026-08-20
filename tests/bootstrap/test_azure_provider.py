@@ -21,7 +21,10 @@ ROLE_URL = f"https://management.azure.com{SCOPE}/providers/Microsoft.Authorizati
 
 
 def _plan(*actions: BootstrapAction) -> BootstrapPlan:
-    return BootstrapPlan.create(operation_id="op", runtime_repository="https://github.com/octo-org/octo-repo.git", runtime_commit="a" * 40, repository_identity="octo-org/octo-repo", actions=actions)
+    planned_actions = list(actions)
+    if not any(action.kind == "federated-credential" for action in planned_actions):
+        planned_actions.extend(_fic_action(subject) for subject in _subjects())
+    return BootstrapPlan.create(operation_id="op", runtime_repository="https://github.com/octo-org/octo-repo.git", runtime_commit="a" * 40, repository_identity="octo-org/octo-repo", actions=tuple(planned_actions))
 
 
 def _uami(*, adopted: bool, ids: bool = True) -> BootstrapAction:
@@ -33,6 +36,16 @@ def _uami(*, adopted: bool, ids: bool = True) -> BootstrapAction:
 
 def _role(scope: str = SCOPE) -> BootstrapAction:
     return BootstrapAction(action_id="role", phase="azure", stage="planned", kind="role-assignment", diagnostics=("role=FoundryProjectReader", f"scope={scope}"))
+
+
+def _fic_action(subject: str) -> BootstrapAction:
+    return BootstrapAction(
+        action_id=f"fic-{hashlib.sha256(subject.encode()).hexdigest()[:8]}",
+        phase="azure",
+        stage="planned",
+        kind="federated-credential",
+        diagnostics=(f"subject={subject}",),
+    )
 
 
 def _provider(recorder: AzureTransportRecorder, token: str = "token") -> AzureArmRestProvider:
@@ -112,6 +125,56 @@ def test_planned_bindings_are_replayable_and_bind_role_approval() -> None:
     ):
         provider._planned_bindings(
             _plan(*(tampered if action is role else action for action in actions))
+        )
+
+
+def test_planned_bindings_preserve_explicit_immutable_subjects() -> None:
+    provider = _provider(AzureTransportRecorder())
+    prefix = "repo:octo-org@123/octo-repo@456"
+    subjects = (
+        f"{prefix}:environment:copilot",
+        f"{prefix}:environment:foundry-production",
+    )
+    identity = BootstrapAction(
+        action_id="identity",
+        phase="azure",
+        stage="planned",
+        kind="entra-application",
+        diagnostics=(
+            f"subscription_id={SUB}",
+            f"tenant_id={TENANT}",
+            f"client_id={CLIENT}",
+            f"object_id={PRINCIPAL}",
+            f"name={CLIENT}",
+            "adopted=true",
+        ),
+    )
+
+    planned = provider._planned_bindings(
+        _plan(identity, *(_fic_action(subject) for subject in subjects))
+    )
+
+    assert planned.identity.object_id == PRINCIPAL
+    assert planned.subjects == subjects
+
+
+def test_planned_bindings_require_exactly_two_explicit_subjects() -> None:
+    provider = _provider(AzureTransportRecorder())
+    identity = _uami(adopted=True)
+    one_subject = _fic_action(_subjects()[0])
+
+    with pytest.raises(
+        AzureProviderError,
+        match="exactly two federated credential subjects",
+    ):
+        provider._planned_bindings(
+            BootstrapPlan.create(
+                operation_id="missing-fic",
+                runtime_repository="https://github.com/octo-org/octo-repo.git",
+                runtime_commit="a" * 40,
+                repository_identity="octo-org/octo-repo",
+                actions=(identity, one_subject),
+            )
         )
 
 

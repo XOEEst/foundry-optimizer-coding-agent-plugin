@@ -17,6 +17,7 @@ from foundry_opt.bootstrap.input_contracts import (
     TrustedTemplateManifest,
 )
 from foundry_opt.bootstrap.plan_factory import build_phase_actions
+from foundry_opt.bootstrap.providers.azure import AzureArmRestProvider
 
 SUBSCRIPTION = "33333333-3333-3333-3333-333333333333"
 TENANT = "22222222-2222-2222-2222-222222222222"
@@ -32,7 +33,12 @@ def _resource_id(name: str, *, resource_group: str = "example-rg") -> str:
     )
 
 
-def _plan_input(identity: dict[str, object], *, resource_group: str = "example-rg") -> BootstrapPlanInput:
+def _plan_input(
+    identity: dict[str, object],
+    *,
+    resource_group: str = "example-rg",
+    oidc_subject_prefix: str | None = None,
+) -> BootstrapPlanInput:
     manifest = TrustedTemplateManifest.load_pinned_manifest()
     payload = {
         "schema_version": 1,
@@ -91,6 +97,17 @@ def _plan_input(identity: dict[str, object], *, resource_group: str = "example-r
             ],
         },
     }
+    if oidc_subject_prefix is not None:
+        payload["required_phases"] = ["repository", "github", "azure"]
+        payload["github_phase"] = {
+            "schema_version": 1,
+            "optimizer_environment": "copilot",
+            "deployment_environment": "foundry-production",
+            "shared_client_id": identity["existing_client_id"],
+            "client_id_variable_name": "AZURE_OPTIMIZER_CLIENT_ID",
+            "oidc_subject_prefix": oidc_subject_prefix,
+            "default_branch_policy_intent": "preserve_repository_default",
+        }
     return BootstrapPlanInput.model_validate(payload)
 
 
@@ -176,6 +193,69 @@ def test_adopted_entra_application_is_labelled_by_its_client_id() -> None:
     assert diagnostics["name"] == CLIENT_ID
     assert diagnostics["client_id"] == CLIENT_ID
     assert "resource_id" not in diagnostics
+
+
+def test_adopted_entra_application_emits_application_object_id() -> None:
+    plan_input = _plan_input(
+        {
+            "identity_kind": "entra_application",
+            "existing_client_id": CLIENT_ID,
+            "existing_object_id": OBJECT_ID,
+        }
+    )
+
+    diagnostics = _identity_diagnostics(plan_input)
+
+    assert diagnostics["object_id"] == OBJECT_ID
+    assert "principal_id" not in diagnostics
+
+
+def test_entra_application_and_immutable_subjects_round_trip_through_driver() -> None:
+    prefix = "repo:org@123/repo@456"
+    plan_input = _plan_input(
+        {
+            "identity_kind": "entra_application",
+            "existing_client_id": CLIENT_ID,
+            "existing_object_id": OBJECT_ID,
+        },
+        oidc_subject_prefix=prefix,
+    )
+    provider = AzureArmRestProvider(
+        token_provider=lambda scope: "token",
+        approved_role_definitions={
+            "foundry-user": (
+                f"/subscriptions/{SUBSCRIPTION}/providers/"
+                "Microsoft.Authorization/roleDefinitions/"
+                "53ca6127-db72-4b80-b1b0-d745d6d5456d"
+            )
+        },
+    )
+    driver = AzurePhaseDriver(plan_input=plan_input, provider=provider)
+
+    actions = driver.plan(
+        {
+            "operation_id": "immutable-entra-plan",
+            "runtime_repository": "https://github.com/org/runtime.git",
+            "runtime_commit": "a" * 40,
+            "repository_id": "org/repo",
+        }
+    )
+
+    identity = next(action for action in actions if action.kind == "entra-application")
+    diagnostics = {
+        entry.split("=", 1)[0]: entry.split("=", 1)[1]
+        for entry in identity.diagnostics
+    }
+    subjects = tuple(
+        action.diagnostics[0].removeprefix("subject=")
+        for action in actions
+        if action.kind == "federated-credential"
+    )
+    assert diagnostics["object_id"] == OBJECT_ID
+    assert subjects == (
+        f"{prefix}:environment:copilot",
+        f"{prefix}:environment:foundry-production",
+    )
 
 
 def test_non_managed_identity_resource_ids_fail_closed() -> None:
