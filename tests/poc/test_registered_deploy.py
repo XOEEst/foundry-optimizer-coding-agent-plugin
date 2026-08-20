@@ -8,6 +8,20 @@ from pathlib import Path
 import pytest
 import yaml
 
+from foundry_opt.bootstrap.contracts import (
+    ActivationBinding,
+    BootstrapSidecar,
+    DefaultEvaluatorBundle,
+    EvaluationLineage,
+    EvaluatorNormalization,
+    EvaluatorReference,
+    ImmutableDatasetReference,
+    ImmutableDefinitionReference,
+    ResolvedEvaluator,
+    ResolvedWeightedObjective,
+    VerificationBundle,
+    VerificationSettings,
+)
 from foundry_opt.poc.deploy import (
     DeploymentGuardrail,
     DeploymentReceipt,
@@ -24,6 +38,77 @@ TEMPLATE_ROOT = (
 CLIENT_ID = "44444444-4444-4444-4444-444444444444"
 TENANT_ID = "22222222-2222-2222-2222-222222222222"
 SUBSCRIPTION_ID = "33333333-3333-3333-3333-333333333333"
+
+
+def _evaluated_sidecar() -> BootstrapSidecar:
+    profile = BootstrapSidecar.from_document(
+        (TEMPLATE_ROOT / "agent" / ".foundry" / "foundry-opt.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    objective = ResolvedWeightedObjective.create(
+        (
+            ResolvedEvaluator(
+                reference=EvaluatorReference(
+                    evaluator_id="azureai://built-in/evaluators/safety",
+                    provenance="reused_existing",
+                ),
+                normalization=EvaluatorNormalization(kind="pass_fail"),
+                weight=1.0,
+            ),
+        )
+    )
+    development = ImmutableDatasetReference(
+        dataset_id="azureai://accounts/example/projects/example/data/development/versions/1"
+    )
+    validating = ImmutableDatasetReference(
+        dataset_id="azureai://accounts/example/projects/example/data/validating/versions/1"
+    )
+    development_definition = ImmutableDefinitionReference(
+        definition_id="eval_development"
+    )
+    validating_definition = ImmutableDefinitionReference(
+        definition_id="eval_validating"
+    )
+    bundle = VerificationBundle(
+        development_dataset=development,
+        validating_dataset=validating,
+        development_definition=development_definition,
+        validating_definition=validating_definition,
+        default_evaluator_bundle=DefaultEvaluatorBundle(
+            objective=objective,
+            datasets=(development, validating),
+            definitions=(development_definition, validating_definition),
+        ),
+    )
+    lineage = EvaluationLineage(
+        split_algorithm_version="v1",
+        split_hash="a" * 64,
+        split_lineage_hash="b" * 64,
+        development_case_count=20,
+        validating_case_count=10,
+        dataset_strategy="synthetic_only",
+        generation_context_fingerprint="c" * 64,
+        evaluator_provenance="reused_existing",
+        bundle_objective_hash=objective.objective_hash,
+        activation_binding=ActivationBinding(
+            operation_id="test-activation",
+            plan_hash="d" * 64,
+            approval_hash="e" * 64,
+            receipt_hash="f" * 64,
+            runtime_commit="1" * 40,
+            finalization_hash="2" * 64,
+        ),
+    )
+    return profile.model_copy(
+        update={
+            "verification": VerificationSettings(
+                mode="required",
+                bundle=bundle,
+                lineage=lineage,
+            )
+        }
+    )
 
 
 def _git(repository: Path, *arguments: str) -> str:
@@ -74,8 +159,9 @@ def _registered_repository(
         encoding="utf-8",
     )
     (repository / "agent" / ".foundry" / "foundry-opt.yaml").write_text(
-        (TEMPLATE_ROOT / "agent" / ".foundry" / "foundry-opt.yaml").read_text(
-            encoding="utf-8"
+        yaml.safe_dump(
+            _evaluated_sidecar().model_dump(mode="json"),
+            sort_keys=False,
         ),
         encoding="utf-8",
     )
