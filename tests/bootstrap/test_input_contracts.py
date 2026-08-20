@@ -178,6 +178,41 @@ def test_repository_identity_and_runtime_provenance_are_distinct_and_validated()
     BootstrapPlanInput.model_validate(payload)
 
 
+def test_selected_agent_separates_discovery_root_from_managed_root() -> None:
+    payload = _sample_payload()
+    selected = payload["repository"]["selected_agents"][0]
+    selected["discovery_root"] = "."
+    payload["binding_evidence"] = {
+        "schema_version": 1,
+        "evidence_version": 1,
+        "repository_id": "XOEEst/foundry-optimizer-coding-agent-plugin",
+        "agents": [
+            {
+                "schema_version": 1,
+                "root": ".",
+                "repo_agent_id": "example-agent",
+                "project_endpoint": "https://example.services.ai.azure.com/api/projects/example",
+                "agent_name": "example-agent",
+                "agent_version": "1.2.3",
+                "source_fingerprint": "1" * 64,
+                "package_fingerprint": "2" * 64,
+                "evidence_provenance": "foundry_agent_code_download",
+                "code_content_hash": "3" * 64,
+                "code_content_hash_verified": True,
+                "observed_at": "2026-08-17T00:00:00Z",
+            }
+        ],
+    }
+
+    plan_input = BootstrapPlanInput.model_validate(payload)
+    selected_agent = plan_input.repository.selected_agents[0]
+
+    assert selected_agent.discovery_selection_root == "."
+    assert selected_agent.root == "agent"
+    assert plan_input.binding_evidence is not None
+    assert plan_input.binding_evidence.agents[0].root == "."
+
+
 def test_offline_and_github_resolution_rules_fail_closed() -> None:
     payload = _sample_payload()
     payload['offline_plan'] = True

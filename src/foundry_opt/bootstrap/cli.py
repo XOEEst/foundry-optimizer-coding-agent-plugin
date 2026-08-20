@@ -155,7 +155,10 @@ def _resolve_binding_evidence(
             details={"expected": repository_id, "observed": evidence.repository_id},
         )
     if plan_input is not None:
-        selected_roots = {agent.root.casefold() for agent in plan_input.repository.selected_agents}
+        selected_roots = {
+            agent.discovery_selection_root.casefold()
+            for agent in plan_input.repository.selected_agents
+        }
         unknown = sorted(item.root for item in evidence.agents if item.root.casefold() not in selected_roots)
         if unknown:
             raise BootstrapCliError(
@@ -184,7 +187,13 @@ def _verify_binding_claims(plan_input: BootstrapPlanInput, *, repo_root: Path) -
     try:
         result = discover_repository_agents(
             repo_root,
-            selected_agents=tuple({"root": agent.root, "repoAgentId": agent.repo_agent_id} for agent in plan_input.repository.selected_agents),
+            selected_agents=tuple(
+                {
+                    "root": agent.discovery_selection_root,
+                    "repoAgentId": agent.repo_agent_id,
+                }
+                for agent in plan_input.repository.selected_agents
+            ),
             binding_evidence_by_root=evidence.by_root(),
         )
     except BootstrapConfigError as exc:
@@ -212,6 +221,59 @@ def _verify_binding_claims(plan_input: BootstrapPlanInput, *, repo_root: Path) -
             )
         verified[agent.repo_agent_id] = derived
     return verified
+
+
+def _verify_selected_discovery(
+    plan_input: BootstrapPlanInput,
+    selection: SelectionPlan,
+) -> None:
+    discovered_by_id = {
+        item.repo_agent_id.casefold(): item
+        for item in selection.discovered_agents
+    }
+    for selected in plan_input.repository.selected_agents:
+        discovered = discovered_by_id.get(selected.repo_agent_id.casefold())
+        if discovered is None:
+            raise BootstrapCliError(
+                "selection-discovery-mismatch",
+                "selected agent is missing from persisted discovery",
+                exit_code=BootstrapExitCode.CONFIG,
+                details={"repo_agent_id": selected.repo_agent_id},
+            )
+        if discovered.root.casefold() != selected.discovery_selection_root.casefold():
+            raise BootstrapCliError(
+                "selection-discovery-mismatch",
+                "selected discovery_root does not match persisted discovery",
+                exit_code=BootstrapExitCode.CONFIG,
+                details={
+                    "repo_agent_id": selected.repo_agent_id,
+                    "expected": discovered.root,
+                    "observed": selected.discovery_selection_root,
+                },
+            )
+        expected_managed_root = (
+            discovered.source_root
+            if discovered.root == "."
+            else discovered.root
+        )
+        if expected_managed_root == ".":
+            raise BootstrapCliError(
+                "selection-root-unsupported",
+                "repository-root discovery requires a concrete sourceRoot for managed bootstrap",
+                exit_code=BootstrapExitCode.CONFIG,
+                details={"repo_agent_id": selected.repo_agent_id},
+            )
+        if selected.root.casefold() != expected_managed_root.casefold():
+            raise BootstrapCliError(
+                "selection-root-mismatch",
+                "selected managed root does not match the discovered agent root",
+                exit_code=BootstrapExitCode.CONFIG,
+                details={
+                    "repo_agent_id": selected.repo_agent_id,
+                    "expected": expected_managed_root,
+                    "observed": selected.root,
+                },
+            )
 
 
 def _handle_error(exc: Exception) -> None:
@@ -325,7 +387,7 @@ def register_bootstrap_commands(app: typer.Typer) -> None:
                 resolved_commit = loaded.runtime_provenance.runtime_commit
                 selected_agents = tuple(
                     {
-                        "root": agent.root,
+                        "root": agent.discovery_selection_root,
                         "repoAgentId": agent.repo_agent_id,
                     }
                     for agent in loaded.repository.selected_agents
@@ -364,7 +426,13 @@ def register_bootstrap_commands(app: typer.Typer) -> None:
             selected = {agent.repo_agent_id.casefold(): agent for agent in loaded.repository.selected_agents}
             discovered = discover_repository_agents(
                 repo_root,
-                selected_agents=tuple({"root": agent.root, "repoAgentId": agent.repo_agent_id} for agent in loaded.repository.selected_agents),
+                selected_agents=tuple(
+                    {
+                        "root": agent.discovery_selection_root,
+                        "repoAgentId": agent.repo_agent_id,
+                    }
+                    for agent in loaded.repository.selected_agents
+                ),
             )
             discovered_by_id = {agent.repoAgentId.casefold(): agent for agent in discovered.agents}
             driver = EvaluationPhaseDriver(plan_input=loaded, repository_root=repo_root)
@@ -451,12 +519,13 @@ def register_bootstrap_commands(app: typer.Typer) -> None:
                         "selection file must match plan input selected agents",
                         exit_code=BootstrapExitCode.CONFIG,
                     )
+            discovery = read_operation_state(repository_id, operation_id, state_root=state_root)
+            _verify_selected_discovery(loaded, discovery.selection_plan)
             orch = _build_orchestrator(
                 repo_root=repo_root,
                 plan_input=loaded,
                 state_root=state_root,
             )
-            discovery = read_operation_state(repository_id, operation_id, state_root=state_root)
             resolved_commit = runtime_commit or (
                 loaded.runtime_provenance.runtime_commit
                 if loaded is not None
