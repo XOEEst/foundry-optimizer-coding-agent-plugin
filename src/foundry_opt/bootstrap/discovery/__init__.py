@@ -214,11 +214,18 @@ class _ScanCache:
                 if self.budget.bytes > _MAX_AGGREGATE_BYTES:
                     raise BootstrapConfigError("repository scan exceeded aggregate byte budget")
                 sha256 = None
+                content = None
                 if lst.st_size <= _MAX_HASH_BYTES:
-                    sha256 = hashlib.sha256(child.read_bytes()).hexdigest()
+                    content = child.read_bytes()
+                    sha256 = fingerprint_content_sha256(
+                        relative.as_posix(),
+                        content,
+                    )
                 text = None
                 if lst.st_size <= _MAX_TEXT_BYTES and (child.suffix.casefold() in _TEXT_SUFFIXES or child.name in _PACKAGE_FILE_NAMES):
-                    text = child.read_text(encoding="utf-8", errors="ignore")
+                    if content is None:
+                        content = child.read_bytes()
+                    text = content.decode("utf-8", errors="ignore")
                 out.append(_ScannedFile(relative=relative.as_posix(), size=lst.st_size, sha256=sha256, text=text))
         result = tuple(sorted(out, key=lambda item: (PurePosixPath(item.relative).parts, item.relative.casefold(), item.relative)))
         self.files_by_root[normalized] = result
@@ -379,6 +386,23 @@ def fingerprint_files(files: Mapping[str, str]) -> str:
         payload.append({"path": relative.as_posix(), "sha256": digest})
     payload.sort(key=lambda item: (PurePosixPath(item["path"]).parts, item["path"].casefold(), item["path"]))
     return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
+
+
+def fingerprint_content_sha256(relative: str, content: bytes) -> str:
+    """Hash one fingerprinted file with platform-neutral text line endings."""
+
+    validate_repository_relative_path(relative, field="fingerprint path")
+    if not isinstance(content, bytes):
+        raise BootstrapConfigError("fingerprint content must be bytes")
+    canonical = content
+    if b"\x00" not in content:
+        try:
+            content.decode("utf-8")
+        except UnicodeDecodeError:
+            pass
+        else:
+            canonical = content.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 def is_fingerprintable_path(relative: str) -> bool:
