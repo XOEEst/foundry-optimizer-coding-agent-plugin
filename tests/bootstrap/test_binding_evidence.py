@@ -15,7 +15,12 @@ import pytest
 from pydantic import ValidationError
 from typer.testing import CliRunner
 
-from foundry_opt.bootstrap.discovery import discover_repository_agents, fingerprint_files, is_fingerprintable_path
+from foundry_opt.bootstrap.discovery import (
+    discover_repository_agents,
+    fingerprint_content_sha256,
+    fingerprint_files,
+    is_fingerprintable_path,
+)
 from foundry_opt.bootstrap.errors import BootstrapConfigError
 from foundry_opt.bootstrap.input_contracts import (
     BindingEvidenceInput,
@@ -157,6 +162,39 @@ def test_downloaded_agent_version_reproduces_the_local_discovery_fingerprints(tm
     assert fakes["agents"].download_calls == [("example-agent", "1")]
 
 
+def test_binding_fingerprints_normalize_text_line_endings(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    (repo / "app" / "main.py").write_bytes(
+        b"import fastapi\r\napp = fastapi.FastAPI()\r\n"
+    )
+    deployed = tmp_path / "deployed"
+    deployed.mkdir()
+    (deployed / "main.py").write_bytes(
+        b"import fastapi\napp = fastapi.FastAPI()\n"
+    )
+    archive = build_code_archive(deployed)
+    adapter, _fakes = build_fake_adapter(
+        code_archive=archive,
+        code_content_hash=hashlib.sha256(archive).hexdigest(),
+    )
+
+    local = _discover(repo).agents[0]
+    observation = adapter.observe_agent_binding(
+        agent_name="example-agent",
+        agent_version="1",
+        source_root="app",
+        package_root="app",
+    )
+
+    assert observation["source_fingerprint"] == local.sourceFingerprint
+    assert observation["package_fingerprint"] == local.packageFingerprint
+    aligned = _discover(
+        repo,
+        _document(observation).by_root(),
+    )
+    assert aligned.agents[0].bindingAssessment.classification == "bound-aligned"
+
+
 def test_observed_evidence_classifies_a_deployed_baseline_as_bound_aligned(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     observation, _adapter, _fakes = _observe(repo)
@@ -245,6 +283,23 @@ def test_fingerprint_helpers_are_stable_and_path_filtered() -> None:
     assert is_fingerprintable_path("../escape.py") is False
     with pytest.raises(BootstrapConfigError):
         fingerprint_files({"app/main.py": "nope"})
+
+
+def test_content_fingerprint_normalizes_text_but_not_binary() -> None:
+    assert fingerprint_content_sha256(
+        "app/main.py",
+        b"line one\r\nline two\r\n",
+    ) == fingerprint_content_sha256(
+        "app/main.py",
+        b"line one\nline two\n",
+    )
+    assert fingerprint_content_sha256(
+        "app/model.bin",
+        b"\x00line one\r\n",
+    ) != fingerprint_content_sha256(
+        "app/model.bin",
+        b"\x00line one\n",
+    )
 
 
 def test_evidence_contract_requires_both_content_fingerprints(tmp_path: Path) -> None:
@@ -365,19 +420,22 @@ def test_observation_maps_archive_entries_from_package_root(tmp_path: Path) -> N
     )
     expected_source = fingerprint_files(
         {
-            "agents/example/app/main.py": hashlib.sha256(
-                (repo / "agents" / "example" / "app" / "main.py").read_bytes()
-            ).hexdigest()
+            "agents/example/app/main.py": fingerprint_content_sha256(
+                "agents/example/app/main.py",
+                (repo / "agents" / "example" / "app" / "main.py").read_bytes(),
+            )
         }
     )
     expected_package = fingerprint_files(
         {
-            "agents/example/app/main.py": hashlib.sha256(
-                (repo / "agents" / "example" / "app" / "main.py").read_bytes()
-            ).hexdigest(),
-            "agents/example/pyproject.toml": hashlib.sha256(
-                (repo / "agents" / "example" / "pyproject.toml").read_bytes()
-            ).hexdigest(),
+            "agents/example/app/main.py": fingerprint_content_sha256(
+                "agents/example/app/main.py",
+                (repo / "agents" / "example" / "app" / "main.py").read_bytes(),
+            ),
+            "agents/example/pyproject.toml": fingerprint_content_sha256(
+                "agents/example/pyproject.toml",
+                (repo / "agents" / "example" / "pyproject.toml").read_bytes(),
+            ),
         }
     )
     archive = build_code_archive(repo / "agents" / "example")

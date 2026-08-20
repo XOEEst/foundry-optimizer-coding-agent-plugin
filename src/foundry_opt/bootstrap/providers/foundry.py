@@ -68,7 +68,11 @@ from foundry_opt.bootstrap.contracts import (
     ResolvedWeightedObjective,
 )
 from foundry_opt.bootstrap.errors import BootstrapConfigError, BootstrapProviderError
-from foundry_opt.bootstrap.discovery import fingerprint_files, is_fingerprintable_path
+from foundry_opt.bootstrap.discovery import (
+    fingerprint_content_sha256,
+    fingerprint_files,
+    is_fingerprintable_path,
+)
 from foundry_opt.bootstrap.evaluation.core import (
     ActivationCleanup,
     ActivationRun,
@@ -1049,7 +1053,10 @@ class FoundryAdapter:
                     )
                     if relative is None or not is_fingerprintable_path(relative):
                         continue
-                    digest = hashlib.sha256(bundle.read(entry)).hexdigest()
+                    digest = fingerprint_content_sha256(
+                        relative,
+                        bundle.read(entry),
+                    )
                     package_files[relative] = digest
                     if (
                         normalized_source_root == '.'

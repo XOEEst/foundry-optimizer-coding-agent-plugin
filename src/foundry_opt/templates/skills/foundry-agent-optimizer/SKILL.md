@@ -79,6 +79,9 @@ an agent optimize job.
    with `discover --binding-evidence`, or embed it in the plan input under
    `binding_evidence` (never both). Without content fingerprints an agent stays
    `bound-unknown`, and metadata alone can never make it `bound-aligned`.
+   Fingerprinting normalizes UTF-8 text line endings to LF on both local and
+   downloaded content while keeping binary bytes exact. After a runtime upgrade,
+   rerun discovery and evidence review in a fresh operation.
 4. Run `foundry-opt bootstrap plan --plan-input ...`; offline plans contain only
    the repository phase.
 5. Show exact repository diffs and GitHub/Azure/evaluation action summaries.

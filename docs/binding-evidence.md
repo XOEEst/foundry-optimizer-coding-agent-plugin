@@ -157,8 +157,15 @@ exactly why evidence is needed for a real deployed baseline.
 4. Each archive entry is hashed individually and re-rooted onto its repository-relative path
    under the discovered `sourceRoot`/`packageRoot`. Absolute, traversing, and non-fingerprintable
    entries (for example `__pycache__`) are dropped exactly as discovery drops them.
-5. `fingerprint_files` — the same canonical algorithm discovery uses locally — produces the two
+5. Before each file hash, valid UTF-8 text without NUL bytes canonicalizes CRLF and bare CR line
+   endings to LF. Binary and non-UTF-8 bytes remain byte-exact. This makes Windows and Linux
+   checkouts comparable without hiding binary drift.
+6. `fingerprint_files` — the same canonical algorithm discovery uses locally — produces the two
    digests, so observed and local fingerprints are directly comparable.
+
+The exact runtime pin selects the fingerprint algorithm. After upgrading the runtime, rerun
+discovery and review binding evidence under a fresh operation; never carry an old plan hash or
+approval into the new runtime.
 
 A project that publishes no downloadable code archive, or an agent version that does not match
 the requested version, produces an error instead of a weaker classification. In that case an
