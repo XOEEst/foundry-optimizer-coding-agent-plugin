@@ -66,7 +66,12 @@ an agent optimize job.
    repository root. Its `agents` array carries each discovered root, configPath,
    sourceFingerprint, packageFingerprint, classification, and blockers; use those
    local digests when constructing or reviewing observed binding evidence.
-2. Explicitly select agents and prepare a reviewed `BootstrapPlanInput`.
+2. Explicitly select agents and prepare a reviewed `BootstrapPlanInput`. Preserve
+   discovery `root` as `discovery_root`. Use the managed agent directory as `root`;
+   for a repository-root candidate (`discovery_root: "."`), use its concrete
+   `sourceRoot` (for example `agent`). Binding evidence remains keyed by
+   `discovery_root`, while registry, sidecar, evaluation, and deployment paths use
+   the managed `root`.
 3. To classify a real deployed baseline, supply reviewed binding evidence:
    `foundry-opt bootstrap binding-evidence --plan-input ... --output ...`
    downloads each immutable agent version's code archive, verifies its published

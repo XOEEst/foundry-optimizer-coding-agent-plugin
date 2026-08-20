@@ -30,6 +30,21 @@ def _repo(tmp_path: Path) -> Path:
     return repo
 
 
+def _repository_root_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "root-repo"
+    (repo / ".foundry").mkdir(parents=True)
+    (repo / ".foundry" / "agent-metadata.yaml").write_text(
+        "agent_name: app\nsource_root: agent\npackage_root: agent\n",
+        encoding="utf-8",
+    )
+    (repo / "agent").mkdir()
+    (repo / "agent" / "main.py").write_text(
+        "import fastapi\napp = fastapi.FastAPI()\n",
+        encoding="utf-8",
+    )
+    return repo
+
+
 def _offline_plan_input(tmp_path: Path, sha: str) -> Path:
     manifest = TrustedTemplateManifest.load_pinned_manifest()
     path = tmp_path / "plan-input.json"
@@ -82,6 +97,18 @@ def _offline_plan_input(tmp_path: Path, sha: str) -> Path:
     return path
 
 
+def _repository_root_plan_input(tmp_path: Path, sha: str) -> Path:
+    path = _offline_plan_input(tmp_path, sha)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    selected = payload["repository"]["selected_agents"][0]
+    selected["root"] = "."
+    selected["config_path"] = "agent/.foundry/foundry-opt.yaml"
+    selected["editable_paths"] = ["agent/main.py"]
+    root_path = tmp_path / "plan-input-root.json"
+    root_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    return root_path
+
+
 def _evaluation_plan_input(tmp_path: Path, sha: str) -> Path:
     """Reviewed plan input carrying an executable resolved evaluation execution contract."""
 
@@ -113,6 +140,93 @@ def test_bootstrap_discover_plan_status_and_runtime_sha(tmp_path: Path) -> None:
     assert payload["runtime_commit"] == sha
     stale = runner.invoke(app, ["bootstrap", "plan", "--plan-input", str(plan_input), "--repository-id", "org/repo", "--repo-root", str(repo), "--operation-id", "op-1", "--state-root", str(state_root), "--runtime-commit", "b" * 40])
     assert stale.exit_code == 24
+
+
+def test_repository_root_discovery_plans_managed_agent_directory(tmp_path: Path) -> None:
+    repo = _repository_root_repo(tmp_path)
+    state_root = tmp_path / "root-state"
+    sha = "a" * 40
+    plan_input = _repository_root_plan_input(tmp_path, sha)
+
+    discovered = runner.invoke(
+        app,
+        [
+            "bootstrap",
+            "discover",
+            "--repo-root",
+            str(repo),
+            "--repository-id",
+            "org/repo",
+            "--operation-id",
+            "root-op",
+            "--state-root",
+            str(state_root),
+            "--plan-input",
+            str(plan_input),
+        ],
+    )
+    assert discovered.exit_code == 0, discovered.stdout
+    discovered_payload = json.loads(discovered.stdout)
+    assert discovered_payload["agents"][0]["root"] == "."
+    assert discovered_payload["agents"][0]["sourceRoot"] == "agent"
+
+    planned = runner.invoke(
+        app,
+        [
+            "bootstrap",
+            "plan",
+            "--plan-input",
+            str(plan_input),
+            "--repository-id",
+            "org/repo",
+            "--repo-root",
+            str(repo),
+            "--operation-id",
+            "root-op",
+            "--state-root",
+            str(state_root),
+        ],
+    )
+    assert planned.exit_code == 0, planned.stdout
+    plan_hash = json.loads(planned.stdout)["plan_hash"]
+    approval = ApprovalRecord.create(
+        parent_plan_hash=plan_hash,
+        phase="repository",
+        actor="tester",
+        summary="root regression",
+    )
+    approval_file = tmp_path / "approval-root.json"
+    approval_file.write_text(
+        json.dumps(approval.model_dump(mode="json")),
+        encoding="utf-8",
+    )
+    applied = runner.invoke(
+        app,
+        [
+            "bootstrap",
+            "apply",
+            "--repository-id",
+            "org/repo",
+            "--operation-id",
+            "root-op",
+            "--phase",
+            "repository",
+            "--approval-file",
+            str(approval_file),
+            "--plan-input",
+            str(plan_input),
+            "--repo-root",
+            str(repo),
+            "--state-root",
+            str(state_root),
+        ],
+    )
+    assert applied.exit_code == 0, applied.stdout
+    registry = yaml.safe_load(
+        (repo / ".foundry-opt" / "registry.yaml").read_text(encoding="utf-8")
+    )
+    assert registry["agents"][0]["root"] == "agent"
+    assert registry["agents"][0]["config_path"] == "agent/.foundry/foundry-opt.yaml"
 
 
 def test_bootstrap_apply_requires_hash_and_matches_active_plan(tmp_path: Path) -> None:

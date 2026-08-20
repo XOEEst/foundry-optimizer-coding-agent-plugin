@@ -24,6 +24,11 @@ the manifest is refused if the set differs.
 
 ## The committed lock is generated, not rendered
 
+Each registry entry's `root` is the managed agent directory, not necessarily the discovery
+candidate root. When repository-level metadata is discovered at `.` but names `agent` as its
+`sourceRoot`, the plan input retains `discovery_root: "."` for evidence while the registry uses
+`root: agent`.
+
 `.foundry-opt/bootstrap.lock.json` is the authoritative committed ownership ledger. Repository
 apply generates it from the applied plan; it is **not** a managed payload and cannot be
 declared as one. It records the engine and schema version, the runtime repository, channel and

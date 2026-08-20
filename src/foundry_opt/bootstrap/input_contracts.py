@@ -245,6 +245,7 @@ def _canonical_phase_order(phases: Sequence[str]) -> tuple[str, ...]:
 class SelectedAgent(BootstrapDocument):
     repo_agent_id: AgentId
     root: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    discovery_root: Annotated[str, StringConstraints(min_length=1, max_length=240)] | None = None
     config_path: RepoRelativePath
     editable_paths: tuple[RepoRelativePath, ...]
 
@@ -252,6 +253,13 @@ class SelectedAgent(BootstrapDocument):
     @classmethod
     def _validate_root(cls, value: str) -> str:
         return _validate_repo_path(value, field='root', allow_dot=True)
+
+    @field_validator('discovery_root')
+    @classmethod
+    def _validate_discovery_root(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _validate_repo_path(value, field='discovery_root', allow_dot=True)
 
     @field_validator('config_path')
     @classmethod
@@ -266,9 +274,26 @@ class SelectedAgent(BootstrapDocument):
 
     @model_validator(mode='after')
     def _validate_paths(self) -> Self:
+        discovery_root = self.discovery_root
+        if self.root == '.':
+            parts = PurePosixPath(self.config_path).parts
+            if len(parts) <= 2 or parts[-2:] != ('.foundry', 'foundry-opt.yaml'):
+                raise BootstrapConfigError(
+                    "dot-like selected root requires config_path under a concrete agent directory"
+                )
+            managed_root = PurePosixPath(*parts[:-2]).as_posix()
+            object.__setattr__(self, 'root', managed_root)
+            discovery_root = discovery_root or '.'
+        if discovery_root is None:
+            discovery_root = self.root
+        object.__setattr__(self, 'discovery_root', discovery_root)
         if self.root != '.' and not _path_is_within(self.root, self.config_path):
             raise BootstrapConfigError('config_path must be within selected agent root')
         return self
+
+    @property
+    def discovery_selection_root(self) -> str:
+        return self.discovery_root or self.root
 
 
 class RepositoryIdentityInput(BootstrapDocument):
@@ -307,6 +332,8 @@ class RepositoryIdentityInput(BootstrapDocument):
         for agent in self.selected_agents:
             if self.root != '.' and not _path_is_within(self.root, agent.root):
                 raise BootstrapConfigError('selected_agents root must be within repository root')
+            if self.root != '.' and not _path_is_within(self.root, agent.discovery_selection_root):
+                raise BootstrapConfigError('selected_agents discovery_root must be within repository root')
         return self
 
 
@@ -890,7 +917,10 @@ class BootstrapPlanInput(BootstrapDocument):
         if self.binding_evidence is not None:
             if self.binding_evidence.repository_id.casefold() != self.repository.repository_id.casefold():
                 raise BootstrapConfigError('binding_evidence repository_id must match repository_id')
-            selected_by_root = {agent.root.casefold(): agent for agent in self.repository.selected_agents}
+            selected_by_root = {
+                agent.discovery_selection_root.casefold(): agent
+                for agent in self.repository.selected_agents
+            }
             evaluation_by_id = {agent.repo_agent_id.casefold(): agent for agent in (self.evaluations_phase.agents if self.evaluations_phase is not None else ())}
             for observation in self.binding_evidence.agents:
                 selected = selected_by_root.get(observation.root.casefold())

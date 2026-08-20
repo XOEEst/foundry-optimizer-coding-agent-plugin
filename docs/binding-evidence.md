@@ -94,11 +94,40 @@ The same records are persisted in the operation state under
 observation had to reproduce. `candidates` (binding assessments only) is still emitted for
 compatibility.
 
+## Discovery root and managed root
+
+`repository.selected_agents` keeps two roots when repository-level metadata describes code in
+a child directory:
+
+- `discovery_root` is the candidate root emitted as `root` by discovery. Binding evidence and
+  later rediscovery continue to use this value.
+- `root` is the managed agent directory written to `.foundry-opt/registry.yaml`. Managed
+  sidecars, editable paths, evaluation policy, and deployment change detection use this value.
+
+For example, discovery can report `root: "."` and `sourceRoot: "agent"`. The reviewed plan input
+must preserve both facts:
+
+```json
+{
+  "repo_agent_id": "luffy-travel-approver",
+  "discovery_root": ".",
+  "root": "agent",
+  "config_path": "agent/.foundry/foundry-opt.yaml",
+  "editable_paths": ["agent/**"]
+}
+```
+
+Plan generation verifies these values against the persisted discovery record. It refuses a
+different discovery root or a managed root that does not equal `sourceRoot` for a repository-root
+candidate. Older plan inputs that used `root: "."` are normalized only when
+`config_path` deterministically identifies a concrete managed directory such as
+`agent/.foundry/foundry-opt.yaml`.
+
 Alternatively the same document may be embedded in the reviewed plan input under
 `binding_evidence`, in which case `--binding-evidence` must be omitted. Nested records are
-cross-checked against `repository.selected_agents` (root and `repo_agent_id`) and, when the
-evaluations phase is present, against the reviewed `project_endpoint`, `agent_name`, and
-`agent_version`.
+cross-checked against `repository.selected_agents` (`discovery_root` and `repo_agent_id`) and,
+when the evaluations phase is present, against the reviewed `project_endpoint`, `agent_name`,
+and `agent_version`.
 
 ## Plan-time claim verification
 

@@ -1693,6 +1693,20 @@
           "title": "Config Path",
           "type": "string"
         },
+        "discovery_root": {
+          "anyOf": [
+            {
+              "maxLength": 240,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Discovery Root"
+        },
         "editable_paths": {
           "items": {
             "maxLength": 240,

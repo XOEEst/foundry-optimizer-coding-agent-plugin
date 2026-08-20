@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+import yaml
 
 from foundry_opt.bootstrap.errors import BootstrapPlanError
 from foundry_opt.bootstrap.input_contracts import BootstrapPlanInput, TrustedTemplateManifest
@@ -25,6 +26,8 @@ def _plan_input(
     default_branch: str = "main",
     include_azure: bool = False,
     oidc_subject_prefix: str | None = None,
+    selected_root: str = "agent",
+    discovery_root: str | None = None,
 ) -> BootstrapPlanInput:
     payload: dict[str, object] = {
         "schema_version": 1,
@@ -38,7 +41,12 @@ def _plan_input(
                 {
                     "schema_version": 1,
                     "repo_agent_id": "example-agent",
-                    "root": "agent",
+                    "root": selected_root,
+                    **(
+                        {"discovery_root": discovery_root}
+                        if discovery_root is not None
+                        else {}
+                    ),
                     "config_path": "agent/.foundry/foundry-opt.yaml",
                     "editable_paths": ["agent/main.py"],
                 }
@@ -99,6 +107,35 @@ def _plan_input(
             "approved_role_assignments": [],
         }
     return BootstrapPlanInput.model_validate(payload)
+
+
+def test_registry_uses_agent_directory_for_repository_root_discovery() -> None:
+    plan_input = _plan_input(
+        optimizer_environment="copilot",
+        deployment_environment="foundry-production",
+        selected_root=".",
+    )
+    selected = plan_input.repository.selected_agents[0]
+    assert selected.discovery_selection_root == "."
+    assert selected.root == "agent"
+
+    payloads = load_trusted_manifest(plan_input)
+    registry_payload = next(
+        payload
+        for payload in payloads
+        if payload.template_id == "registry"
+    )
+    registry = yaml.safe_load(registry_payload.rendered_template)
+
+    assert registry["agents"] == [
+        {
+            "schema_version": 1,
+            "agent_id": "example-agent",
+            "root": "agent",
+            "config_path": "agent/.foundry/foundry-opt.yaml",
+            "enabled": False,
+        }
+    ]
 
 
 def test_build_phase_actions_emits_a_variable_action_for_each_distinct_environment() -> None:
