@@ -415,3 +415,24 @@ def test_answer_reports_stale_question_errors() -> None:
     assert runner.calls == [
         ("answer", "bootstrap-123", "agent_selection:0:abc123", ["root-agent"])
     ]
+
+
+def test_source_checkout_factory_wires_the_complete_owner_flow(
+    tmp_path: Path,
+) -> None:
+    module = _load_bridge_module()
+    private_state_root = tmp_path / "private-state"
+
+    factory = module._load_production_runner_factory(
+        (),
+        script_path=SCRIPT_PATH,
+        private_state_root=private_state_root,
+        skill_lock_argument=None,
+    )
+    runner = factory(private_state_root)
+
+    assert runner._repository_handler is not None
+    assert runner._connection_handler is not None
+    assert runner._commit_handler is not None
+    assert runner._deployment_handler is not None
+    assert len(module.os.environ[module._RUNTIME_LOCK_ENV]) == 64

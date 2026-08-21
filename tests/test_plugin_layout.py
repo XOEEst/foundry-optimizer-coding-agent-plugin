@@ -45,7 +45,10 @@ EXPECTED_PLUGIN_FILES = {
     "plugins/foundry-agent-optimizer/references/tenzing/climb_config/tracking-experiments.md",
     "plugins/foundry-agent-optimizer/README.md",
     "plugins/foundry-bootstrap/SKILL.md",
+    "plugins/foundry-bootstrap/references/owner-flow.md",
     "plugins/foundry-bootstrap/references/README.md",
+    "plugins/foundry-bootstrap/references/recovery.md",
+    "plugins/foundry-bootstrap/references/security.md",
     "plugins/foundry-bootstrap/scripts/README.md",
     "plugins/foundry-bootstrap/scripts/bootstrap.py",
     "plugins/foundry-bootstrap/scripts/install-runtime.ps1",
@@ -134,14 +137,11 @@ def test_plugin_tree_contains_only_allowed_boundary_files() -> None:
     assert "only owner client over `BootstrapRunner`" in scripts_readme
     assert "install-runtime.ps1" in scripts_readme
     assert "install-runtime.sh" in scripts_readme
-    assert "Store reviewed notes, migration pointers, and source references" in _read(
-        BOOTSTRAP_ROOT / "references" / "README.md"
-    )
     references_readme = _read(BOOTSTRAP_ROOT / "references" / "README.md")
-    assert "Bootstrap bridge quick reference" in references_readme
-    assert "status --operation-id <id>" in references_readme
-    assert "rollback --operation-id <id>" in references_readme
-    assert "Do not mirror the existing `src/foundry_opt/templates/` runtime content here" in _read(
+    assert "[Owner flow](owner-flow.md)" in references_readme
+    assert "[Recovery](recovery.md)" in references_readme
+    assert "[Security](security.md)" in references_readme
+    assert "Provider plans, receipts, schemas" in _read(
         BOOTSTRAP_ROOT / "templates" / "README.md"
     )
 

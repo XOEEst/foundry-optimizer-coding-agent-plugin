@@ -253,21 +253,83 @@ def test_answer_accepts_valid_selection_and_records_a_blocked_target(tmp_path: P
     runner = BootstrapRunner(state_store=store)
     first = runner.start(repo)
 
-    turn = runner.answer(
+    registration = runner.answer(
         first.operation_id,
         first.next_question.question_id,
         [first.next_question.choices[0].value],
     )
+    turn = runner.answer(
+        registration.operation_id,
+        registration.next_question.question_id,
+        ["register_enabled"],
+    )
     envelope = store.load(turn.operation_id)
     record = envelope.foundry_targets[0].reviewed_target
 
-    assert turn.state == "register_enable"
+    assert registration.state == "register_enable"
+    assert turn.state == "verification_policy"
     assert turn.next_question is not None
-    assert turn.next_question.kind == "register_enable"
+    assert turn.next_question.kind == "verification_policy"
     assert record.state == "blocked"
     assert record.deployment_ready is False
     assert "invalid project_endpoint" in (record.detail or "")
     assert "Foundry targets" in turn.owner_markdown
+
+
+def test_registration_and_optional_verification_reach_repository_review(
+    tmp_path: Path,
+) -> None:
+    repo = _create_repository(tmp_path)
+    store = FileBootstrapRunnerStateStore(state_root=tmp_path / "state")
+    runner = BootstrapRunner(state_store=store)
+    first = runner.start(repo)
+    registration = runner.answer(
+        first.operation_id,
+        first.next_question.question_id,
+        [first.next_question.choices[0].value],
+    )
+
+    verification = runner.answer(
+        registration.operation_id,
+        registration.next_question.question_id,
+        ["register_enabled"],
+    )
+    final = runner.answer(
+        verification.operation_id,
+        verification.next_question.question_id,
+        ["no_evidence"],
+    )
+    envelope = store.load(final.operation_id)
+
+    assert verification.state == "verification_policy"
+    assert final.state == "repository_approval"
+    assert envelope.registration_intents[0].intent == "register_enabled"
+    assert envelope.verification_choices[0].choice == "no_evidence"
+    assert final.available_actions[0].name == "approve"
+    assert final.available_actions[0].step == "repository"
+
+
+def test_registered_disabled_agent_skips_verification(tmp_path: Path) -> None:
+    repo = _create_repository(tmp_path)
+    runner = BootstrapRunner(
+        state_store=FileBootstrapRunnerStateStore(state_root=tmp_path / "state")
+    )
+    first = runner.start(repo)
+    registration = runner.answer(
+        first.operation_id,
+        first.next_question.question_id,
+        [first.next_question.choices[0].value],
+    )
+
+    final = runner.answer(
+        registration.operation_id,
+        registration.next_question.question_id,
+        ["register_disabled"],
+    )
+
+    assert final.state == "repository_approval"
+    assert final.next_question is not None
+    assert final.next_question.kind == "repository_approval"
 
 
 def test_answer_rejects_invalid_selection(tmp_path: Path) -> None:

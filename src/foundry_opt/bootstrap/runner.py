@@ -12,7 +12,12 @@ from typing import Annotated, Literal, Protocol, Self
 from pydantic import Field, StringConstraints, field_validator, model_validator
 
 from foundry_opt.bootstrap.canonical import canonical_json_bytes, canonical_sha256, safe_persisted_document
-from foundry_opt.bootstrap.contracts import AgentId, BootstrapDocument, ReviewedFoundryTarget
+from foundry_opt.bootstrap.contracts import (
+    AgentId,
+    BootstrapDocument,
+    BootstrapSidecar,
+    ReviewedFoundryTarget,
+)
 from foundry_opt.bootstrap.discovery import DiscoveryResult, discover_repository_agents
 from foundry_opt.bootstrap.errors import BootstrapApplyError, BootstrapConfigError
 from foundry_opt.bootstrap.operation_state import DiscoveredAgentRecord, DiscoveryBlockerRecord, SelectionPlan
@@ -47,6 +52,17 @@ BootstrapLifecycleStage = Literal[
     "rolled_back",
 ]
 BootstrapActionName = Literal["answer", "approve", "status", "rollback"]
+BootstrapRegistrationIntentKind = Literal[
+    "ignore",
+    "register_disabled",
+    "register_enabled",
+]
+BootstrapVerificationChoiceKind = Literal[
+    "preserve_existing",
+    "defer_to_issue",
+    "repository_checks",
+    "no_evidence",
+]
 
 _STATE_FILE_NAME = "state.json"
 _LOCK_FILE_NAME = "state.lock"
@@ -70,7 +86,9 @@ _APPROVAL_STAGE_BY_STEP: dict[BootstrapApprovalStep, BootstrapLifecycleStage] = 
 _ALLOWED_NEXT_STAGES: dict[BootstrapLifecycleStage, frozenset[BootstrapLifecycleStage]] = {
     "preflight": frozenset({"discovery_review", "blocked"}),
     "discovery_review": frozenset({"agent_selection", "blocked"}),
-    "agent_selection": frozenset({"agent_selection", "foundry_target_resolution", "blocked"}),
+    "agent_selection": frozenset(
+        {"agent_selection", "register_enable", "foundry_target_resolution", "blocked"}
+    ),
     "foundry_target_resolution": frozenset(
         {
             "foundry_target_resolution",
@@ -84,8 +102,10 @@ _ALLOWED_NEXT_STAGES: dict[BootstrapLifecycleStage, frozenset[BootstrapLifecycle
     "register_enable": frozenset(
         {
             "register_enable",
+            "foundry_target_resolution",
             "verification_policy",
             "repository_approval",
+            "final_handoff",
             "blocked",
         }
     ),
@@ -313,6 +333,16 @@ class BootstrapFoundryTargetRecord(BootstrapDocument):
         return self
 
 
+class BootstrapRegistrationIntent(BootstrapDocument):
+    repo_agent_id: AgentId
+    intent: BootstrapRegistrationIntentKind
+
+
+class BootstrapVerificationChoice(BootstrapDocument):
+    repo_agent_id: AgentId
+    choice: BootstrapVerificationChoiceKind
+
+
 class BootstrapChildReference(BootstrapDocument):
     step: BootstrapApprovalStep
     kind: Annotated[str, StringConstraints(min_length=1, max_length=128)]
@@ -353,6 +383,8 @@ class BootstrapRunnerStatePayload(BootstrapDocument):
     answers: tuple[BootstrapAnswerRecord, ...] = ()
     approvals: tuple[BootstrapApprovalRecord, ...] = ()
     foundry_targets: tuple[BootstrapFoundryTargetRecord, ...] = ()
+    registration_intents: tuple[BootstrapRegistrationIntent, ...] = ()
+    verification_choices: tuple[BootstrapVerificationChoice, ...] = ()
     child_refs: tuple[BootstrapChildReference, ...] = ()
     note: str | None = Field(default=None, max_length=4096)
     handler_context: Mapping[str, object] = Field(default_factory=dict)
@@ -395,6 +427,38 @@ class BootstrapRunnerStatePayload(BootstrapDocument):
                 raise BootstrapConfigError("foundry_targets must not contain duplicate repo_agent_id values")
             seen.add(key)
         return tuple(sorted(records, key=lambda item: item.repo_agent_id.casefold()))
+
+    @field_validator("registration_intents")
+    @classmethod
+    def _validate_registration_intents(
+        cls,
+        value: Sequence[BootstrapRegistrationIntent],
+    ) -> tuple[BootstrapRegistrationIntent, ...]:
+        records = tuple(value)
+        keys = [item.repo_agent_id.casefold() for item in records]
+        if len(keys) != len(set(keys)):
+            raise BootstrapConfigError(
+                "registration_intents must not contain duplicate repo_agent_id values"
+            )
+        return tuple(
+            sorted(records, key=lambda item: item.repo_agent_id.casefold())
+        )
+
+    @field_validator("verification_choices")
+    @classmethod
+    def _validate_verification_choices(
+        cls,
+        value: Sequence[BootstrapVerificationChoice],
+    ) -> tuple[BootstrapVerificationChoice, ...]:
+        records = tuple(value)
+        keys = [item.repo_agent_id.casefold() for item in records]
+        if len(keys) != len(set(keys)):
+            raise BootstrapConfigError(
+                "verification_choices must not contain duplicate repo_agent_id values"
+            )
+        return tuple(
+            sorted(records, key=lambda item: item.repo_agent_id.casefold())
+        )
 
     @field_validator("handler_context")
     @classmethod
@@ -443,6 +507,14 @@ class BootstrapRunnerStateEnvelope(BootstrapDocument):
     @property
     def foundry_targets(self) -> tuple[BootstrapFoundryTargetRecord, ...]:
         return self.payload.foundry_targets
+
+    @property
+    def registration_intents(self) -> tuple[BootstrapRegistrationIntent, ...]:
+        return self.payload.registration_intents
+
+    @property
+    def verification_choices(self) -> tuple[BootstrapVerificationChoice, ...]:
+        return self.payload.verification_choices
 
     @property
     def child_refs(self) -> tuple[BootstrapChildReference, ...]:
@@ -607,6 +679,58 @@ class BootstrapCommitHandlerProtocol(Protocol):
         *,
         operation: BootstrapRunnerStateEnvelope,
     ) -> None: ...
+
+
+class BootstrapRepositoryHandlerProtocol(Protocol):
+    def review(
+        self,
+        *,
+        operation: BootstrapRunnerStateEnvelope,
+    ) -> RenderableReviewProtocol: ...
+
+    def approve(
+        self,
+        *,
+        operation: BootstrapRunnerStateEnvelope,
+        approval: BootstrapApprovalRecord,
+    ) -> BootstrapStageOutcome: ...
+
+    def rollback(
+        self,
+        *,
+        operation: BootstrapRunnerStateEnvelope,
+        step: BootstrapApprovalStep,
+        child_ref: BootstrapChildReference,
+    ) -> BootstrapStageOutcome: ...
+
+
+class BootstrapConnectionHandlerProtocol(Protocol):
+    def review(
+        self,
+        *,
+        operation: BootstrapRunnerStateEnvelope,
+    ) -> RenderableReviewProtocol: ...
+
+    def approve(
+        self,
+        *,
+        operation: BootstrapRunnerStateEnvelope,
+        approval: BootstrapApprovalRecord,
+    ) -> BootstrapStageOutcome: ...
+
+    def rollback(
+        self,
+        *,
+        operation: BootstrapRunnerStateEnvelope,
+        step: BootstrapApprovalStep,
+        child_ref: BootstrapChildReference,
+    ) -> BootstrapStageOutcome: ...
+
+    def build_resource_links(
+        self,
+        *,
+        operation: BootstrapRunnerStateEnvelope,
+    ) -> ResourceLinksReview: ...
 
 
 class BootstrapDeploymentHandlerProtocol(Protocol):
@@ -805,6 +929,8 @@ class BootstrapRunner:
         state_store: BootstrapRunnerStateStoreProtocol | None = None,
         target_resolution_handler: FoundryTargetResolutionHandlerProtocol | None = None,
         approval_handlers: Mapping[BootstrapApprovalStep, BootstrapApprovalHandlerProtocol] | None = None,
+        repository_handler: BootstrapRepositoryHandlerProtocol | None = None,
+        connection_handler: BootstrapConnectionHandlerProtocol | None = None,
         commit_handler: BootstrapCommitHandlerProtocol | None = None,
         deployment_handler: BootstrapDeploymentHandlerProtocol | None = None,
         rollback_handler: BootstrapRollbackHandlerProtocol | None = None,
@@ -825,6 +951,18 @@ class BootstrapRunner:
             target_resolution_handler = DefaultFoundryTargetResolutionHandler()
         self._target_resolution_handler = target_resolution_handler
         self._approval_handlers = dict(approval_handlers or {})
+        self._repository_handler = repository_handler
+        if (
+            self._repository_handler is not None
+            and "repository" not in self._approval_handlers
+        ):
+            self._approval_handlers["repository"] = self._repository_handler
+        self._connection_handler = connection_handler
+        if (
+            self._connection_handler is not None
+            and "connection" not in self._approval_handlers
+        ):
+            self._approval_handlers["connection"] = self._connection_handler
         self._commit_handler = commit_handler
         if self._commit_handler is not None and "commit" not in self._approval_handlers:
             self._approval_handlers["commit"] = self._commit_handler
@@ -903,23 +1041,18 @@ class BootstrapRunner:
                     "selected_agent_ids": selected_ids,
                 }
             )
-            _validate_stage_transition(envelope.lifecycle_stage, "foundry_target_resolution")
+            _validate_stage_transition(envelope.lifecycle_stage, "register_enable")
             updated = next_runner_generation(
                 envelope,
                 now=self._clock.now(),
-                lifecycle_stage="foundry_target_resolution",
+                lifecycle_stage="register_enable",
                 selection_plan=updated_selection,
                 answers=(*envelope.answers, answer_record),
                 note=(
-                    "Selection recorded. The next bridge stage resolves the reviewed "
-                    "Foundry project endpoint and agent name."
+                    "Selection recorded. Choose whether each selected candidate "
+                    "should be ignored, registered disabled, or registered enabled."
                 ),
             )
-            if self._target_resolution_handler is not None:
-                updated = self._apply_stage_outcome(
-                    updated,
-                    outcome=self._target_resolution_handler.prepare(operation=updated),
-                )
         elif current_question.kind == "foundry_target":
             updated = self._apply_stage_outcome(
                 envelope,
@@ -929,9 +1062,17 @@ class BootstrapRunner:
                     answer=answer,
                 ),
             )
-        elif current_question.kind in {"register_enable", "verification_policy"}:
-            raise BootstrapApplyError(
-                f"{current_question.kind} answers require a dedicated bridge handler"
+        elif current_question.kind == "register_enable":
+            updated = self._handle_registration_answer(
+                envelope,
+                answer_record=answer_record,
+                answer=answer,
+            )
+        elif current_question.kind == "verification_policy":
+            updated = self._handle_verification_answer(
+                envelope,
+                answer_record=answer_record,
+                answer=answer,
             )
         else:
             raise BootstrapApplyError(
@@ -987,7 +1128,11 @@ class BootstrapRunner:
         step: BootstrapApprovalStep,
     ) -> BootstrapTurn:
         envelope = self._load_validated(operation_id)
-        if step == "commit" and self._commit_handler is not None:
+        if step == "repository" and self._repository_handler is not None:
+            handler = self._repository_handler
+        elif step == "connection" and self._connection_handler is not None:
+            handler = self._connection_handler
+        elif step == "commit" and self._commit_handler is not None:
             handler = self._commit_handler
         elif self._rollback_handler is not None:
             handler = self._rollback_handler
@@ -1037,7 +1182,6 @@ class BootstrapRunner:
         if self._commit_handler is not None and (
             envelope.lifecycle_stage == "commit_approval"
             or any(item.step == "commit" for item in envelope.child_refs)
-            or "local_commit" in envelope.handler_context
         ):
             self._commit_handler.validate_resume(operation=envelope)
         if self._deployment_handler is not None and (
@@ -1099,6 +1243,16 @@ class BootstrapRunner:
                     operation=envelope
                 ),
             )
+        if self._connection_handler is not None and (
+            envelope.lifecycle_stage == "connection_approval"
+            or any(item.step == "connection" for item in envelope.child_refs)
+        ):
+            resource_links = _merge_resource_links(
+                resource_links,
+                self._connection_handler.build_resource_links(
+                    operation=envelope
+                ),
+            )
         return BootstrapTurn(
             owner_markdown=self._render_owner_markdown(envelope),
             next_question=self._build_question(envelope),
@@ -1157,21 +1311,66 @@ class BootstrapRunner:
                 ),
             )
         if kind == "register_enable":
+            pending = self._pending_registration_agent(envelope)
+            if pending is None:
+                raise BootstrapApplyError(
+                    "registration question has no unresolved agent"
+                )
             return BootstrapQuestion(
                 question_id=question_id,
                 kind=kind,
-                title="Confirm registry registration and enablement",
-                details_markdown="Bridge handlers will populate this decision in a dependent task.",
+                title=f"Choose how to register {pending.repo_agent_id}",
+                details_markdown=(
+                    f"Folder: `{pending.root}`. Register enabled to include it in "
+                    "bootstrap deployment, register disabled to record it without "
+                    "deploying, or ignore it."
+                ),
+                choices=(
+                    BootstrapQuestionChoice(
+                        value="register_enabled",
+                        label="Register and enable",
+                        detail="Manage the agent and include it in deployment review.",
+                    ),
+                    BootstrapQuestionChoice(
+                        value="register_disabled",
+                        label="Register disabled",
+                        detail="Record the agent but do not require a target or deploy it.",
+                    ),
+                    BootstrapQuestionChoice(
+                        value="ignore",
+                        label="Ignore",
+                        detail="Leave the discovered folder unmanaged.",
+                    ),
+                ),
             )
         if kind == "verification_policy":
+            pending_id = self._pending_verification_agent_id(envelope)
+            if pending_id is None:
+                raise BootstrapApplyError(
+                    "verification question has no unresolved enabled agent"
+                )
+            choices = self._verification_question_choices(
+                envelope,
+                pending_id,
+            )
             return BootstrapQuestion(
                 question_id=question_id,
                 kind=kind,
-                title="Choose the verification policy",
-                details_markdown="Bridge handlers will populate this decision in a dependent task.",
+                title=f"Choose verification for {pending_id}",
+                details_markdown=(
+                    "Verification is optional. Preserve an existing profile gate, "
+                    "defer dataset/evaluator selection to an issue, use existing "
+                    "repository checks, or start with no evidence and a visible warning."
+                ),
+                choices=choices,
             )
         step = _approval_step_for_question(kind)
         detail = "Bridge handlers populate the reviewed step details."
+        if step == "repository":
+            detail = (
+                "The repository handler shows registry, profile, instruction, "
+                "issue-form, workflow, preserve, and conflict intent."
+            )
         if step == "commit":
             detail = (
                 "The local commit handler populates the reviewed paths, diff summary, "
@@ -1186,6 +1385,73 @@ class BootstrapRunner:
                 f"{detail}"
             ),
         )
+
+    def _verification_question_choices(
+        self,
+        envelope: BootstrapRunnerStateEnvelope,
+        repo_agent_id: str,
+    ) -> tuple[BootstrapQuestionChoice, ...]:
+        choices: list[BootstrapQuestionChoice] = []
+        profile = self._existing_profile(envelope, repo_agent_id)
+        if profile is not None:
+            choices.append(
+                BootstrapQuestionChoice(
+                    value="preserve_existing",
+                    label="Preserve existing verification",
+                )
+            )
+        choices.append(
+            BootstrapQuestionChoice(
+                value="defer_to_issue",
+                label="Defer dataset and evaluators to an issue",
+            )
+        )
+        if profile is not None and profile.verification.repository_checks:
+            choices.append(
+                BootstrapQuestionChoice(
+                    value="repository_checks",
+                    label="Use existing repository checks",
+                )
+            )
+        choices.append(
+            BootstrapQuestionChoice(
+                value="no_evidence",
+                label="Start with no evidence",
+            )
+        )
+        return tuple(choices)
+
+    @staticmethod
+    def _existing_profile(
+        envelope: BootstrapRunnerStateEnvelope,
+        repo_agent_id: str,
+    ) -> BootstrapSidecar | None:
+        candidate = next(
+            (
+                item
+                for item in envelope.selection_plan.discovered_agents
+                if item.repo_agent_id.casefold() == repo_agent_id.casefold()
+            ),
+            None,
+        )
+        if (
+            candidate is None
+            or candidate.config_path is None
+            or Path(candidate.config_path).name != "foundry-opt.yaml"
+        ):
+            return None
+        path = (
+            Path(envelope.repository_binding.repository_root)
+            / candidate.config_path
+        )
+        if not path.is_file():
+            return None
+        try:
+            return BootstrapSidecar.from_document(
+                path.read_text(encoding="utf-8")
+            )
+        except BootstrapConfigError:
+            return None
 
     def _available_actions(
         self,
@@ -1203,19 +1469,11 @@ class BootstrapRunner:
                 BootstrapAvailableAction(name="approve", step=step),
                 BootstrapAvailableAction(name="status"),
             ]
-            for child_ref in envelope.child_refs:
-                if child_ref.step == "deployment":
-                    continue
-                rollback = BootstrapAvailableAction(name="rollback", step=child_ref.step)
-                if rollback not in actions:
-                    actions.append(rollback)
+            actions.extend(_next_rollback_actions(envelope.child_refs))
             return tuple(actions)
-        if stage == "final_handoff":
+        if stage in {"final_handoff", "rolled_back"}:
             actions = [BootstrapAvailableAction(name="status")]
-            for child_ref in envelope.child_refs:
-                if child_ref.step == "deployment":
-                    continue
-                actions.append(BootstrapAvailableAction(name="rollback", step=child_ref.step))
+            actions.extend(_next_rollback_actions(envelope.child_refs))
             return tuple(actions)
         return (BootstrapAvailableAction(name="status"),)
 
@@ -1235,6 +1493,30 @@ class BootstrapRunner:
             )
             if rendered_targets:
                 lines.extend(("", rendered_targets))
+        if (
+            self._repository_handler is not None
+            and envelope.lifecycle_stage == "repository_approval"
+        ):
+            lines.extend(
+                (
+                    "",
+                    self._repository_handler.review(
+                        operation=envelope
+                    ).render_markdown(),
+                )
+            )
+        if (
+            self._connection_handler is not None
+            and envelope.lifecycle_stage == "connection_approval"
+        ):
+            lines.extend(
+                (
+                    "",
+                    self._connection_handler.review(
+                        operation=envelope
+                    ).render_markdown(),
+                )
+            )
         if self._commit_handler is not None and (
             envelope.lifecycle_stage == "commit_approval"
             or any(item.step == "commit" for item in envelope.child_refs)
@@ -1302,6 +1584,8 @@ class BootstrapRunner:
             )
             safe_persisted_document({"value": normalized})
             return normalized
+        if kind in {"register_enable", "verification_policy"}:
+            return _coerce_single_choice(answer)
         if isinstance(answer, bool):
             return answer
         if isinstance(answer, str):
@@ -1346,6 +1630,176 @@ class BootstrapRunner:
         if self._target_resolution_handler is None:
             raise BootstrapApplyError("foundry target resolution handler is not configured")
         return self._target_resolution_handler
+
+    def _handle_registration_answer(
+        self,
+        envelope: BootstrapRunnerStateEnvelope,
+        *,
+        answer_record: BootstrapAnswerRecord,
+        answer: object,
+    ) -> BootstrapRunnerStateEnvelope:
+        pending = self._pending_registration_agent(envelope)
+        if pending is None:
+            raise BootstrapApplyError(
+                "there is no unresolved registration decision"
+            )
+        choice = _coerce_single_choice(answer)
+        if choice not in {
+            "ignore",
+            "register_disabled",
+            "register_enabled",
+        }:
+            raise BootstrapApplyError("registration answer is not an offered choice")
+        intents = (
+            *envelope.registration_intents,
+            BootstrapRegistrationIntent(
+                repo_agent_id=pending.repo_agent_id,
+                intent=choice,
+            ),
+        )
+        remaining = len(intents) < len(envelope.selection_plan.selected_agent_ids)
+        if remaining:
+            stage: BootstrapLifecycleStage = "register_enable"
+            note = f"Recorded registration intent for {pending.repo_agent_id}."
+        else:
+            enabled = tuple(
+                item.repo_agent_id
+                for item in intents
+                if item.intent == "register_enabled"
+            )
+            registered = tuple(
+                item.repo_agent_id
+                for item in intents
+                if item.intent != "ignore"
+            )
+            if not registered:
+                stage = "final_handoff"
+                note = "All selected candidates were ignored; no repository changes are planned."
+            elif enabled:
+                stage = "foundry_target_resolution"
+                note = (
+                    "Registration choices are complete. Resolve Foundry targets "
+                    "for enabled agents."
+                )
+            else:
+                stage = "repository_approval"
+                note = "Registration choices are complete. No agents are enabled for deployment."
+        _validate_stage_transition(envelope.lifecycle_stage, stage)
+        updated = next_runner_generation(
+            envelope,
+            now=self._clock.now(),
+            lifecycle_stage=stage,
+            answers=(*envelope.answers, answer_record),
+            registration_intents=intents,
+            note=note,
+        )
+        if stage == "foundry_target_resolution":
+            updated = self._apply_stage_outcome(
+                updated,
+                outcome=self._require_target_resolution_handler().prepare(
+                    operation=updated
+                ),
+            )
+        return updated
+
+    def _handle_verification_answer(
+        self,
+        envelope: BootstrapRunnerStateEnvelope,
+        *,
+        answer_record: BootstrapAnswerRecord,
+        answer: object,
+    ) -> BootstrapRunnerStateEnvelope:
+        pending_id = self._pending_verification_agent_id(envelope)
+        if pending_id is None:
+            raise BootstrapApplyError(
+                "there is no unresolved verification decision"
+            )
+        choice = _coerce_single_choice(answer)
+        offered = {
+            item.value
+            for item in self._verification_question_choices(
+                envelope,
+                pending_id,
+            )
+        }
+        if choice not in offered:
+            raise BootstrapApplyError("verification answer is not an offered choice")
+        choices = (
+            *envelope.verification_choices,
+            BootstrapVerificationChoice(
+                repo_agent_id=pending_id,
+                choice=choice,
+            ),
+        )
+        remaining = self._enabled_agent_ids(
+            envelope,
+            registration_intents=envelope.registration_intents,
+        )
+        complete = len(choices) == len(remaining)
+        stage: BootstrapLifecycleStage = (
+            "repository_approval" if complete else "verification_policy"
+        )
+        note = (
+            "Verification choices are complete. Review the repository plan."
+            if complete
+            else f"Recorded verification choice for {pending_id}."
+        )
+        _validate_stage_transition(envelope.lifecycle_stage, stage)
+        return next_runner_generation(
+            envelope,
+            now=self._clock.now(),
+            lifecycle_stage=stage,
+            answers=(*envelope.answers, answer_record),
+            verification_choices=choices,
+            note=note,
+        )
+
+    def _pending_registration_agent(
+        self,
+        envelope: BootstrapRunnerStateEnvelope,
+    ) -> DiscoveredAgentRecord | None:
+        resolved = {
+            item.repo_agent_id.casefold()
+            for item in envelope.registration_intents
+        }
+        by_id = {
+            item.repo_agent_id.casefold(): item
+            for item in envelope.selection_plan.discovered_agents
+        }
+        for repo_agent_id in envelope.selection_plan.selected_agent_ids:
+            if repo_agent_id.casefold() not in resolved:
+                return by_id[repo_agent_id.casefold()]
+        return None
+
+    def _pending_verification_agent_id(
+        self,
+        envelope: BootstrapRunnerStateEnvelope,
+    ) -> str | None:
+        resolved = {
+            item.repo_agent_id.casefold()
+            for item in envelope.verification_choices
+        }
+        for repo_agent_id in self._enabled_agent_ids(envelope):
+            if repo_agent_id.casefold() not in resolved:
+                return repo_agent_id
+        return None
+
+    @staticmethod
+    def _enabled_agent_ids(
+        envelope: BootstrapRunnerStateEnvelope,
+        *,
+        registration_intents: Sequence[BootstrapRegistrationIntent] | None = None,
+    ) -> tuple[str, ...]:
+        intents = (
+            envelope.registration_intents
+            if registration_intents is None
+            else tuple(registration_intents)
+        )
+        return tuple(
+            item.repo_agent_id
+            for item in intents
+            if item.intent == "register_enabled"
+        )
 
     @staticmethod
     def _question_id(
@@ -1413,6 +1867,25 @@ def _coerce_selection_answer(answer: object) -> tuple[str, ...]:
     raise BootstrapApplyError("selection answer must be a repoAgentId or a list of repoAgentIds")
 
 
+def _coerce_single_choice(answer: object) -> str:
+    if isinstance(answer, str):
+        return answer
+    if isinstance(answer, Mapping):
+        value = answer.get("choice")
+        if value is None:
+            value = answer.get("value")
+        if isinstance(value, str):
+            return value
+    if isinstance(answer, Sequence) and not isinstance(
+        answer,
+        (str, bytes, bytearray),
+    ):
+        values = tuple(str(item) for item in answer)
+        if len(values) == 1:
+            return values[0]
+    raise BootstrapApplyError("answer must select exactly one offered choice")
+
+
 def _approval_step_for_question(kind: BootstrapQuestionKind) -> BootstrapApprovalStep:
     mapping: dict[BootstrapQuestionKind, BootstrapApprovalStep] = {
         "repository_approval": "repository",
@@ -1424,6 +1897,21 @@ def _approval_step_for_question(kind: BootstrapQuestionKind) -> BootstrapApprova
         return mapping[kind]
     except KeyError as exc:
         raise BootstrapApplyError("question kind does not map to an approval step") from exc
+
+
+def _next_rollback_actions(
+    child_refs: Sequence[BootstrapChildReference],
+) -> tuple[BootstrapAvailableAction, ...]:
+    recorded = {item.step for item in child_refs}
+    for step in ("commit", "connection", "repository"):
+        if step in recorded:
+            return (
+                BootstrapAvailableAction(
+                    name="rollback",
+                    step=step,
+                ),
+            )
+    return ()
 
 
 def _isoformat(value: datetime) -> str:
@@ -1468,13 +1956,19 @@ __all__ = [
     "BootstrapApprovalStep",
     "BootstrapAvailableAction",
     "BootstrapFoundryTargetRecord",
+    "BootstrapRegistrationIntent",
+    "BootstrapRegistrationIntentKind",
+    "BootstrapVerificationChoice",
+    "BootstrapVerificationChoiceKind",
     "BootstrapCommitHandlerProtocol",
+    "BootstrapConnectionHandlerProtocol",
     "BootstrapDeploymentHandlerProtocol",
     "BootstrapChildReference",
     "BootstrapLifecycleStage",
     "BootstrapQuestion",
     "BootstrapQuestionChoice",
     "BootstrapQuestionKind",
+    "BootstrapRepositoryHandlerProtocol",
     "BootstrapRollbackHandlerProtocol",
     "BootstrapRunner",
     "BootstrapRunnerStateEnvelope",

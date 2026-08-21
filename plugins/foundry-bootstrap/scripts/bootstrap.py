@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, is_dataclass
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -202,6 +203,9 @@ def _ensure_runtime_env_from_source_checkout(repository_root: Path) -> None:
     runtime_commit = _git_output(repository_root, "rev-parse", "HEAD").lower()
     os.environ[_RUNTIME_REPOSITORY_ENV] = runtime_repository
     os.environ[_RUNTIME_COMMIT_ENV] = runtime_commit
+    os.environ[_RUNTIME_LOCK_ENV] = hashlib.sha256(
+        (repository_root / "uv.lock").read_bytes()
+    ).hexdigest()
 
 
 def _load_skill_lock(path: Path) -> dict[str, str]:
@@ -323,9 +327,13 @@ def _load_production_runner_factory(
         from foundry_opt.bootstrap import (
             BootstrapLocalCommitHandler,
             BootstrapLocalDeploymentHandler,
+            BootstrapConnectionSetupHandler,
+            BootstrapRepositorySetupHandler,
             BootstrapRunner,
             LocalDeploymentCoordinator,
             LocalGitCommitCoordinator,
+            ConnectionSetupCoordinator,
+            RepositorySetupCoordinator,
         )
         from foundry_opt.bootstrap.runner import FileBootstrapRunnerStateStore
     except (ImportError, ModuleNotFoundError) as exc:
@@ -357,12 +365,24 @@ def _load_production_runner_factory(
         commit_coordinator = LocalGitCommitCoordinator(
             state_root=private_root / "local-commit",
         )
+        repository_coordinator = RepositorySetupCoordinator(
+            state_root=private_root / "repository-setup",
+        )
         return BootstrapRunner(
             state_store=FileBootstrapRunnerStateStore(
                 state_root=_runner_state_root(private_root),
             ),
             commit_handler=BootstrapLocalCommitHandler(
                 coordinator=commit_coordinator,
+            ),
+            repository_handler=BootstrapRepositorySetupHandler(
+                coordinator=repository_coordinator,
+            ),
+            connection_handler=BootstrapConnectionSetupHandler(
+                coordinator=ConnectionSetupCoordinator(
+                    repository_coordinator=repository_coordinator,
+                    state_root=private_root / "connection-setup",
+                )
             ),
             deployment_handler=BootstrapLocalDeploymentHandler(
                 coordinator=LocalDeploymentCoordinator(

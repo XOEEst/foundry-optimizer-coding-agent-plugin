@@ -185,6 +185,22 @@ def _selected_ids(turn) -> list[str]:
     return [choice.value for choice in turn.next_question.choices]
 
 
+def _select_and_enable_all(runner: BootstrapRunner, first):
+    turn = runner.answer(
+        first.operation_id,
+        first.next_question.question_id,
+        _selected_ids(first),
+    )
+    while turn.state == "register_enable":
+        assert turn.next_question is not None
+        turn = runner.answer(
+            turn.operation_id,
+            turn.next_question.question_id,
+            ["register_enabled"],
+        )
+    return turn
+
+
 @pytest.fixture(autouse=True)
 def _runtime_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FOUNDRY_OPT_RUNTIME_REPOSITORY", RUNTIME_REPOSITORY)
@@ -228,14 +244,10 @@ def test_metadata_target_reuse_classifies_existing_aligned_without_mutation(
     )
 
     first = runner.start(repo)
-    turn = runner.answer(
-        first.operation_id,
-        first.next_question.question_id,
-        _selected_ids(first),
-    )
+    turn = _select_and_enable_all(runner, first)
     record = store.load(turn.operation_id).foundry_targets[0].reviewed_target
 
-    assert turn.state == "register_enable"
+    assert turn.state == "verification_policy"
     assert record.state == "existing_aligned"
     assert record.project_endpoint_source == "agent_metadata"
     assert record.agent_name_source == "agent_metadata"
@@ -291,14 +303,10 @@ def test_existing_profile_takes_priority_over_agent_metadata(tmp_path: Path) -> 
     )
 
     first = runner.start(repo)
-    turn = runner.answer(
-        first.operation_id,
-        first.next_question.question_id,
-        _selected_ids(first),
-    )
+    turn = _select_and_enable_all(runner, first)
     record = store.load(turn.operation_id).foundry_targets[0].reviewed_target
 
-    assert turn.state == "register_enable"
+    assert turn.state == "verification_policy"
     assert record.project_endpoint == PROFILE_ENDPOINT
     assert record.project_endpoint_source == "existing_profile"
     assert record.agent_name == "profile-agent"
@@ -346,11 +354,7 @@ def test_questions_only_cover_unresolved_fields_one_agent_at_a_time(tmp_path: Pa
 
     first = runner.start(repo)
     selected = _selected_ids(first)
-    turn = runner.answer(
-        first.operation_id,
-        first.next_question.question_id,
-        selected,
-    )
+    turn = _select_and_enable_all(runner, first)
 
     assert turn.state == "foundry_target_resolution"
     assert turn.next_question is not None
@@ -393,7 +397,7 @@ def test_questions_only_cover_unresolved_fields_one_agent_at_a_time(tmp_path: Pa
         for item in store.load(final.operation_id).foundry_targets
     }
 
-    assert final.state == "register_enable"
+    assert final.state == "verification_policy"
     assert {item.state for item in records.values()} == {"new_target"}
     assert foundry_inventory.inspect_calls == [PROJECT_ENDPOINT, SECOND_ENDPOINT]
     assert all(item.deployment_ready for item in records.values())
@@ -444,14 +448,10 @@ def test_invalid_metadata_blocks_the_target_without_inventory_calls(
     )
 
     first = runner.start(repo)
-    turn = runner.answer(
-        first.operation_id,
-        first.next_question.question_id,
-        _selected_ids(first),
-    )
+    turn = _select_and_enable_all(runner, first)
     record = store.load(turn.operation_id).foundry_targets[0].reviewed_target
 
-    assert turn.state == "register_enable"
+    assert turn.state == "verification_policy"
     assert record.state == "blocked"
     assert record.deployment_ready is False
     assert expected_detail in (record.detail or "")
@@ -508,17 +508,13 @@ def test_existing_diverged_and_existing_unknown_targets_are_recorded(tmp_path: P
     )
 
     first = runner.start(repo)
-    turn = runner.answer(
-        first.operation_id,
-        first.next_question.question_id,
-        _selected_ids(first),
-    )
+    turn = _select_and_enable_all(runner, first)
     records = {
         item.repo_agent_id: item.reviewed_target
         for item in store.load(turn.operation_id).foundry_targets
     }
 
-    assert turn.state == "register_enable"
+    assert turn.state == "verification_policy"
     assert {item.state for item in records.values()} == {
         "existing_diverged",
         "existing_unknown",

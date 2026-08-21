@@ -287,7 +287,11 @@ class DefaultFoundryTargetResolutionHandler:
                 f"for blocked targets: {', '.join(sorted(blocked, key=str.casefold))}."
             )
         return BootstrapStageOutcome(
-            stage="register_enable",
+            stage=(
+                "verification_policy"
+                if operation.registration_intents
+                else "register_enable"
+            ),
             note=note,
             foundry_targets=records,
         )
@@ -362,7 +366,7 @@ class DefaultFoundryTargetResolutionHandler:
     ) -> str | None:
         selected = {
             item.casefold(): item
-            for item in operation.selection_plan.selected_agent_ids
+            for item in self._target_agent_ids(operation)
         }
         if not selected:
             return None
@@ -489,7 +493,11 @@ class DefaultFoundryTargetResolutionHandler:
                 f"for blocked targets: {', '.join(sorted(blocked, key=str.casefold))}."
             )
         return BootstrapStageOutcome(
-            stage="register_enable",
+            stage=(
+                "verification_policy"
+                if operation.registration_intents
+                else "register_enable"
+            ),
             note=note,
             foundry_targets=records,
         )
@@ -507,7 +515,10 @@ class DefaultFoundryTargetResolutionHandler:
             if item.repo_agent_id.casefold() not in overrides
         }
         records: list[BootstrapFoundryTargetRecord] = list(existing.values())
-        selected = {item.casefold(): item for item in operation.selection_plan.selected_agent_ids}
+        selected = {
+            item.casefold(): item
+            for item in self._target_agent_ids(operation)
+        }
         for key in sorted(selected, key=str.casefold):
             if key in existing:
                 continue
@@ -549,7 +560,10 @@ class DefaultFoundryTargetResolutionHandler:
         records: Sequence[BootstrapFoundryTargetRecord],
     ) -> _PendingQuestion | None:
         resolved = {item.repo_agent_id.casefold() for item in records}
-        for repo_agent_id in sorted(operation.selection_plan.selected_agent_ids, key=str.casefold):
+        for repo_agent_id in sorted(
+            self._target_agent_ids(operation),
+            key=str.casefold,
+        ):
             if repo_agent_id.casefold() in resolved:
                 continue
             context = self._local_context(operation, repo_agent_id=repo_agent_id)
@@ -564,6 +578,16 @@ class DefaultFoundryTargetResolutionHandler:
                     agent_name=context.agent_name,
                 )
         return None
+
+    @staticmethod
+    def _target_agent_ids(operation) -> tuple[str, ...]:
+        if operation.registration_intents:
+            return tuple(
+                item.repo_agent_id
+                for item in operation.registration_intents
+                if item.intent == "register_enabled"
+            )
+        return tuple(operation.selection_plan.selected_agent_ids)
 
     def _require_pending_question(
         self,
@@ -588,6 +612,14 @@ class DefaultFoundryTargetResolutionHandler:
             return self._blocked_record(
                 context,
                 detail=f"project inventory failed: {str(exc).strip() or type(exc).__name__}",
+            )
+        if account_resource_id is None:
+            return self._blocked_record(
+                context,
+                detail=(
+                    "project access succeeded, but the Azure account resource id "
+                    "could not be resolved with the current login"
+                ),
             )
         latest_version = inventory.agent_latest_versions.get(context.agent_name.value.casefold())
         if latest_version in (None, ""):

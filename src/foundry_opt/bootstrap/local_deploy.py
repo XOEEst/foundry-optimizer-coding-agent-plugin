@@ -615,8 +615,18 @@ class LocalDeploymentCoordinator:
         }
         repository_root = Path(operation.repository_binding.repository_root)
         agents: list[LocalDeploymentAgentPlan] = []
+        registered_enabled = tuple(
+            item.repo_agent_id
+            for item in operation.registration_intents
+            if item.intent == "register_enabled"
+        )
+        deployment_candidates = (
+            registered_enabled
+            if operation.registration_intents
+            else operation.selection_plan.selected_agent_ids
+        )
         for repo_agent_id in sorted(
-            operation.selection_plan.selected_agent_ids,
+            deployment_candidates,
             key=str.casefold,
         ):
             key = repo_agent_id.casefold()
@@ -627,13 +637,14 @@ class LocalDeploymentCoordinator:
                 raise BootstrapApplyError(
                     "local deployment is missing a reviewed target or exact commit fingerprint"
                 )
+            if not target.deployment_ready:
+                continue
             if (
                 target.state not in {
                     "new_target",
                     "existing_aligned",
                     "existing_diverged",
                 }
-                or not target.deployment_ready
                 or target.project_endpoint is None
                 or target.agent_name is None
             ):

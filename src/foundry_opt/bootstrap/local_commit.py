@@ -108,6 +108,7 @@ def build_local_commit_context(
     plan: BootstrapPlan,
     *,
     reviewed_existing_paths: Sequence[str] = (),
+    commit_agent_ids: Sequence[str] | None = None,
     commit_message: str | None = None,
     next_stage: LocalCommitNextStage = "deployment_approval",
 ) -> dict[str, object]:
@@ -128,10 +129,39 @@ def build_local_commit_context(
             "repository_plan_hash": plan.plan_hash,
             "managed_paths": sorted(managed_paths, key=lambda item: (item.casefold(), item)),
             "reviewed_existing_paths": list(_normalize_exact_paths(reviewed_existing_paths, field="reviewed_existing_paths")),
+            "commit_agent_ids": (
+                None
+                if commit_agent_ids is None
+                else list(
+                    _casefold_unique_ids(
+                        commit_agent_ids,
+                        field="commit_agent_ids",
+                    )
+                )
+            ),
             "commit_summary": commit_message or default_local_commit_message(plan.operation_id),
             "next_stage": next_stage,
         }
     }
+
+
+def _casefold_unique_ids(
+        values: Sequence[str],
+        *,
+        field: str,
+) -> tuple[str, ...]:
+        seen: dict[str, str] = {}
+        result: list[str] = []
+        for value in values:
+            normalized = str(value)
+            key = normalized.casefold()
+            if key in seen:
+                raise BootstrapConfigError(
+                    f"{field} contains duplicate ids: {seen[key]!r} and {normalized!r}"
+                )
+            seen[key] = normalized
+            result.append(normalized)
+        return tuple(sorted(result, key=lambda item: (item.casefold(), item)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -299,8 +329,6 @@ class LocalCommitReview(BootstrapDocument):
         value: Sequence[LocalCommitSelectedAgent],
     ) -> tuple[LocalCommitSelectedAgent, ...]:
         payload = tuple(value)
-        if not payload:
-            raise BootstrapConfigError("selected_agents must not be empty")
         seen: dict[str, str] = {}
         for item in payload:
             key = item.repo_agent_id.casefold()
@@ -776,8 +804,6 @@ def selected_local_commit_agents_from_registry(
                 profile_path=agent.config_path,
             )
         )
-    if not selected:
-        raise BootstrapApplyError("local commit review requires at least one selected agent")
     return tuple(selected)
 
 
@@ -1480,6 +1506,12 @@ class BootstrapLocalCommitHandler:
 
     def review(self, *, operation) -> LocalCommitReview:
         context = self._context(operation)
+        commit_agent_ids = context.get("commit_agent_ids")
+        selected_agent_ids = (
+            operation.selection_plan.selected_agent_ids
+            if commit_agent_ids is None
+            else cast(Sequence[str], commit_agent_ids)
+        )
         return self._coordinator.build_review(
             operation.repository_binding.repository_root,
             operation_id=operation.operation_id,
@@ -1489,7 +1521,7 @@ class BootstrapLocalCommitHandler:
             repository_plan_hash=str(context["repository_plan_hash"]),
             managed_paths=cast(Sequence[str], context["managed_paths"]),
             reviewed_existing_paths=cast(Sequence[str], context.get("reviewed_existing_paths", ())),
-            selected_agent_ids=operation.selection_plan.selected_agent_ids,
+            selected_agent_ids=selected_agent_ids,
             commit_message=cast(str | None, context.get("commit_summary")),
         )
 
