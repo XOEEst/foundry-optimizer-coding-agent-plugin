@@ -213,7 +213,7 @@ def test_selected_agent_separates_discovery_root_from_managed_root() -> None:
     assert plan_input.binding_evidence.agents[0].root == "."
 
 
-def test_selected_foundry_target_must_match_the_reviewed_profile_and_evaluation() -> None:
+def test_selected_foundry_target_is_persisted_over_the_reviewed_profile() -> None:
     payload = _sample_payload()
     profile = build_sidecar_policy(root="agent").model_dump(mode="json")
     profile.pop("path", None)
@@ -233,18 +233,23 @@ def test_selected_foundry_target_must_match_the_reviewed_profile_and_evaluation(
     }
 
     plan_input = BootstrapPlanInput.model_validate(payload)
+    rendered = plan_input.repository.selected_agents[0].profile_document
 
     assert (
         plan_input.repository.selected_agents[0].foundry_target is not None
         and plan_input.repository.selected_agents[0].foundry_target.state == "existing_aligned"
     )
+    assert rendered is not None
+    assert rendered.foundry_target is not None
+    assert rendered.foundry_target.state == "existing_aligned"
+    assert rendered.foundry_project.expected_version == "1.2.3"
 
     payload["repository"]["selected_agents"][0]["foundry_target"]["project_endpoint"] = (
         "https://other.services.ai.azure.com/api/projects/other"
     )
     with pytest.raises(
         ValidationError,
-        match="selected foundry_target project_endpoint must match selected profile foundry_project",
+        match="evaluation project_endpoint must match selected foundry_target",
     ):
         BootstrapPlanInput.model_validate(payload)
 

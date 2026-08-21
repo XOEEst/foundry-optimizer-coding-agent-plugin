@@ -304,12 +304,15 @@ class SelectedAgent(BootstrapDocument):
     def profile_document(self) -> BootstrapSidecar | None:
         if self.profile is None:
             return None
-        return BootstrapSidecar.from_selected_agent_profile(
+        document = BootstrapSidecar.from_selected_agent_profile(
             repo_agent_id=self.repo_agent_id,
             source_root=self.root,
             editable_paths=self.editable_paths,
             profile=self.profile,
         )
+        if self.foundry_target is not None:
+            document = document.with_reviewed_foundry_target(self.foundry_target)
+        return document
 
     @property
     def rendered_enabled(self) -> bool:
@@ -916,16 +919,8 @@ class BootstrapPlanInput(BootstrapDocument):
         for selected in self.repository.selected_agents:
             if selected.profile is not None and selected.profile_document is None:
                 raise BootstrapConfigError('selected agent profile could not be rendered')
-            if (
-                selected.profile is not None
-                and selected.foundry_target is not None
-                and selected.foundry_target.state != 'blocked'
-            ):
-                profile_project = selected.profile.foundry_project
-                if profile_project.project_endpoint != selected.foundry_target.project_endpoint:
-                    raise BootstrapConfigError('selected foundry_target project_endpoint must match selected profile foundry_project')
-                if profile_project.agent_name != selected.foundry_target.agent_name:
-                    raise BootstrapConfigError('selected foundry_target agent_name must match selected profile foundry_project')
+            if selected.profile is not None and selected.foundry_target is not None:
+                selected.profile_document
         if self.azure_phase is not None and self.azure_phase.github_repository_id.casefold() != self.repository.repository_id.casefold():
             raise BootstrapConfigError('azure github_repository_id must match repository_id')
         if self.offline_plan:
@@ -981,6 +976,10 @@ class BootstrapPlanInput(BootstrapDocument):
                             policy=policy,
                             editable_paths=selected.editable_paths,
                         )
+                        if selected.foundry_target is not None:
+                            contract_profile = contract_profile.with_reviewed_foundry_target(
+                                selected.foundry_target
+                            )
                         if selected_profile.static_fingerprint() != contract_profile.static_fingerprint():
                             raise BootstrapConfigError('selected profile must match the reviewed onboarding sidecar policy')
                 if agent.sidecar_path != selected.config_path:

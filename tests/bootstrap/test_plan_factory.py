@@ -81,6 +81,7 @@ def _plan_input(
     discovery_root: str | None = None,
     include_profile: bool = False,
     selected_enabled: bool | None = None,
+    reviewed_target: dict[str, object] | None = None,
 ) -> BootstrapPlanInput:
     payload: dict[str, object] = {
         "schema_version": 1,
@@ -114,6 +115,11 @@ def _plan_input(
                             )
                         }
                         if include_profile
+                        else {}
+                    ),
+                    **(
+                        {"foundry_target": reviewed_target}
+                        if reviewed_target is not None
                         else {}
                     ),
                 }
@@ -229,6 +235,41 @@ def test_sidecar_payload_renders_quick_profile_and_explicit_enabled_state() -> N
         "lineage": None,
     }
     assert registry_document["agents"][0]["enabled"] is True
+
+
+def test_sidecar_payload_persists_the_reviewed_foundry_target() -> None:
+    endpoint = "https://reviewed.services.ai.azure.com/api/projects/reviewed"
+    account_resource_id = (
+        f"/subscriptions/{_SUBSCRIPTION_ID}/resourceGroups/reviewed-rg/"
+        "providers/Microsoft.CognitiveServices/accounts/reviewed"
+    )
+    payloads = load_trusted_manifest(
+        _plan_input(
+            optimizer_environment="copilot",
+            deployment_environment="foundry-production",
+            include_profile=True,
+            selected_enabled=True,
+            reviewed_target={
+                "state": "new_target",
+                "project_endpoint": endpoint,
+                "project_endpoint_source": "owner_answer",
+                "agent_name": "reviewed-agent",
+                "agent_name_source": "owner_answer",
+                "account_resource_id": account_resource_id,
+                "deployment_ready": True,
+                "detail": "project access succeeded and the name is available",
+            },
+        )
+    )
+
+    sidecar = next(payload for payload in payloads if payload.template_id == "sidecar")
+    document = yaml.safe_load(sidecar.rendered_template)
+
+    assert document["foundry_project"]["project_endpoint"] == endpoint
+    assert document["foundry_project"]["account_resource_id"] == account_resource_id
+    assert document["foundry_project"]["agent_name"] == "reviewed-agent"
+    assert document["foundry_target"]["state"] == "new_target"
+    assert document["foundry_target"]["project_endpoint_source"] == "owner_answer"
 
 
 def test_build_phase_actions_emits_a_variable_action_for_each_distinct_environment() -> None:

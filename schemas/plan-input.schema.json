@@ -2277,6 +2277,17 @@
         "foundry_project": {
           "$ref": "#/$defs/FoundryProjectSettings"
         },
+        "foundry_target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReviewedFoundryTarget"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "hard_guardrails": {
           "items": {
             "$ref": "#/$defs/HardGuardrail"
