@@ -7,7 +7,7 @@ This repository separates top-level skill distribution from the shared
   runtime install and verification scripts live under `scripts/`; the old
   `src/foundry_opt/bootstrap/launch-bootstrap.*` paths remain thin
   source-checkout compatibility wrappers.
-- `foundry-agent-optimizer/` is the canonical issue-time optimizer skill.
+- `foundry-agent-optimizer/` is the canonical issue-time optimizer skill folder.
   Setup workflows and bootstrap defaults install from this path, while legacy
   explicit pins and receipts that name the former
   `src/foundry_opt/templates/skills/foundry-agent-optimizer/` location are
