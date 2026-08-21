@@ -16,3 +16,8 @@ This repository separates top-level skill distribution from the shared
 
 Both skill folders are thin owner/runtime clients over shared `foundry_opt`
 code. They do not vendor or duplicate the runtime package.
+
+Release packaging for `foundry-bootstrap/` is built after checkout with
+`uv run python tools/build_foundry_bootstrap_skill.py`, which writes the
+installable package directory plus `dist/foundry-bootstrap-skill.zip` and
+`dist/foundry-bootstrap-skill.checksums.json`.
