@@ -36,6 +36,7 @@ from foundry_opt.bootstrap.contracts import (
     HardGuardrail,
     RuntimeProtocolSettings,
     Sha256,
+    VerificationSettings,
     VersionedEvaluatorUri,
 )
 from foundry_opt.bootstrap.errors import BootstrapConfigError
@@ -302,6 +303,7 @@ class SidecarPolicy(BootstrapDocument):
     hard_guardrails: tuple[HardGuardrail, ...]
     deployment: DeploymentSettings
     max_issue_evaluators: Annotated[StrictInt, Field(ge=1, le=_MAX_EVALUATORS)] = _MAX_EVALUATORS
+    verification: VerificationSettings = Field(default_factory=VerificationSettings)
 
     @model_validator(mode="after")
     def _validate_policy(self) -> Self:

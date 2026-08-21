@@ -186,6 +186,7 @@ def test_public_package_exports_only_poc_entrypoints() -> None:
             ["preflight", "--help"],
             "Verify bootstrap, policy, metadata, OIDC, and broker prerequisites",
         ),
+        (["deploy", "--help"], "verify-registered"),
         (["bootstrap", "--help"], "verify"),
         (["issue", "--help"], "parse"),
         (["broker", "--help"], "launch"),

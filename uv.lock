@@ -337,7 +337,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "azure-ai-projects", specifier = ">=2.4.0" },
+    { name = "azure-ai-projects", specifier = ">=2.4.0,<2.5.0" },
     { name = "azure-identity", specifier = ">=1.25" },
     { name = "httpx", specifier = ">=0.28" },
     { name = "pydantic", specifier = ">=2.12" },

@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 repo_agent_id: example-agent
 source_root: agent
 package_root: agent
@@ -38,71 +38,6 @@ decision_policy:
   minimum_aggregate_delta: 0.01
   focused_cases_required: true
   max_regressions: 0
-development_dataset:
-  schema_version: 1
-  dataset_id: azureai://accounts/example/projects/example/data/development/versions/1
-validating_dataset:
-  schema_version: 1
-  dataset_id: azureai://accounts/example/projects/example/data/validating/versions/1
-development_definition:
-  schema_version: 1
-  definition_id: eval_development
-validating_definition:
-  schema_version: 1
-  definition_id: eval_validating
-default_evaluator_bundle:
-  schema_version: 1
-  objective:
-    schema_version: 1
-    evaluators:
-      - schema_version: 1
-        reference:
-          schema_version: 1
-          evaluator_id: azureai://accounts/example/projects/example/evaluators/quality/versions/1
-          provenance: reused_existing
-        normalization:
-          schema_version: 1
-          kind: pass_fail
-        weight: 0.6666666666666666
-      - schema_version: 1
-        reference:
-          schema_version: 1
-          evaluator_id: azureai://accounts/example/projects/example/evaluators/safety/versions/1
-          provenance: reused_existing
-        normalization:
-          schema_version: 1
-          kind: pass_fail
-        weight: 0.3333333333333333
-    objective_hash: 56cf765d92316a5605052bfc8ed3d7977b19e50caa3e2b859a056e579bc92a22
-  datasets:
-    - schema_version: 1
-      dataset_id: azureai://accounts/example/projects/example/data/development/versions/1
-    - schema_version: 1
-      dataset_id: azureai://accounts/example/projects/example/data/validating/versions/1
-  definitions:
-    - schema_version: 1
-      definition_id: eval_development
-    - schema_version: 1
-      definition_id: eval_validating
-evaluation_lineage:
-  schema_version: 1
-  split_algorithm_version: evaluation-core-split/v4
-  split_hash: d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0
-  split_lineage_hash: d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1
-  development_case_count: 20
-  validating_case_count: 10
-  dataset_strategy: synthetic_only
-  generation_context_fingerprint: d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2
-  evaluator_provenance: reused_existing
-  evaluator_generation_operation_id: null
-  bundle_objective_hash: 56cf765d92316a5605052bfc8ed3d7977b19e50caa3e2b859a056e579bc92a22
-  activation_binding:
-    schema_version: 1
-    operation_id: bootstrap-000000000000
-    plan_hash: d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3
-    approval_hash: d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4
-    receipt_hash: d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5
-    runtime_commit: 770ad878f0658e9368b042d9a7f6732e49ff0200
 max_issue_evaluators: 8
 hard_guardrails:
   - schema_version: 1
@@ -130,3 +65,10 @@ deployment:
   environment: foundry-production
   enabled: true
   require_aligned_binding: true
+verification:
+  schema_version: 1
+  mode: "off"
+  repository_checks: []
+  evaluation_gate_policy: "allow_no_evidence"
+  bundle: null
+  lineage: null

@@ -7,14 +7,19 @@ import subprocess
 
 import pytest
 
+from foundry_opt.poc import deploy as deploy_module
 from foundry_opt.poc.bootstrap import BootstrapReceipt, load_shared_pin, write_bootstrap_receipt
 from foundry_opt.poc.config import AgentMetadata, RepositoryPolicy, load_agent_metadata, load_repository_policy
 from foundry_opt.poc.deploy import (
+    DeploymentRepositoryChecksError,
     DeploymentSettings,
     DeploymentGuardrailError,
     DeploymentService,
     DeploymentSupersededError,
+    DeploymentVerification,
+    DeploymentVerificationCheckResult,
     deployment_operation_id,
+    deployment_unverified_warning,
     load_deployment_settings,
 )
 from foundry_opt.poc.foundry import (
@@ -147,6 +152,36 @@ def _package() -> PackagedSource:
         archive_bytes=archive,
         tree_sha256="b" * 64,
         zip_sha256=hashlib.sha256(archive).hexdigest(),
+    )
+
+
+def _repository_check_verification(
+    command: str,
+    *,
+    gate_policy: str = "allow_repository_checks",
+) -> DeploymentVerification:
+    return DeploymentVerification(
+        mode="repository_checks",
+        status="planned",
+        evaluation_gate_policy=gate_policy,  # type: ignore[arg-type]
+        check_results=(
+            DeploymentVerificationCheckResult(
+                kind="command",
+                value=command,
+                status="planned",
+            ),
+        ),
+        unverified_deployment=False,
+    )
+
+
+def _unverified_deployment_verification() -> DeploymentVerification:
+    return DeploymentVerification(
+        mode="none",
+        status="unverified",
+        evaluation_gate_policy="allow_no_evidence",
+        unverified_deployment=True,
+        warning=deployment_unverified_warning(),
     )
 
 
@@ -383,8 +418,37 @@ def test_deployment_validates_draft_before_regular_publication() -> None:
     assert receipt.previous_version == "14"
     assert receipt.route_mutated is False
     assert receipt.latest_verified is True
+    assert receipt.verification.mode == "foundry_evaluation"
+    assert receipt.verification.status == "passed"
     assert receipt.guardrails[0].passed is True
     assert foundry.calls.index("cleanup") < foundry.calls.index("publish")
+
+
+def test_deployment_verify_only_runs_foundry_gate_without_publication() -> None:
+    policy, metadata = _configuration()
+    foundry = _Foundry()
+    service = DeploymentService(
+        client=foundry,
+        policy=policy,
+        metadata=metadata,
+        deadline_seconds=30,
+    )
+
+    receipt = service.verify(
+        repository="example-org/example-agent",
+        release_commit="a" * 40,
+        packaged=foundry.package,
+    )
+
+    assert receipt.status == "verified"
+    assert receipt.published is False
+    assert receipt.route_mutated is False
+    assert receipt.verification.mode == "foundry_evaluation"
+    assert receipt.verification.status == "passed"
+    assert receipt.verification.guardrails[0].passed is True
+    assert "publish" not in foundry.calls
+    assert "regular-get" not in foundry.calls
+    assert foundry.calls.index("cleanup") > foundry.calls.index("evaluate")
 
 
 def test_deployment_guardrail_failure_cleans_draft_and_does_not_publish() -> None:
@@ -404,6 +468,29 @@ def test_deployment_guardrail_failure_cleans_draft_and_does_not_publish() -> Non
             packaged=foundry.package,
         )
 
+    assert "cleanup" in foundry.calls
+    assert "publish" not in foundry.calls
+
+
+def test_deployment_verify_only_reports_failed_guardrails_after_cleanup() -> None:
+    policy, metadata = _configuration()
+    foundry = _Foundry(safety_score=0.75, safety_passed=False)
+    service = DeploymentService(
+        client=foundry,
+        policy=policy,
+        metadata=metadata,
+        deadline_seconds=30,
+    )
+
+    with pytest.raises(DeploymentGuardrailError) as error:
+        service.verify(
+            repository="example-org/example-agent",
+            release_commit="a" * 40,
+            packaged=foundry.package,
+        )
+
+    assert error.value.verification.status == "failed"
+    assert error.value.verification.guardrails[0].passed is False
     assert "cleanup" in foundry.calls
     assert "publish" not in foundry.calls
 
@@ -480,6 +567,178 @@ def test_deployment_reconciles_unchanged_latest_source_without_new_version() -> 
     assert "regular-get" in foundry.calls
     assert "regular-download" in foundry.calls
     assert "publish" not in foundry.calls
+
+
+def test_deployment_runs_repository_checks_before_publish(
+    tmp_path: Path,
+) -> None:
+    policy, metadata = _configuration()
+    foundry = _Foundry()
+    service = DeploymentService(
+        client=foundry,
+        policy=policy,
+        metadata=metadata,
+        deadline_seconds=30,
+    )
+
+    receipt = service.publish(
+        repository="example-org/example-agent",
+        release_commit="a" * 40,
+        packaged=foundry.package,
+        repository_root=tmp_path,
+        verification=_repository_check_verification(
+            "python -c \"print('deployment-check')\""
+        ),
+    )
+
+    assert receipt.verification.mode == "repository_checks"
+    assert receipt.verification.status == "passed"
+    assert receipt.verification.check_results[0].status == "passed"
+    assert receipt.verification.evaluator_ids == ()
+    assert "draft" not in foundry.calls
+    assert "evaluate" not in foundry.calls
+    assert "cleanup" not in foundry.calls
+
+
+def test_deployment_blocks_failed_repository_checks(tmp_path: Path) -> None:
+    policy, metadata = _configuration()
+    foundry = _Foundry()
+    service = DeploymentService(
+        client=foundry,
+        policy=policy,
+        metadata=metadata,
+        deadline_seconds=30,
+    )
+
+    with pytest.raises(DeploymentRepositoryChecksError) as error:
+        service.publish(
+            repository="example-org/example-agent",
+            release_commit="a" * 40,
+            packaged=foundry.package,
+            repository_root=tmp_path,
+            verification=_repository_check_verification(
+                "python -c \"raise SystemExit(1)\""
+            ),
+        )
+
+    assert error.value.verification.status == "failed"
+    assert error.value.verification.check_results[0].status == "failed"
+    assert "publish" not in foundry.calls
+
+
+def test_deployment_blocks_failed_repository_checks_when_allow_no_evidence(
+    tmp_path: Path,
+) -> None:
+    policy, metadata = _configuration()
+    foundry = _Foundry()
+    service = DeploymentService(
+        client=foundry,
+        policy=policy,
+        metadata=metadata,
+        deadline_seconds=30,
+    )
+
+    with pytest.raises(DeploymentRepositoryChecksError) as error:
+        service.publish(
+            repository="example-org/example-agent",
+            release_commit="a" * 40,
+            packaged=foundry.package,
+            repository_root=tmp_path,
+            verification=_repository_check_verification(
+                "python -c \"raise SystemExit(1)\"",
+                gate_policy="allow_no_evidence",
+            ),
+        )
+
+    assert error.value.verification.evaluation_gate_policy == "allow_no_evidence"
+    assert error.value.verification.status == "failed"
+    assert error.value.verification.check_results[0].status == "failed"
+    assert "publish" not in foundry.calls
+
+
+def test_deployment_blocks_missing_repository_checks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy, metadata = _configuration()
+    foundry = _Foundry()
+    service = DeploymentService(
+        client=foundry,
+        policy=policy,
+        metadata=metadata,
+        deadline_seconds=30,
+    )
+    verification = DeploymentVerification(
+        mode="repository_checks",
+        status="planned",
+        evaluation_gate_policy="allow_repository_checks",
+        check_results=(
+            DeploymentVerificationCheckResult(
+                kind="check",
+                value="CI / unit-tests",
+                status="planned",
+            ),
+        ),
+        unverified_deployment=False,
+    )
+
+    monkeypatch.setattr(
+        deploy_module,
+        "_evaluate_repository_check",
+        lambda **kwargs: kwargs["check"].model_copy(
+            update={
+                "status": "unverified",
+                "detail": (
+                    "required GitHub check was not found for the exact source commit"
+                ),
+            }
+        ),
+    )
+
+    with pytest.raises(DeploymentRepositoryChecksError) as error:
+        service.publish(
+            repository="example-org/example-agent",
+            release_commit="a" * 40,
+            packaged=foundry.package,
+            repository_root=tmp_path,
+            verification=verification,
+        )
+
+    assert error.value.verification.status == "unverified"
+    assert error.value.verification.check_results[0].status == "unverified"
+    assert "publish" not in foundry.calls
+
+
+def test_deployment_can_publish_without_verification_evidence_with_warning(
+    tmp_path: Path,
+) -> None:
+    policy, metadata = _configuration()
+    foundry = _Foundry()
+    service = DeploymentService(
+        client=foundry,
+        policy=policy,
+        metadata=metadata,
+        deadline_seconds=30,
+    )
+
+    receipt = service.publish(
+        repository="example-org/example-agent",
+        release_commit="a" * 40,
+        packaged=foundry.package,
+        repository_root=tmp_path,
+        verification=_unverified_deployment_verification(),
+    )
+
+    assert receipt.verification.mode == "none"
+    assert receipt.verification.status == "unverified"
+    assert receipt.verification.unverified_deployment is True
+    assert receipt.verification.warning is not None
+    assert receipt.verification.warning.code == "deployment-unverified"
+    assert receipt.evaluation_link is None
+    assert receipt.guardrails == ()
+    assert "draft" not in foundry.calls
+    assert "evaluate" not in foundry.calls
+    assert "cleanup" not in foundry.calls
 
 
 def test_deployment_operation_id_is_stable_per_commit() -> None:
@@ -678,4 +937,3 @@ def test_deployment_settings_select_exact_environment_oidc_principal(
     assert settings.deployment_environment == "foundry-production"
     assert oidc.client_id == "22222222-2222-2222-2222-222222222222"
     assert oidc.expected_subject.endswith(":environment:foundry-production")
-

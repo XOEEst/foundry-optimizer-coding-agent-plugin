@@ -76,7 +76,15 @@ class DecisionRules(_FrozenModel):
 
 class CandidateAssessment(_FrozenModel):
     candidate_id: str = Field(pattern=r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
-    outcome: Literal["keep", "discard", "invalid", "platform_failure", "winner"]
+    outcome: Literal[
+        "keep",
+        "discard",
+        "invalid",
+        "platform_failure",
+        "winner",
+        "recommended",
+        "proposed_unverified",
+    ]
     reason: str = Field(min_length=1, max_length=512)
     primary_score: float | None = Field(default=None, ge=0)
     aggregate_delta: float | None = None
@@ -91,14 +99,33 @@ class CandidateAssessment(_FrozenModel):
 
 class Decision(_FrozenModel):
     rules: DecisionRules
-    baseline: EvaluationSummary
+    baseline: EvaluationSummary | None = None
     assessments: tuple[CandidateAssessment, ...]
     provisional_winner_id: str | None = Field(default=None, pattern=r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
     winner_id: str | None = Field(default=None, pattern=r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
-    outcome: Literal["winner", "no_winner", "platform_failure"]
+    selected_candidate_id: str | None = Field(default=None, pattern=r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+    outcome: Literal[
+        "winner",
+        "recommended",
+        "proposed_unverified",
+        "no_winner",
+        "platform_failure",
+    ]
     reason: str = Field(min_length=1, max_length=512)
     validating_candidate_id: str | None = Field(default=None, pattern=r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
     validating_passed: bool | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_legacy_selected_candidate(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        payload = dict(value)
+        if payload.get("selected_candidate_id") is None and isinstance(
+            payload.get("winner_id"), str
+        ):
+            payload["selected_candidate_id"] = payload["winner_id"]
+        return payload
 
     @model_validator(mode="after")
     def validate_links(self) -> "Decision":
@@ -108,6 +135,7 @@ class Decision(_FrozenModel):
         for name, value in {
             "provisional_winner_id": self.provisional_winner_id,
             "winner_id": self.winner_id,
+            "selected_candidate_id": self.selected_candidate_id,
             "validating_candidate_id": self.validating_candidate_id,
         }.items():
             if value is not None and value not in candidate_ids:
@@ -116,6 +144,13 @@ class Decision(_FrozenModel):
             raise ValueError("winner decisions require winner_id")
         if self.outcome != "winner" and self.winner_id is not None:
             raise ValueError("non-winner decisions cannot carry winner_id")
+        if self.outcome in {"winner", "recommended", "proposed_unverified"}:
+            if self.selected_candidate_id is None:
+                raise ValueError("positive decisions require selected_candidate_id")
+        elif self.selected_candidate_id is not None:
+            raise ValueError("non-positive decisions cannot carry selected_candidate_id")
+        if self.winner_id is not None and self.selected_candidate_id != self.winner_id:
+            raise ValueError("winner decisions must select the winner candidate")
         return self
 
     def assessment(self, candidate_id: str) -> CandidateAssessment | None:
@@ -190,6 +225,7 @@ def decide(
             assessments=ordered,
             provisional_winner_id=None,
             winner_id=None,
+            selected_candidate_id=None,
             outcome="no_winner",
             reason="No candidate met the development decision rules.",
         )
@@ -200,6 +236,7 @@ def decide(
             assessments=ordered,
             provisional_winner_id=provisional_winner_id,
             winner_id=None,
+            selected_candidate_id=None,
             outcome="no_winner",
             reason=(
                 f"Candidate {provisional_winner_id} is the provisional winner "
@@ -214,6 +251,7 @@ def decide(
     )
     final_assessments: list[CandidateAssessment] = []
     winner_id: str | None = None
+    selected_candidate_id: str | None = None
     outcome: Literal["winner", "no_winner"] = "no_winner"
     reason = validating_reason
     for assessment in ordered:
@@ -222,6 +260,7 @@ def decide(
             continue
         if validating_passed:
             winner_id = provisional_winner_id
+            selected_candidate_id = provisional_winner_id
             outcome = "winner"
             reason = (
                 f"Candidate {provisional_winner_id} won after a successful "
@@ -252,6 +291,7 @@ def decide(
         assessments=tuple(final_assessments),
         provisional_winner_id=provisional_winner_id,
         winner_id=winner_id,
+        selected_candidate_id=selected_candidate_id,
         outcome=outcome,
         reason=reason,
         validating_candidate_id=provisional_winner_id,

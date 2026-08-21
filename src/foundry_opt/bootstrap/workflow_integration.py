@@ -2,13 +2,19 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import Literal, cast
 
 from foundry_opt.bootstrap.contracts import BootstrapSidecar, RootRegistry
 from foundry_opt.bootstrap.errors import BootstrapConfigError
 from foundry_opt.poc.config import IssueEvaluatorEntry, validate_repository_relative_path
+from foundry_opt.poc.verification import (
+    DeploymentVerification,
+    resolve_deployment_verification,
+)
+from foundry_opt.verification import VerificationCheckSpec, VerificationDatasetInput
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,12 +43,49 @@ class DeploymentPlan:
     package_root: str
     registry_hash: str
     sidecar_hash: str
-    objective_hash: str
+    objective_hash: str | None
     default_evaluator_ids: tuple[str, ...]
+    verification: DeploymentVerification
     receipt_inputs: Mapping[str, str]
 
 
-AuthorPermissionResolver = Callable[[str, Sequence[str]], bool]
+KnownIssueAuthorPermission = Literal[
+    "admin",
+    "maintain",
+    "write",
+    "triage",
+    "read",
+    "none",
+]
+
+_KNOWN_ISSUE_AUTHOR_PERMISSIONS = frozenset(
+    {"admin", "maintain", "write", "triage", "read", "none"}
+)
+_OVERRIDE_ISSUE_AUTHOR_PERMISSIONS = frozenset({"admin", "maintain", "write"})
+
+
+def normalize_issue_author_permission(
+    permission: str,
+) -> KnownIssueAuthorPermission:
+    normalized = permission.strip().casefold()
+    if normalized not in _KNOWN_ISSUE_AUTHOR_PERMISSIONS:
+        raise BootstrapConfigError(
+            "trusted binding carries an unknown issue author permission"
+        )
+    return cast(KnownIssueAuthorPermission, normalized)
+
+
+def _require_issue_override_permission(
+    author_permission: str | None,
+    *,
+    missing_message: str,
+    insufficient_message: str,
+) -> None:
+    if author_permission is None:
+        raise BootstrapConfigError(missing_message)
+    normalized = normalize_issue_author_permission(author_permission)
+    if normalized not in _OVERRIDE_ISSUE_AUTHOR_PERMISSIONS:
+        raise BootstrapConfigError(insufficient_message)
 
 
 def resolve_registry_selection(
@@ -67,7 +110,10 @@ def resolve_registry_selection(
             raise BootstrapConfigError("repoAgentId must resolve exactly one enabled registry agent")
         selected = matches[0]
     sidecar_path = repository_root / selected.config_path
-    sidecar_bytes = sidecar_path.read_bytes()
+    try:
+        sidecar_bytes = sidecar_path.read_bytes()
+    except OSError as exc:
+        raise BootstrapConfigError("enabled registry entry requires a profile at config_path") from exc
     sidecar = BootstrapSidecar.from_document(sidecar_bytes.decode("utf-8"))
     if sidecar.repo_agent_id != selected.agent_id:
         raise BootstrapConfigError("registry config_path sidecar repo_agent_id does not match registry agent_id")
@@ -107,18 +153,60 @@ def protected_editable_patterns_for_repository(
 
 
 def verify_issue_evaluator_authority(
-    author_login: str,
+    author_permission: str | None,
     evaluators: Sequence[IssueEvaluatorEntry] | None,
-    *,
-    resolver: AuthorPermissionResolver | None,
 ) -> None:
     if not evaluators:
         return
-    if resolver is None:
-        raise BootstrapConfigError("issue-supplied evaluator IDs require an injected write-authority resolver")
-    ids = [entry.evaluator_id for entry in evaluators]
-    if not resolver(author_login, ids):
-        raise BootstrapConfigError("issue author is not authorized to request arbitrary evaluator IDs")
+    _require_issue_override_permission(
+        author_permission,
+        missing_message=(
+            "issue-supplied evaluator IDs require a trusted issue author "
+            "permission in the binding"
+        ),
+        insufficient_message=(
+            "issue author requires write, maintain, or admin repository "
+            "permission to request arbitrary evaluator IDs"
+        ),
+    )
+
+
+def verify_issue_dataset_authority(
+    author_permission: str | None,
+    dataset: VerificationDatasetInput | None,
+) -> None:
+    if dataset is None:
+        return
+    _require_issue_override_permission(
+        author_permission,
+        missing_message=(
+            "issue-supplied verification dataset requires a trusted issue "
+            "author permission in the binding"
+        ),
+        insufficient_message=(
+            "issue author requires write, maintain, or admin repository "
+            "permission to request arbitrary verification datasets"
+        ),
+    )
+
+
+def verify_issue_check_authority(
+    author_permission: str | None,
+    checks: Sequence[VerificationCheckSpec] | None,
+) -> None:
+    if not checks:
+        return
+    _require_issue_override_permission(
+        author_permission,
+        missing_message=(
+            "issue-supplied verification commands/checks require a trusted "
+            "issue author permission in the binding"
+        ),
+        insufficient_message=(
+            "issue author requires write, maintain, or admin repository "
+            "permission to request arbitrary verification commands/checks"
+        ),
+    )
 
 
 def build_changed_path_matrix(
@@ -147,7 +235,7 @@ def build_changed_path_matrix(
     )
     sidecars = {
         agent.agent_id: BootstrapSidecar.from_document((repository_root / agent.config_path).read_text(encoding="utf-8"))
-        for agent in registry.agents
+        for agent in enabled
     }
     include: list[WorkflowMatrixEntry] = []
     for agent in sorted(enabled, key=lambda item: (item.root.casefold(), item.agent_id.casefold(), item.config_path.casefold())):
@@ -170,9 +258,18 @@ def build_registered_deployment_plan(
     exact_source: str,
     use_repository_default_evaluators: bool,
 ) -> DeploymentPlan:
-    if not use_repository_default_evaluators:
+    if (
+        selection.sidecar.verification.evaluation_gate_policy
+        == "require_foundry_evaluation"
+        and not use_repository_default_evaluators
+    ):
         raise BootstrapConfigError("deployment plans must use the repository default evaluator bundle")
-    active = selection.sidecar.default_evaluator_bundle
+    verification = resolve_deployment_verification(profile=selection.sidecar)
+    active = (
+        selection.sidecar.default_evaluator_bundle
+        if verification.mode == "foundry_evaluation"
+        else None
+    )
     receipt_inputs = {
         "repo_agent_id": selection.repo_agent_id,
         "changed_root": changed_root,
@@ -187,8 +284,18 @@ def build_registered_deployment_plan(
         package_root=selection.sidecar.package_root,
         registry_hash=selection.registry_hash,
         sidecar_hash=selection.sidecar_hash,
-        objective_hash=active.objective.objective_hash,
-        default_evaluator_ids=tuple(item.reference.evaluator_id for item in active.objective.evaluators),
+        objective_hash=(
+            None if active is None else active.objective.objective_hash
+        ),
+        default_evaluator_ids=(
+            ()
+            if active is None
+            else tuple(
+                item.reference.evaluator_id
+                for item in active.objective.evaluators
+            )
+        ),
+        verification=verification,
         receipt_inputs=receipt_inputs,
     )
 

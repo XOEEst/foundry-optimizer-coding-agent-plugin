@@ -1,0 +1,280 @@
+# Example only: copy to .github/workflows/foundry-opt-main-deployment-gate.yml to activate.
+name: Foundry opt main deployment gate example
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      repo_agent_id:
+        description: Exact repoAgentId from .foundry-opt/registry.yaml (blank uses FOUNDRY_OPT_DEFAULT_REPO_AGENT_ID)
+        required: false
+      exact_source:
+        description: Exact main-branch commit to verify and publish (blank uses GITHUB_SHA)
+        required: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  FOUNDRY_OPT_DEFAULT_REPO_AGENT_ID: example-agent
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: foundry-production
+    timeout-minutes: 45
+    env:
+      FOUNDRY_OPT_DEPLOYMENT_CLIENT_ID: ${{ vars.AZURE_OPTIMIZER_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Require a main-branch workflow context
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/heads/main"
+
+      - name: Resolve exact source and repoAgentId
+        id: inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          exact_source="${{ github.event.inputs.exact_source }}"
+          if [[ -z "$exact_source" ]]; then
+            exact_source="$GITHUB_SHA"
+          fi
+          repo_agent_id="${{ github.event.inputs.repo_agent_id }}"
+          if [[ -z "$repo_agent_id" ]]; then
+            repo_agent_id="$FOUNDRY_OPT_DEFAULT_REPO_AGENT_ID"
+          fi
+          test -n "$exact_source"
+          test -n "$repo_agent_id"
+          echo "exact_source=$exact_source" >>"$GITHUB_OUTPUT"
+          echo "repo_agent_id=$repo_agent_id" >>"$GITHUB_OUTPUT"
+
+      - name: Check out the exact main commit without credentials
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ steps.inputs.outputs.exact_source }}
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78
+        with:
+          version: "0.11.6"
+          enable-cache: true
+
+      - name: Resolve the committed shared runtime contract
+        id: runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          repository = None
+          commit = None
+          in_distribution = False
+          for raw in Path(".foundry-opt/registry.yaml").read_text(encoding="utf-8").splitlines():
+              stripped = raw.strip()
+              if not stripped or stripped.startswith("#"):
+                  continue
+              if not raw.startswith(" ") and stripped.endswith(":"):
+                  in_distribution = stripped[:-1] == "distribution"
+                  continue
+              if not in_distribution:
+                  continue
+              if stripped.startswith("repository:"):
+                  repository = stripped.split(":", 1)[1].strip().strip("'\"")
+              elif stripped.startswith("pin:"):
+                  commit = stripped.split(":", 1)[1].strip().strip("'\"")
+          if not repository or not commit:
+              raise SystemExit("could not resolve distribution.repository/pin from .foundry-opt/registry.yaml")
+          lock = json.loads(
+              Path(".foundry-opt/bootstrap.lock.json").read_text(encoding="utf-8")
+          )
+          if lock["runtime_repository"] != repository or lock["runtime_commit"] != commit:
+              raise SystemExit("registry and bootstrap lock do not agree on the shared runtime pin")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"runtime_repository={repository}\n")
+              handle.write(f"runtime_commit={commit}\n")
+          PY
+
+      - name: Fetch the exact shared CLI revision from the committed contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          shared_root="$RUNNER_TEMP/foundry-opt-shared"
+          rm -rf "$shared_root"
+          git init "$shared_root"
+          git -C "$shared_root" remote add origin "${{ steps.runtime.outputs.runtime_repository }}"
+          git -C "$shared_root" fetch --depth=1 origin "${{ steps.runtime.outputs.runtime_commit }}"
+          git -C "$shared_root" checkout --detach FETCH_HEAD
+          echo "FOUNDRY_OPT_PACKAGE_ROOT=$shared_root" >>"$GITHUB_ENV"
+
+      - name: Install the exact shared CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv sync --frozen --project "$FOUNDRY_OPT_PACKAGE_ROOT"
+          echo "$FOUNDRY_OPT_PACKAGE_ROOT/.venv/bin" >>"$GITHUB_PATH"
+
+      - name: Verify the shared CLI checkout against the committed registry
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv_lock_sha256="$("$FOUNDRY_OPT_PACKAGE_ROOT/.venv/bin/python" - <<'PY'
+          import hashlib
+          import os
+          from pathlib import Path
+
+          print(
+              hashlib.sha256(
+                  Path(os.environ["FOUNDRY_OPT_PACKAGE_ROOT"]).joinpath("uv.lock").read_bytes()
+              ).hexdigest()
+          )
+          PY
+          )"
+          foundry-opt bootstrap verify \
+            --registry .foundry-opt/registry.yaml \
+            --uv-lock-sha256 "$uv_lock_sha256" \
+            --checkout "$FOUNDRY_OPT_PACKAGE_ROOT" \
+            --receipt "$RUNNER_TEMP/foundry-opt-bootstrap-receipt.json"
+
+      - name: Verify the exact main commit before publication
+        id: verify
+        shell: bash
+        run: |
+          set +e
+          set -o pipefail
+          receipt="$RUNNER_TEMP/foundry-opt-main-verification-${{ steps.inputs.outputs.repo_agent_id }}.json"
+          stdout_path="$RUNNER_TEMP/foundry-opt-main-verification-${{ steps.inputs.outputs.repo_agent_id }}-stdout.json"
+          export GITHUB_SHA="${{ steps.inputs.outputs.exact_source }}"
+          foundry-opt deploy verify-registered \
+            --repository . \
+            --repo-agent-id "${{ steps.inputs.outputs.repo_agent_id }}" \
+            --exact-source "${{ steps.inputs.outputs.exact_source }}" \
+            --receipt "$receipt" | tee "$stdout_path"
+          status=$?
+          set -e
+          if [[ ! -s "$receipt" && -s "$stdout_path" ]]; then
+            cp "$stdout_path" "$receipt"
+          fi
+          echo "exit_code=$status" >>"$GITHUB_OUTPUT"
+          echo "receipt_path=$receipt" >>"$GITHUB_OUTPUT"
+          echo "stdout_path=$stdout_path" >>"$GITHUB_OUTPUT"
+
+      - name: Summarize gate behavior and warnings
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          RECEIPT_PATH="${{ steps.verify.outputs.receipt_path }}" \
+          REPO_AGENT_ID="${{ steps.inputs.outputs.repo_agent_id }}" \
+          EXACT_SOURCE="${{ steps.inputs.outputs.exact_source }}" \
+          "$FOUNDRY_OPT_PACKAGE_ROOT/.venv/bin/python" - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          receipt = json.loads(Path(os.environ["RECEIPT_PATH"]).read_text(encoding="utf-8"))
+          verification = receipt.get("verification", {})
+          warning = verification.get("warning")
+          gate_behavior = {
+              "foundry_evaluation": "required Foundry evaluation",
+              "repository_checks": "optional repository checks fallback",
+              "none": "no-evidence / off path permitted by policy",
+          }.get(verification.get("mode"), "unknown")
+          lines = [
+              f"### Foundry opt main deployment gate: `{os.environ['REPO_AGENT_ID']}`",
+              "",
+              f"- Exact source: `{os.environ['EXACT_SOURCE']}`",
+              f"- Verification mode: `{verification.get('mode', 'unknown')}`",
+              f"- Verification status: `{verification.get('status', receipt.get('status', 'unknown'))}`",
+              f"- Gate behavior: {gate_behavior}",
+              "- Protected environment: `foundry-production`",
+          ]
+          if verification.get("evaluation_link"):
+              lines.append(f"- Evaluation link: {verification['evaluation_link']}")
+          if warning is not None:
+              lines.extend([
+                  "",
+                  "## WARNING: Unverified deployment permitted",
+                  "",
+                  warning["message"],
+              ])
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as handle:
+              handle.write("\n".join(lines) + "\n\n")
+              handle.write("```json\n")
+              handle.write(json.dumps(receipt, indent=2, sort_keys=True))
+              handle.write("\n```\n")
+          if warning is not None:
+              print(f"::warning title={warning['code']}::{warning['message']}")
+          PY
+
+      - name: Upload the verification receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: foundry-opt-main-verification-${{ steps.inputs.outputs.repo_agent_id }}
+          path: |
+            ${{ steps.verify.outputs.receipt_path }}
+            ${{ steps.verify.outputs.stdout_path }}
+
+      - name: Stop before publish when verification failed
+        if: ${{ steps.verify.outputs.exit_code != '0' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          exit "${{ steps.verify.outputs.exit_code }}"
+
+      - name: Publish the verified exact main commit
+        id: publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt="$RUNNER_TEMP/foundry-opt-main-deployment-${{ steps.inputs.outputs.repo_agent_id }}.json"
+          export GITHUB_SHA="${{ steps.inputs.outputs.exact_source }}"
+          foundry-opt deploy publish-registered \
+            --repository . \
+            --repo-agent-id "${{ steps.inputs.outputs.repo_agent_id }}" \
+            --exact-source "${{ steps.inputs.outputs.exact_source }}" \
+            --receipt "$receipt"
+          echo "receipt_path=$receipt" >>"$GITHUB_OUTPUT"
+
+      - name: Summarize the publication receipt
+        if: ${{ success() && steps.publish.outputs.receipt_path != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          RECEIPT_PATH="${{ steps.publish.outputs.receipt_path }}" \
+          "$FOUNDRY_OPT_PACKAGE_ROOT/.venv/bin/python" - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          receipt = json.loads(Path(os.environ["RECEIPT_PATH"]).read_text(encoding="utf-8"))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as handle:
+              handle.write("\n### Publication receipt\n\n")
+              handle.write("```json\n")
+              handle.write(json.dumps(receipt, indent=2, sort_keys=True))
+              handle.write("\n```\n")
+          PY
+
+      - name: Upload the publication receipt
+        if: ${{ success() && steps.publish.outputs.receipt_path != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: foundry-opt-main-deployment-${{ steps.inputs.outputs.repo_agent_id }}
+          path: ${{ steps.publish.outputs.receipt_path }}

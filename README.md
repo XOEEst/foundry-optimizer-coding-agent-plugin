@@ -1,47 +1,45 @@
 # Foundry Optimizer Coding Agent
 
-`foundry-opt` provides a guided bootstrap and issue-driven optimization
-workflow for Microsoft Foundry agent repositories.
+Foundry Optimizer helps repository owners bootstrap a GitHub repository,
+connect it to Azure and Foundry, and run issue-driven optimization for
+Foundry agents.
 
-This public repository is the authoritative reviewed runtime. It provides:
+## First-time owners start here
 
-- local `discover -> plan -> apply` repository bootstrap
-- multi-agent registry and per-agent configuration
-- OIDC-only GitHub and Azure setup
-- evaluation dataset and evaluator onboarding with a receipt-bound sidecar activation
-- Copilot optimize-job instructions and workflows
-- exact-commit merge-time Foundry deployment
+- [Overview](docs/get-started/overview.md)
+- [Bootstrap](docs/get-started/bootstrap.md)
+- [Issues and monitoring](docs/get-started/issues-and-monitoring.md)
+- [Evaluation gates](docs/get-started/evaluation-gates.md)
 
-The architecture and implementation plan are tracked in the private design
-repository until the public documentation is complete.
+These guides explain the owner decisions first. Use the advanced
+references once you need the detailed contracts.
+
+## What this repository covers
+
+- repository discovery and bootstrap
+- GitHub environments and Actions for optimization and deployment
+- Azure OIDC identity and least-privilege RBAC
+- Foundry evaluation onboarding, datasets, evaluators, and runs
+- issue-driven optimization with explicit receipts and deployment gates
 
 ## Status
 
-Pre-release. Do not use floating `main` for privileged workflows until the
-documented branch-protection policy is enabled. Generated customer templates
-currently pin reviewed runtime `770ad878f0658e9368b042d9a7f6732e49ff0200`.
+Pre-release. Until the recommended branch protection policy is enabled,
+treat privileged bootstrap, optimization, validation, and deployment
+workflows as reviewed-commit operations rather than floating `main`.
 
-The synthetic multi-agent pilot completed repository bootstrap, evaluation
-activation, validation, and Copilot setup; its personal repository correctly
-fails the selected tenant's enterprise-claim policy. Live acceptance completed
-in a separate private enterprise-owned agent repository: public-runtime setup
-and validation passed, deployment reconciled the existing regular version, and
-one bounded Copilot job finished with a receipt-backed no-winner decision.
+See [Distribution and pinning](docs/distribution.md) and
+[Recommended branch protection](docs/branch-protection.md).
 
-## Distribution trust
+## Advanced references
 
-New bootstrap operations resolve one exact runtime commit and retain it for the
-entire operation. Resumed optimize jobs reuse the commit recorded at job start.
-
-See:
-
-- [Distribution and pinning](docs/distribution.md)
-- [Recommended branch protection](docs/branch-protection.md)
-- [Managed files](docs/managed-files.md)
 - [Identity and RBAC](docs/identity-rbac.md)
 - [Binding evidence](docs/binding-evidence.md)
+- [Managed files](docs/managed-files.md)
 - [Evaluation onboarding](docs/evaluation-onboarding.md)
-- [Retained pilot status](docs/retained-pilot.md)
+- [Recommended branch protection](docs/branch-protection.md)
+- [Distribution and pinning](docs/distribution.md)
+- [Owner review interface](docs/owner-review.md)
 
 ## License
 

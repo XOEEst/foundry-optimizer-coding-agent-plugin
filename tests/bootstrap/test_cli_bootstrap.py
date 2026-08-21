@@ -4,16 +4,27 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+from types import SimpleNamespace
 
 from typer.testing import CliRunner
 import yaml
 
-from foundry_opt.cli import app
+import foundry_opt.bootstrap.cli as bootstrap_cli
 from foundry_opt.bootstrap import drivers
+from foundry_opt.bootstrap.connection import GitHubAzureConnectionManager
+from foundry_opt.bootstrap.contracts import (
+    EvaluatorNormalization,
+    EvaluatorReference,
+    FingerprintRecord,
+    ResolvedEvaluator,
+    ResolvedWeightedObjective,
+)
 from foundry_opt.bootstrap.input_contracts import TrustedTemplateManifest
 from foundry_opt.bootstrap.receipts import ApprovalRecord
+from foundry_opt.cli import app
 from tests.bootstrap.fakes.evaluation_contract import build_contract, evaluation_agent_payload
 from tests.bootstrap.fakes.foundry_env import build_fake_adapter, fake_credential
+from tests.bootstrap.test_connection import _Driver, _action
 
 runner = CliRunner()
 
@@ -306,7 +317,8 @@ def test_evaluation_cli_flow_plans_applies_activates_and_reports(tmp_path: Path,
     applied_payload = json.loads(applied.stdout)
     assert applied_payload["sidecar_written"] is False
     sidecar = repo / "app" / ".foundry" / "foundry-opt.yaml"
-    assert not sidecar.exists()
+    sidecar_payload = yaml.safe_load(sidecar.read_text(encoding="utf-8"))
+    assert sidecar_payload["verification"]["mode"] == "off"
 
     pending = runner.invoke(app, ["bootstrap", "evaluation", "status", "--repository-id", "org/repo", "--operation-id", "op-eval", "--repo-root", str(repo), "--state-root", str(state_root)])
     assert pending.exit_code == 0
@@ -332,7 +344,7 @@ def test_evaluation_cli_flow_plans_applies_activates_and_reports(tmp_path: Path,
     inspected_payload = json.loads(inspected.stdout)
     assert inspected_payload["human_rubric_editor"] is False
     contract = inspected_payload["contracts"][0]
-    assert contract["persisted_sidecar"]["evaluation_lineage"]["activation_binding"]["runtime_commit"] == sha
+    assert contract["persisted_sidecar"]["verification"]["lineage"]["activation_binding"]["runtime_commit"] == sha
     assert contract["bounds"]["required_safety_pass_rate"] == 1.0
     finalization = contract["finalization"]
     assert {item["provenance"] for item in finalization["evaluators"]} == {"auto_generated_unreviewed", "reused_existing"}
@@ -395,6 +407,124 @@ def test_registered_deploy_plan_command_uses_repository_defaults(tmp_path: Path)
     )
     repository = tmp_path / "repo"
     shutil.copytree(template, repository)
+    objective_hash = ResolvedWeightedObjective.create(
+        (
+            ResolvedEvaluator(
+                reference=EvaluatorReference(
+                    evaluator_id="azureai://built-in/evaluators/safety",
+                    provenance="reused_existing",
+                ),
+                normalization=EvaluatorNormalization(kind="pass_fail"),
+                weight=1.0,
+            ),
+        )
+    ).objective_hash
+    (repository / "agent" / ".foundry" / "foundry-opt.yaml").write_text(
+        "\n".join(
+            (
+                "schema_version: 1",
+                "repo_agent_id: example-agent",
+                "source_root: agent",
+                "package_root: agent",
+                "editable_paths:",
+                "  - agent/main.py",
+                "shared_source_relations: []",
+                "runtime:",
+                "  schema_version: 1",
+                "  kind: hosted",
+                "  runtime: python_3_13",
+                "  entrypoint:",
+                "    - python",
+                "    - main.py",
+                "  dependency_resolution: remote_build",
+                "  protocol_name: responses",
+                "  protocol_version: '2.0.0'",
+                "foundry_project:",
+                "  schema_version: 1",
+                "  project_endpoint: https://example.services.ai.azure.com/api/projects/example",
+                "  account_resource_id: /subscriptions/1/resourceGroups/rg/providers/Microsoft.CognitiveServices/accounts/a",
+                "  agent_name: example-agent",
+                "  model_deployment_aliases: [baseline]",
+                "baseline_model: baseline",
+                "allowed_models: [baseline]",
+                "min_candidates: 1",
+                "max_candidates: 1",
+                "primary_metric: quality",
+                "decision_policy:",
+                "  schema_version: 1",
+                "  minimum_aggregate_delta: 0.01",
+                "  focused_cases_required: true",
+                "  max_regressions: 0",
+                "development_dataset:",
+                "  schema_version: 1",
+                "  dataset_id: azureai://accounts/a/projects/p/data/dev/versions/1",
+                "validating_dataset:",
+                "  schema_version: 1",
+                "  dataset_id: azureai://accounts/a/projects/p/data/val/versions/1",
+                "development_definition:",
+                "  schema_version: 1",
+                "  definition_id: eval_development",
+                "validating_definition:",
+                "  schema_version: 1",
+                "  definition_id: eval_validating",
+                "default_evaluator_bundle:",
+                "  schema_version: 1",
+                "  objective:",
+                "    schema_version: 1",
+                "    evaluators:",
+                "      - schema_version: 1",
+                "        reference:",
+                "          schema_version: 1",
+                "          evaluator_id: azureai://built-in/evaluators/safety",
+                "          provenance: reused_existing",
+                "        normalization:",
+                "          schema_version: 1",
+                "          kind: pass_fail",
+                "        weight: 1.0",
+                f"    objective_hash: {objective_hash}",
+                "  datasets:",
+                "    - schema_version: 1",
+                "      dataset_id: azureai://accounts/a/projects/p/data/dev/versions/1",
+                "    - schema_version: 1",
+                "      dataset_id: azureai://accounts/a/projects/p/data/val/versions/1",
+                "  definitions:",
+                "    - schema_version: 1",
+                "      definition_id: eval_development",
+                "    - schema_version: 1",
+                "      definition_id: eval_validating",
+                "evaluation_lineage:",
+                "  schema_version: 1",
+                "  split_algorithm_version: evaluation-core-split/v4",
+                f"  split_hash: {'a' * 64}",
+                f"  split_lineage_hash: {'b' * 64}",
+                "  development_case_count: 20",
+                "  validating_case_count: 10",
+                "  dataset_strategy: synthetic_only",
+                f"  generation_context_fingerprint: {'c' * 64}",
+                "  evaluator_provenance: reused_existing",
+                f"  bundle_objective_hash: {objective_hash}",
+                "  activation_binding:",
+                "    schema_version: 1",
+                "    operation_id: op",
+                f"    plan_hash: {'d' * 64}",
+                f"    approval_hash: {'e' * 64}",
+                f"    receipt_hash: {'f' * 64}",
+                f"    runtime_commit: {'a' * 40}",
+                "max_issue_evaluators: 8",
+                "hard_guardrails:",
+                "  - schema_version: 1",
+                "    evaluator_name: safety",
+                "    required_pass_rate: 1.0",
+                "    required: true",
+                "deployment:",
+                "  schema_version: 1",
+                "  environment: foundry-production",
+                "  enabled: true",
+                "  require_aligned_binding: true",
+            )
+        ),
+        encoding="utf-8",
+    )
     subprocess.run(
         ["git", "-C", str(repository), "init", "--quiet"],
         check=True,
@@ -425,3 +555,403 @@ def test_registered_deploy_plan_command_uses_repository_defaults(tmp_path: Path)
     assert payload["status"] == "planned"
     assert payload["repo_agent_id"] == "example-agent"
     assert payload["default_evaluator_ids"]
+
+
+
+def _connection_plan_input(tmp_path: Path, sha: str) -> Path:
+    path = _offline_plan_input(tmp_path, sha)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["offline_plan"] = False
+    payload["required_phases"] = ["github", "azure"]
+    payload["github_phase"] = {
+        "schema_version": 1,
+        "optimizer_environment": "copilot",
+        "deployment_environment": "foundry-production",
+        "shared_client_id": "44444444-4444-4444-4444-444444444444",
+        "client_id_variable_name": "AZURE_OPTIMIZER_CLIENT_ID",
+        "oidc_subject_prefix": "repo:org/repo",
+        "default_branch_policy_intent": "require_main",
+    }
+    payload["azure_phase"] = {
+        "schema_version": 1,
+        "tenant_id": "22222222-2222-2222-2222-222222222222",
+        "subscription_id": "33333333-3333-3333-3333-333333333333",
+        "identity": {
+            "schema_version": 1,
+            "identity_kind": "entra_application",
+            "existing_client_id": "44444444-4444-4444-4444-444444444444",
+            "existing_object_id": "55555555-5555-5555-5555-555555555555",
+        },
+        "resource_group": "example-rg",
+        "location": "eastus2",
+        "github_repository_id": "org/repo",
+        "approved_role_assignments": [
+            {
+                "schema_version": 1,
+                "alias": "foundry-user-project",
+                "role_definition_id": "/subscriptions/33333333-3333-3333-3333-333333333333/providers/Microsoft.Authorization/roleDefinitions/53ca6127-db72-4b80-b1b0-d745d6d5456d",
+                "scope": "/subscriptions/33333333-3333-3333-3333-333333333333/resourceGroups/example-rg/providers/Microsoft.CognitiveServices/accounts/example/projects/example",
+            }
+        ],
+    }
+    connection_path = tmp_path / "plan-input-connection.json"
+    connection_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    return connection_path
+
+
+
+def _resource_plan_input(tmp_path: Path, sha: str) -> Path:
+    path = _evaluation_plan_input(tmp_path, sha)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["required_phases"] = ["github", "azure", "evaluations"]
+    payload["github_phase"] = {
+        "schema_version": 1,
+        "optimizer_environment": "copilot",
+        "deployment_environment": "foundry-production",
+        "shared_client_id": "44444444-4444-4444-4444-444444444444",
+        "client_id_variable_name": "AZURE_OPTIMIZER_CLIENT_ID",
+        "oidc_subject_prefix": "repo:org/repo",
+        "default_branch_policy_intent": "require_main",
+    }
+    payload["azure_phase"] = {
+        "schema_version": 1,
+        "tenant_id": "22222222-2222-2222-2222-222222222222",
+        "subscription_id": "33333333-3333-3333-3333-333333333333",
+        "identity": {
+            "schema_version": 1,
+            "identity_kind": "user_assigned_managed_identity",
+            "existing_resource_id": "/subscriptions/33333333-3333-3333-3333-333333333333/resourceGroups/example-rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/foundry-owner-review",
+            "existing_client_id": "44444444-4444-4444-4444-444444444444",
+            "existing_object_id": "55555555-5555-5555-5555-555555555555",
+            "create_if_missing": False,
+        },
+        "resource_group": "example-rg",
+        "location": "eastus2",
+        "github_repository_id": "org/repo",
+        "approved_role_assignments": [
+            {
+                "schema_version": 1,
+                "alias": "foundry-user-project",
+                "role_definition_id": "/subscriptions/33333333-3333-3333-3333-333333333333/providers/Microsoft.Authorization/roleDefinitions/53ca6127-db72-4b80-b1b0-d745d6d5456d",
+                "scope": "/subscriptions/33333333-3333-3333-3333-333333333333/resourceGroups/example-rg/providers/Microsoft.CognitiveServices/accounts/example/projects/example",
+            }
+        ],
+    }
+    resource_path = tmp_path / "plan-input-resources.json"
+    resource_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    return resource_path
+
+
+
+def test_bootstrap_review_commands_default_to_text_and_json(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    state_root = tmp_path / "state-review"
+    sha = "a" * 40
+    plan_input = _offline_plan_input(tmp_path, sha)
+
+    discovered = runner.invoke(
+        app,
+        [
+            "bootstrap",
+            "discover",
+            "--repo-root",
+            str(repo),
+            "--repository-id",
+            "org/repo",
+            "--operation-id",
+            "owner-review-op",
+            "--state-root",
+            str(state_root),
+            "--plan-input",
+            str(plan_input),
+        ],
+    )
+    assert discovered.exit_code == 0, discovered.stdout
+    planned = runner.invoke(
+        app,
+        [
+            "bootstrap",
+            "plan",
+            "--plan-input",
+            str(plan_input),
+            "--repository-id",
+            "org/repo",
+            "--repo-root",
+            str(repo),
+            "--operation-id",
+            "owner-review-op",
+            "--state-root",
+            str(state_root),
+        ],
+    )
+    assert planned.exit_code == 0, planned.stdout
+    plan_file = json.loads(planned.stdout)["plan_file"]
+
+    discovery_review = runner.invoke(
+        app,
+        [
+            "bootstrap",
+            "review",
+            "discovery",
+            "--repository-id",
+            "org/repo",
+            "--operation-id",
+            "owner-review-op",
+            "--state-root",
+            str(state_root),
+        ],
+    )
+    assert discovery_review.exit_code == 0, discovery_review.stdout
+    assert "Discovery review" in discovery_review.stdout
+    assert not discovery_review.stdout.lstrip().startswith("{")
+
+    discovery_json = runner.invoke(
+        app,
+        [
+            "bootstrap",
+            "review",
+            "discovery",
+            "--repository-id",
+            "org/repo",
+            "--operation-id",
+            "owner-review-op",
+            "--state-root",
+            str(state_root),
+            "--json",
+        ],
+    )
+    assert discovery_json.exit_code == 0, discovery_json.stdout
+    assert json.loads(discovery_json.stdout)["agents_found"] == 1
+
+    plan_review = runner.invoke(
+        app,
+        [
+            "bootstrap",
+            "review",
+            "plan",
+            "--plan-file",
+            plan_file,
+            "--plan-input",
+            str(plan_input),
+        ],
+    )
+    assert plan_review.exit_code == 0, plan_review.stdout
+    assert "Plan review" in plan_review.stdout
+
+    status_review = runner.invoke(
+        app,
+        [
+            "bootstrap",
+            "review",
+            "status",
+            "--repository-id",
+            "org/repo",
+            "--operation-id",
+            "owner-review-op",
+            "--state-root",
+            str(state_root),
+        ],
+    )
+    assert status_review.exit_code == 0, status_review.stdout
+    assert "Status review" in status_review.stdout
+    assert "Next action:" in status_review.stdout
+
+
+
+def test_bootstrap_resources_command_renders_links_and_placeholders(tmp_path: Path) -> None:
+    sha = "a" * 40
+    plan_input = _resource_plan_input(tmp_path, sha)
+
+    result = runner.invoke(
+        app,
+        ["bootstrap", "resources", "--plan-input", str(plan_input)],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert "Resource links" in result.stdout
+    assert "available-after-apply" in result.stdout
+    assert "https://github.com/org/repo/actions" in result.stdout
+    assert "https://example.services.ai.azure.com/api/projects/example" in result.stdout
+
+    result_json = runner.invoke(
+        app,
+        ["bootstrap", "resources", "--plan-input", str(plan_input), "--json"],
+    )
+    assert result_json.exit_code == 0, result_json.stdout
+    payload = json.loads(result_json.stdout)
+    assert any(item["label"] == "Actions" for item in payload["github"])
+    assert any(item["label"] == "app project" for item in payload["foundry"])
+    assert any(item["target"] == "available after apply" for item in payload["foundry"])
+
+
+
+def test_bootstrap_connect_approve_apply_and_stale_status(tmp_path: Path, monkeypatch) -> None:
+    sha = "a" * 40
+    plan_input = _connection_plan_input(tmp_path, sha)
+    state_root = tmp_path / "state-connect"
+
+    def fake_runtime(*, state_root: Path, plan_input=None, connection_plan=None):
+        github = _Driver(
+            "github",
+            actions=(_action("github-env", "github"), _action("github-var", "github")),
+            live=(FingerprintRecord(label="github:live", sha256="1" * 64),),
+            created_actions=("github-env",),
+            changed_actions=("github-var",),
+        )
+        azure = _Driver(
+            "azure",
+            actions=(_action("azure-fic", "azure"), _action("azure-role", "azure")),
+            live=(FingerprintRecord(label="azure:live", sha256="2" * 64),),
+            created_actions=("azure-fic",),
+            adopted_actions=("azure-role",),
+        )
+        manager = GitHubAzureConnectionManager(
+            github_driver=github,
+            azure_driver=azure,
+            state_root=state_root,
+        )
+        return SimpleNamespace(manager=manager, github_driver=github, azure_driver=azure)
+
+    class _Preview:
+        def render_text(self) -> str:
+            return "Connection plan\n- Approval target: approve this connection once\n- Create: GitHub environment copilot"
+
+        def render_markdown(self) -> str:
+            return "## Connection plan\n- Approval target: approve this connection once\n- Create: GitHub environment copilot"
+
+    monkeypatch.setattr(bootstrap_cli, "_build_connection_runtime", fake_runtime)
+    monkeypatch.setattr(
+        bootstrap_cli,
+        "build_connection_plan_preview",
+        lambda plan, plan_input, github_driver, azure_driver: _Preview(),
+    )
+
+    planned = runner.invoke(
+        app,
+        [
+            "bootstrap",
+            "connect",
+            "plan",
+            "--plan-input",
+            str(plan_input),
+            "--operation-id",
+            "connect-owner-op",
+            "--state-root",
+            str(state_root),
+        ],
+    )
+    assert planned.exit_code == 0, planned.stdout
+    assert "Connection plan" in planned.stdout
+    assert not planned.stdout.lstrip().startswith("{")
+
+    planned_json = runner.invoke(
+        app,
+        [
+            "bootstrap",
+            "connect",
+            "plan",
+            "--plan-input",
+            str(plan_input),
+            "--operation-id",
+            "connect-owner-json",
+            "--state-root",
+            str(state_root),
+            "--json",
+        ],
+    )
+    assert planned_json.exit_code == 0, planned_json.stdout
+    assert json.loads(planned_json.stdout)["step_id"] == "connect-github-to-azure"
+
+    approved = runner.invoke(
+        app,
+        [
+            "bootstrap",
+            "connect",
+            "approve",
+            "--repository-id",
+            "org/repo",
+            "--operation-id",
+            "connect-owner-op",
+            "--state-root",
+            str(state_root),
+            "--actor",
+            "owner",
+            "--summary",
+            "approve connection",
+            "--json",
+        ],
+    )
+    assert approved.exit_code == 0, approved.stdout
+    approval_payload = json.loads(approved.stdout)
+    assert approval_payload["actor"] == "owner"
+
+    applied = runner.invoke(
+        app,
+        [
+            "bootstrap",
+            "connect",
+            "apply",
+            "--repository-id",
+            "org/repo",
+            "--operation-id",
+            "connect-owner-op",
+            "--state-root",
+            str(state_root),
+            "--json",
+        ],
+    )
+    assert applied.exit_code == 0, applied.stdout
+    assert json.loads(applied.stdout)["overall_state"] == "applied"
+
+    status = runner.invoke(
+        app,
+        [
+            "bootstrap",
+            "connect",
+            "status",
+            "--repository-id",
+            "org/repo",
+            "--operation-id",
+            "connect-owner-op",
+            "--state-root",
+            str(state_root),
+            "--json",
+        ],
+    )
+    assert status.exit_code == 0, status.stdout
+    assert json.loads(status.stdout)["overall_state"] == "applied"
+
+    stale = runner.invoke(
+        app,
+        [
+            "bootstrap",
+            "connect",
+            "status",
+            "--repository-id",
+            "org/repo",
+            "--operation-id",
+            "connect-owner-op",
+            "--state-root",
+            str(state_root),
+            "--runtime-commit",
+            "b" * 40,
+        ],
+    )
+    assert stale.exit_code == 24, stale.stdout
+
+    rolled_back = runner.invoke(
+        app,
+        [
+            "bootstrap",
+            "connect",
+            "rollback",
+            "--repository-id",
+            "org/repo",
+            "--operation-id",
+            "connect-owner-op",
+            "--state-root",
+            str(state_root),
+            "--json",
+        ],
+    )
+    assert rolled_back.exit_code == 0, rolled_back.stdout
+    assert json.loads(rolled_back.stdout)["overall_state"] == "rolled_back"

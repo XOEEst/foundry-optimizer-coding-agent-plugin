@@ -108,6 +108,9 @@ def test_skill_and_tenzing_attribution_stay_in_sync() -> None:
     assert "validating dataset only for the provisional winner" in skill
     assert "early draft pull request" in skill
     assert "read-only reference material" in skill
+    assert "Bootstrap for first-time owners" in skill
+    assert "Advanced and recovery" in skill
+    assert "deployable winning patch" in skill
 
     assert "redacted, idempotent candidate update to the original issue" in adapter
     assert "fresh baseline and current best" in adapter
@@ -118,3 +121,23 @@ def test_skill_and_tenzing_attribution_stay_in_sync() -> None:
     assert "read-only snapshot" in attribution
     assert (SKILL_TEMPLATE_ROOT / "references" / "tenzing" / "LICENSE").is_file()
     assert (SKILL_TEMPLATE_ROOT / "references" / "tenzing" / "INIT.md").is_file()
+
+
+def test_skill_bootstrap_owner_flow_uses_owner_commands_and_terms() -> None:
+    skill = _read(SKILL_PATH)
+    normalized = " ".join(skill.split())
+
+    for required in (
+        "foundry-opt bootstrap review discovery",
+        "foundry-opt bootstrap review plan",
+        "foundry-opt bootstrap connect plan",
+        "foundry-opt bootstrap resources",
+        "Do not paste raw JSON into owner-facing updates",
+        "registered` — the agent is listed in `.foundry-opt/registry.yaml`",
+        "`enabled` — the reviewed registry/profile intends the agent to participate",
+        "`verified` — reviewed evidence or receipt-backed verification is attached",
+        "`deployable` — policy currently allows exact-source deployment",
+        "combined connection approval",
+        "issue-supplied Foundry",
+    ):
+        assert required in normalized

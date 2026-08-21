@@ -5,6 +5,10 @@ from typing import Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from foundry_opt.poc.checks import (
+    RepositoryCheckResult,
+    RepositoryCheckRunnerProtocol,
+)
 from foundry_opt.poc.candidate import (
     AppliedPatch,
     CandidatePolicyError,
@@ -35,6 +39,10 @@ from foundry_opt.poc.state import (
     JobState,
     JobStateStore,
     ProjectionReceipt,
+)
+from foundry_opt.poc.verification import (
+    VerificationResolution,
+    verification_mode_blocker,
 )
 
 
@@ -140,6 +148,7 @@ class OptimizeJobController:
         comments: IssueCommentOperations,
         closure: ClosureOperations,
         rules: DecisionRules,
+        check_runner: RepositoryCheckRunnerProtocol | None = None,
     ) -> None:
         self._store = store
         self._workspace = workspace
@@ -147,19 +156,46 @@ class OptimizeJobController:
         self._comments = comments
         self._closure = closure
         self._rules = rules
+        self._check_runner = check_runner
 
-    def start(self, identity: JobIdentity) -> JobState:
+    def start(
+        self,
+        identity: JobIdentity,
+        verification: VerificationResolution | None = None,
+    ) -> JobState:
         state = self._store.initialize(identity)
-        if state.baseline is None:
-            result = self._foundry.evaluate_baseline(identity)
-            if result.status == "retry":
-                return self._store.load()
-            if result.status != "ok":
-                raise ControllerError(result.reason or "baseline evaluation failed")
-            state = self._store.update(
-                lambda current: current.with_baseline(
-                    BaselineState(evaluation=result.evaluation)
+        if verification is not None:
+            blocker = verification_mode_blocker(verification)
+            if blocker is not None:
+                raise ControllerError(blocker)
+            if state.verification is None:
+                state = self._store.update(
+                    lambda current: current.with_verification(verification)
                 )
+            elif state.verification != verification:
+                raise ControllerError("verification resolution is immutable")
+        if state.verification_mode == "foundry_evaluation":
+            if state.baseline is None or state.baseline.evaluation is None:
+                result = self._foundry.evaluate_baseline(identity)
+                if result.status == "retry":
+                    return self._store.load()
+                if result.status != "ok":
+                    raise ControllerError(result.reason or "baseline evaluation failed")
+                state = self._store.update(
+                    lambda current: current.with_baseline(
+                        BaselineState(
+                            evaluation=result.evaluation,
+                            comment_receipt=(
+                                None
+                                if current.baseline is None
+                                else current.baseline.comment_receipt
+                            ),
+                        )
+                    )
+                )
+        elif state.baseline is None:
+            state = self._store.update(
+                lambda current: current.with_baseline(BaselineState())
             )
         if state.baseline is None:
             raise ControllerError("baseline state is unavailable")
@@ -250,45 +286,52 @@ class OptimizeJobController:
         if candidate is None:
             raise ControllerError("candidate disappeared from state")
         if candidate.assessment is None and candidate.finalized is not None:
-            result = self._foundry.evaluate_candidate(candidate.finalized)
-            if result.status == "retry":
-                if result.retry_phase != "candidate":
-                    raise ControllerError("candidate retries must report retry_phase='candidate'")
-                return self._prepare_candidate_retry(
-                    self._store.load(),
-                    candidate_id,
-                    retry_phase="candidate",
-                )
-            if result.status == "platform_failure":
-                assessment = CandidateAssessment(
-                    candidate_id=candidate_id,
-                    outcome="platform_failure",
-                    reason=result.reason or "Platform failure.",
-                    changed_path_count=len(candidate.finalized.changed_paths),
-                )
-                state = self._store.update(
-                    lambda current: current.with_candidate(
-                        current.candidate(candidate_id).model_copy(
-                            update={
-                                "assessment": assessment,
-                                "draft_id": result.draft_id,
-                            }
+            if state.verification_mode == "foundry_evaluation":
+                result = self._foundry.evaluate_candidate(candidate.finalized)
+                if result.status == "retry":
+                    if result.retry_phase != "candidate":
+                        raise ControllerError(
+                            "candidate retries must report retry_phase='candidate'"
+                        )
+                    return self._prepare_candidate_retry(
+                        self._store.load(),
+                        candidate_id,
+                        retry_phase="candidate",
+                    )
+                if result.status == "platform_failure":
+                    assessment = CandidateAssessment(
+                        candidate_id=candidate_id,
+                        outcome="platform_failure",
+                        reason=result.reason or "Platform failure.",
+                        changed_path_count=len(candidate.finalized.changed_paths),
+                    )
+                    state = self._store.update(
+                        lambda current: current.with_candidate(
+                            current.candidate(candidate_id).model_copy(
+                                update={
+                                    "assessment": assessment,
+                                    "draft_id": result.draft_id,
+                                }
+                            )
                         )
                     )
-                )
-                attempted_platform_failure_cleanup = True
+                    attempted_platform_failure_cleanup = True
+                else:
+                    state = self._store.update(
+                        lambda current: current.with_candidate(
+                            current.candidate(candidate_id).model_copy(
+                                update={
+                                    "development": result.evaluation,
+                                    "draft_id": result.draft_id,
+                                }
+                            )
+                        )
+                    )
+                    state = self._apply_development_decision(self._store.load())
+            elif state.verification_mode == "repository_checks":
+                state = self._record_repository_checks(self._store.load(), candidate_id)
             else:
-                state = self._store.update(
-                    lambda current: current.with_candidate(
-                        current.candidate(candidate_id).model_copy(
-                            update={
-                                "development": result.evaluation,
-                                "draft_id": result.draft_id,
-                            }
-                        )
-                    )
-                )
-                state = self._apply_development_decision(self._store.load())
+                state = self._record_unverified_candidate(self._store.load(), candidate_id)
         elif candidate.assessment is not None:
             state = self._apply_development_decision(state)
         state = self._store.load()
@@ -322,7 +365,26 @@ class OptimizeJobController:
         if state.terminal_outcome is not None:
             resumed = self._resume_terminal_state(state, destination_checkout)
             return self._retry_pending_cleanups(resumed)
-        if state.baseline is None:
+        if state.verification_mode != "foundry_evaluation":
+            if state.completed_candidate_count < state.identity.min_candidates:
+                raise ControllerError("minimum candidate count has not been reached")
+            state = self._apply_development_decision(state)
+            decision = state.decision
+            if decision is None:
+                raise ControllerError("decision state is unavailable")
+            if decision.selected_candidate_id is None:
+                state = self._ensure_no_winner(state, decision)
+                state = self._ensure_final_comment(state)
+                return self._retry_pending_cleanups(self._store.load())
+            state = self._project_selected_candidate(
+                self._store.load(),
+                candidate_id=decision.selected_candidate_id,
+                destination_checkout=destination_checkout,
+                terminal_outcome=decision.outcome,
+            )
+            state = self._ensure_final_comment(self._store.load())
+            return self._retry_pending_cleanups(self._store.load())
+        if state.baseline is None or state.baseline.evaluation is None:
             raise ControllerError("baseline must be recorded before finish")
         if state.completed_candidate_count < state.identity.min_candidates:
             raise ControllerError("minimum candidate count has not been reached")
@@ -380,27 +442,12 @@ class OptimizeJobController:
         if decision is None:
             raise ControllerError("final decision is unavailable")
         if decision.outcome == "winner":
-            if state.projection_receipt is None:
-                projected = self._workspace.apply_winner(
-                    decision.winner_id,
-                    destination_checkout,
-                )
-                state = self._store.update(
-                    lambda current: current.model_copy(
-                        update={
-                            "projection_receipt": ProjectionReceipt(
-                                candidate_id=projected.candidate_id,
-                                receipt_id=projected.patch_sha256,
-                                patch_sha256=projected.patch_sha256,
-                            ),
-                            "terminal_outcome": "winner",
-                        }
-                    )
-                )
-            else:
-                state = self._store.update(
-                    lambda current: current.model_copy(update={"terminal_outcome": "winner"})
-                )
+            state = self._project_selected_candidate(
+                self._store.load(),
+                candidate_id=decision.winner_id,
+                destination_checkout=destination_checkout,
+                terminal_outcome="winner",
+            )
         else:
             state = self._ensure_no_winner(state, decision)
         state = self._ensure_final_comment(self._store.load())
@@ -411,24 +458,23 @@ class OptimizeJobController:
         state: JobState,
         destination_checkout: Path,
     ) -> JobState:
-        if state.terminal_outcome == "winner":
-            if state.decision is None or state.final_winner_id is None:
+        if state.terminal_outcome in {
+            "winner",
+            "recommended",
+            "proposed_unverified",
+        }:
+            if state.decision is None or state.selected_candidate_id is None:
+                raise ControllerError(
+                    "positive terminal state requires a selected candidate"
+                )
+            if state.terminal_outcome == "winner" and state.final_winner_id is None:
                 raise ControllerError("winner terminal state requires a final decision")
             if state.projection_receipt is None:
-                projected = self._workspace.apply_winner(
-                    state.final_winner_id,
-                    destination_checkout,
-                )
-                state = self._store.update(
-                    lambda current: current.model_copy(
-                        update={
-                            "projection_receipt": ProjectionReceipt(
-                                candidate_id=projected.candidate_id,
-                                receipt_id=projected.patch_sha256,
-                                patch_sha256=projected.patch_sha256,
-                            )
-                        }
-                    )
+                state = self._project_selected_candidate(
+                    state,
+                    candidate_id=state.selected_candidate_id,
+                    destination_checkout=destination_checkout,
+                    terminal_outcome=state.terminal_outcome,
                 )
             if state.final_comment_receipt is None:
                 state = self._ensure_final_comment(self._store.load())
@@ -454,7 +500,13 @@ class OptimizeJobController:
         return state
 
     def _apply_development_decision(self, state: JobState) -> JobState:
-        if state.baseline is None:
+        if state.verification_mode == "repository_checks":
+            decision = self._repository_checks_decision(state)
+            return self._store.update(lambda current: _merge_decision(current, decision))
+        if state.verification_mode == "none":
+            decision = self._unverified_decision(state)
+            return self._store.update(lambda current: _merge_decision(current, decision))
+        if state.baseline is None or state.baseline.evaluation is None:
             raise ControllerError("baseline is required for candidate comparison")
         decision = decide(
             self._rules,
@@ -521,6 +573,7 @@ class OptimizeJobController:
             update={
                 "outcome": "platform_failure",
                 "winner_id": None,
+                "selected_candidate_id": None,
                 "reason": (
                     f"Validating platform failure for {candidate_id}: "
                     f"{reason}"
@@ -617,6 +670,7 @@ class OptimizeJobController:
                     "decision": None,
                     "provisional_winner_id": None,
                     "final_winner_id": None,
+                    "selected_candidate_id": None,
                     "final_comment_receipt": None,
                     "projection_receipt": None,
                     "no_winner_receipt": None,
@@ -646,6 +700,258 @@ class OptimizeJobController:
                 candidate.model_copy(update={"draft_id": draft_id})
             )
         return updated.model_copy(update={"terminal_outcome": "platform_failure"})
+
+    def _project_selected_candidate(
+        self,
+        state: JobState,
+        *,
+        candidate_id: str,
+        destination_checkout: Path,
+        terminal_outcome: str,
+    ) -> JobState:
+        if state.projection_receipt is None:
+            projected = self._workspace.apply_winner(
+                candidate_id,
+                destination_checkout,
+            )
+            return self._store.update(
+                lambda current: current.model_copy(
+                    update={
+                        "projection_receipt": ProjectionReceipt(
+                            candidate_id=projected.candidate_id,
+                            receipt_id=projected.patch_sha256,
+                            patch_sha256=projected.patch_sha256,
+                        ),
+                        "terminal_outcome": terminal_outcome,
+                    }
+                )
+            )
+        return self._store.update(
+            lambda current: current.model_copy(update={"terminal_outcome": terminal_outcome})
+        )
+
+    def _record_repository_checks(
+        self,
+        state: JobState,
+        candidate_id: str,
+    ) -> JobState:
+        if self._check_runner is None:
+            raise ControllerError("repository checks runner is unavailable")
+        resolution = state.verification
+        if resolution is None or resolution.repository_checks is None:
+            raise ControllerError("repository checks resolution is unavailable")
+        candidate = state.candidate(candidate_id)
+        if candidate is None or candidate.finalized is None:
+            raise ControllerError("candidate is not ready for repository checks")
+        results = self._check_runner.run_checks(
+            candidate.finalized,
+            checks=resolution.repository_checks.checks,
+        )
+        failures = tuple(
+            result.spec.render() for result in results if not result.passed
+        )
+        assessment = CandidateAssessment(
+            candidate_id=candidate_id,
+            outcome="keep" if not failures else "discard",
+            reason=(
+                "Kept: all configured repository checks passed."
+                if not failures
+                else "Discarded: repository checks failed: " + ", ".join(failures) + "."
+            ),
+            changed_path_count=len(candidate.finalized.changed_paths),
+        )
+        updated = self._store.update(
+            lambda current: current.with_candidate(
+                current.candidate(candidate_id).model_copy(
+                    update={
+                        "repository_checks": results,
+                        "assessment": assessment,
+                    }
+                )
+            )
+        )
+        return self._apply_development_decision(updated)
+
+    def _record_unverified_candidate(
+        self,
+        state: JobState,
+        candidate_id: str,
+    ) -> JobState:
+        candidate = state.candidate(candidate_id)
+        if candidate is None or candidate.finalized is None:
+            raise ControllerError("candidate is not ready for proposal selection")
+        assessment = CandidateAssessment(
+            candidate_id=candidate_id,
+            outcome="keep",
+            reason=(
+                "Kept: no approved verification evidence is available; this candidate"
+                " can only be considered as an unverified proposal."
+            ),
+            changed_path_count=len(candidate.finalized.changed_paths),
+        )
+        updated = self._store.update(
+            lambda current: current.with_candidate(
+                current.candidate(candidate_id).model_copy(
+                    update={"assessment": assessment}
+                )
+            )
+        )
+        return self._apply_development_decision(updated)
+
+    def _repository_checks_decision(self, state: JobState) -> Decision:
+        ordered_candidates = sorted(
+            state.candidates,
+            key=lambda item: item.handoff.candidate_id,
+        )
+        passing_ids = [
+            candidate.handoff.candidate_id
+            for candidate in ordered_candidates
+            if candidate.assessment is not None
+            and candidate.assessment.outcome not in {"invalid", "platform_failure"}
+            and candidate.repository_checks
+            and all(result.passed for result in candidate.repository_checks)
+        ]
+        chosen_id = None if not passing_ids else passing_ids[0]
+        assessments: list[CandidateAssessment] = []
+        for candidate in ordered_candidates:
+            assessment = candidate.assessment
+            if assessment is None:
+                continue
+            if assessment.outcome in {"invalid", "platform_failure"}:
+                assessments.append(assessment)
+                continue
+            if not candidate.repository_checks or not all(
+                result.passed for result in candidate.repository_checks
+            ):
+                assessments.append(
+                    assessment.model_copy(
+                        update={
+                            "outcome": "discard",
+                            "reason": assessment.reason,
+                        }
+                    )
+                )
+                continue
+            if chosen_id == candidate.handoff.candidate_id:
+                assessments.append(
+                    assessment.model_copy(
+                        update={
+                            "outcome": "keep",
+                            "reason": (
+                                "Kept: all configured repository checks passed."
+                                if len(passing_ids) == 1
+                                else "Kept: all configured repository checks passed; selected deterministically by candidate ID order."
+                            ),
+                        }
+                    )
+                )
+                continue
+            assessments.append(
+                assessment.model_copy(
+                    update={
+                        "outcome": "discard",
+                        "reason": (
+                            f"Discarded: repository checks also passed, but {chosen_id} was selected deterministically by candidate ID order."
+                        ),
+                    }
+                )
+            )
+        if chosen_id is None:
+            return Decision(
+                rules=self._rules,
+                baseline=None,
+                assessments=tuple(assessments),
+                provisional_winner_id=None,
+                winner_id=None,
+                selected_candidate_id=None,
+                outcome="no_winner",
+                reason="No candidate passed all configured repository checks.",
+            )
+        return Decision(
+            rules=self._rules,
+            baseline=None,
+            assessments=tuple(assessments),
+            provisional_winner_id=None,
+            winner_id=None,
+            selected_candidate_id=chosen_id,
+            outcome="recommended",
+            reason=(
+                f"Candidate {chosen_id} passed all configured repository checks and is recommended for projection."
+                if len(passing_ids) == 1
+                else f"Multiple candidates passed all configured repository checks; candidate {chosen_id} was selected deterministically by candidate ID order."
+            ),
+        )
+
+    def _unverified_decision(self, state: JobState) -> Decision:
+        ordered_candidates = sorted(
+            state.candidates,
+            key=lambda item: item.handoff.candidate_id,
+        )
+        viable_ids = [
+            candidate.handoff.candidate_id
+            for candidate in ordered_candidates
+            if candidate.assessment is not None
+            and candidate.assessment.outcome not in {"invalid", "platform_failure"}
+            and candidate.finalized is not None
+        ]
+        chosen_id = None if not viable_ids else viable_ids[0]
+        assessments: list[CandidateAssessment] = []
+        for candidate in ordered_candidates:
+            assessment = candidate.assessment
+            if assessment is None:
+                continue
+            if assessment.outcome in {"invalid", "platform_failure"}:
+                assessments.append(assessment)
+                continue
+            if chosen_id == candidate.handoff.candidate_id:
+                assessments.append(
+                    assessment.model_copy(
+                        update={
+                            "outcome": "keep",
+                            "reason": (
+                                "Kept: selected as the current unverified proposal."
+                                if len(viable_ids) == 1
+                                else "Kept: selected deterministically by candidate ID order because no approved verification evidence is available."
+                            ),
+                        }
+                    )
+                )
+                continue
+            assessments.append(
+                assessment.model_copy(
+                    update={
+                        "outcome": "discard",
+                        "reason": (
+                            f"Discarded: no approved verification evidence is available, so {chosen_id} was selected deterministically by candidate ID order."
+                        ),
+                    }
+                )
+            )
+        if chosen_id is None:
+            return Decision(
+                rules=self._rules,
+                baseline=None,
+                assessments=tuple(assessments),
+                provisional_winner_id=None,
+                winner_id=None,
+                selected_candidate_id=None,
+                outcome="no_winner",
+                reason="No candidate produced a viable proposal.",
+            )
+        return Decision(
+            rules=self._rules,
+            baseline=None,
+            assessments=tuple(assessments),
+            provisional_winner_id=None,
+            winner_id=None,
+            selected_candidate_id=chosen_id,
+            outcome="proposed_unverified",
+            reason=(
+                f"Candidate {chosen_id} is the selected unverified proposal because no approved verification evidence is available."
+                if len(viable_ids) == 1
+                else f"Multiple candidates were completed without approved verification evidence; candidate {chosen_id} was selected deterministically by candidate ID order."
+            ),
+        )
 
     def _decision_inputs(self, state: JobState) -> tuple[CandidateDecisionInput, ...]:
         inputs: list[CandidateDecisionInput] = []

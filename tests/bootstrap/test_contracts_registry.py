@@ -16,9 +16,11 @@ from foundry_opt.bootstrap.contracts import (
     ResolvedWeightedObjective,
     RootRegistry,
     TemplatePayloadSpec,
+    VerificationSettings,
 )
 from foundry_opt.bootstrap.errors import BootstrapConfigError
 from foundry_opt.bootstrap.legacy import import_legacy_single_agent_documents
+from foundry_opt.verification import VerificationCheckSpec
 
 
 def _sidecar() -> BootstrapSidecar:
@@ -48,6 +50,15 @@ def _sidecar() -> BootstrapSidecar:
     })
 
 
+def test_v1_sidecar_parses_into_v2_profile() -> None:
+    sidecar = _sidecar()
+
+    assert sidecar.schema_version == 2
+    assert sidecar.verification.mode == 'required'
+    assert sidecar.verification.evaluation_gate_policy == 'require_foundry_evaluation'
+    assert sidecar.default_evaluator_bundle is not None
+
+
 def test_root_registry_rejects_casefold_duplicate_agent_ids() -> None:
     with pytest.raises(BootstrapConfigError):
         RootRegistry.from_document({
@@ -63,7 +74,7 @@ def test_root_registry_rejects_casefold_duplicate_agent_ids() -> None:
 
 def test_sidecar_rejects_invalid_foundry_uri() -> None:
     document = _sidecar().model_dump(mode='json')
-    document['development_dataset']['dataset_id'] = 'dataset@1'
+    document['verification']['bundle']['development_dataset']['dataset_id'] = 'dataset@1'
     with pytest.raises(BootstrapConfigError):
         BootstrapSidecar.from_document(document)
 
@@ -77,6 +88,8 @@ def test_actual_template_legacy_import_succeeds() -> None:
     )
     assert proposal.registry.distribution.repository.endswith('foundry-optimizer-coding-agent-plugin.git')
     assert proposal.sidecars[0].development_definition.definition_id == 'eval_development'
+    assert proposal.sidecars[0].verification.bundle is not None
+    assert proposal.sidecars[0].verification.evaluation_gate_policy == 'require_foundry_evaluation'
     assert proposal.actions[0].kind == 'unresolved-shared-identity'
 
 
@@ -88,6 +101,23 @@ def test_root_registry_accepts_explicit_agents() -> None:
         agents=(ExplicitAgentEntry(agent_id='agent-one', root='src/one', config_path='src/one/.foundry/foundry-opt.yaml'),),
     )
     assert registry.agents[0].enabled is True
+
+
+def test_verification_settings_allow_optional_mode_without_bundle() -> None:
+    settings = VerificationSettings(
+        mode="optional",
+        repository_checks=(
+            VerificationCheckSpec(
+                kind="command",
+                value="python -m pytest tests/agent -q",
+            ),
+        ),
+        evaluation_gate_policy="allow_repository_checks",
+    )
+
+    assert settings.bundle is None
+    assert settings.repository_checks[0].kind == "command"
+    assert settings.evaluation_gate_policy == "allow_repository_checks"
 
 
 def test_root_registry_requires_complete_immutable_oidc_ids() -> None:

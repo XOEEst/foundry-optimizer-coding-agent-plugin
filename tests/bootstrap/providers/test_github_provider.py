@@ -804,6 +804,7 @@ def test_restoring_state_persisted_before_variable_name_tracking_falls_back_to_d
 
     provider1 = GitHubBootstrapProvider(token="ghp_secret", transport=transport)
     receipt = provider1.apply_changes(_plan(action))
+    assert state["variable_value"] == "44444444-4444-4444-4444-444444444444"
     exported = provider1.export_provider_state(receipt)
 
     # Simulate state persisted by a version of the provider that predates

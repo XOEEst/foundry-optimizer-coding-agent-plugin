@@ -43,6 +43,7 @@ from foundry_opt.bootstrap.contracts import (
     ResolvedEvaluator,
     ResolvedWeightedObjective,
     RootRegistry,
+    VerificationBundle,
 )
 from foundry_opt.bootstrap.errors import BootstrapApplyError, BootstrapConfigError
 from foundry_opt.bootstrap.evaluation.core import (
@@ -315,17 +316,66 @@ def _build_bundle(finalization: EvaluationFinalization) -> DefaultEvaluatorBundl
     )
 
 
+def _build_verification_bundle(finalization: EvaluationFinalization) -> VerificationBundle:
+    return VerificationBundle(
+        development_dataset=ImmutableDatasetReference(dataset_id=finalization.dataset_for("development").dataset_id),
+        validating_dataset=ImmutableDatasetReference(dataset_id=finalization.dataset_for("validating").dataset_id),
+        development_definition=ImmutableDefinitionReference(definition_id=finalization.definition_for("development").definition_id),
+        validating_definition=ImmutableDefinitionReference(definition_id=finalization.definition_for("validating").definition_id),
+        default_evaluator_bundle=_build_bundle(finalization),
+    )
+
+
+def _profile_from_policy(
+    *,
+    contract: EvaluationOnboardingRequest,
+    shared_source_relations: Sequence[object] = (),
+) -> BootstrapSidecar:
+    policy = contract.sidecar_policy
+    assert policy is not None
+    return BootstrapSidecar(
+        repo_agent_id=contract.repo_agent_id,
+        source_root=policy.source_root,
+        package_root=policy.package_root,
+        editable_paths=policy.editable_paths,
+        shared_source_relations=tuple(shared_source_relations),
+        runtime=policy.runtime,
+        foundry_project=policy.foundry_project,
+        baseline_model=policy.baseline_model,
+        allowed_models=policy.allowed_models,
+        min_candidates=policy.min_candidates,
+        max_candidates=policy.max_candidates,
+        primary_metric=policy.primary_metric,
+        decision_policy=policy.decision_policy,
+        max_issue_evaluators=policy.max_issue_evaluators,
+        hard_guardrails=policy.hard_guardrails,
+        deployment=policy.deployment,
+        verification=policy.verification,
+    )
+
+
 def _build_sidecar(
     *,
     contract: EvaluationOnboardingRequest,
     finalization: EvaluationFinalization,
     binding: ActivationBinding,
+    previous: BootstrapSidecar | None,
 ) -> BootstrapSidecar:
-    """Derive the sidecar from approved static policy plus receipt-recorded dynamic ids."""
+    """Enrich the durable profile with receipt-recorded verification identifiers and lineage."""
 
     policy = contract.sidecar_policy
     assert policy is not None
-    bundle = _build_bundle(finalization)
+    base_profile = previous or _profile_from_policy(contract=contract)
+    if previous is not None:
+        expected = _profile_from_policy(
+            contract=contract,
+            shared_source_relations=previous.shared_source_relations,
+        )
+        if previous.static_fingerprint() != expected.static_fingerprint():
+            raise BootstrapApplyError(
+                "existing profile static policy does not match the approved onboarding contract"
+            )
+    bundle = _build_verification_bundle(finalization)
     objective = finalization.objective_evaluators[0]
     lineage = EvaluationLineage(
         split_algorithm_version=finalization.split.algorithm_version,
@@ -341,31 +391,13 @@ def _build_sidecar(
         activation_binding=binding,
     )
     try:
-        return BootstrapSidecar(
-            repo_agent_id=contract.repo_agent_id,
-            source_root=policy.source_root,
-            package_root=policy.package_root,
-            editable_paths=policy.editable_paths,
-            runtime=policy.runtime,
-            foundry_project=policy.foundry_project,
-            baseline_model=policy.baseline_model,
-            allowed_models=policy.allowed_models,
-            min_candidates=policy.min_candidates,
-            max_candidates=policy.max_candidates,
-            primary_metric=policy.primary_metric,
-            decision_policy=policy.decision_policy,
-            development_dataset=ImmutableDatasetReference(dataset_id=finalization.dataset_for("development").dataset_id),
-            validating_dataset=ImmutableDatasetReference(dataset_id=finalization.dataset_for("validating").dataset_id),
-            development_definition=ImmutableDefinitionReference(definition_id=finalization.definition_for("development").definition_id),
-            validating_definition=ImmutableDefinitionReference(definition_id=finalization.definition_for("validating").definition_id),
-            default_evaluator_bundle=bundle,
-            evaluation_lineage=lineage,
-            max_issue_evaluators=policy.max_issue_evaluators,
-            hard_guardrails=policy.hard_guardrails,
-            deployment=policy.deployment,
+        return base_profile.with_verification(
+            mode='required' if policy.deployment.enabled else 'optional',
+            bundle=bundle,
+            lineage=lineage,
         )
     except (BootstrapConfigError, ValidationError) as exc:
-        raise BootstrapApplyError(f"derived sidecar is invalid: {exc}") from exc
+        raise BootstrapApplyError(f"derived profile is invalid: {exc}") from exc
 
 
 def _previous_sidecar(path: Path) -> tuple[bytes | None, BootstrapSidecar | None]:
@@ -483,7 +515,12 @@ def _prepare_agent(
     bound = binding.model_copy(update={"finalization_hash": binding_hash})
     target = _repository_target(repository_root, policy.path)
     previous_bytes, previous_document = _previous_sidecar(target)
-    document = _build_sidecar(contract=contract, finalization=finalization, binding=bound)
+    document = _build_sidecar(
+        contract=contract,
+        finalization=finalization,
+        binding=bound,
+        previous=previous_document,
+    )
     rendered = yaml.safe_dump(document.model_dump(mode="json"), sort_keys=False, allow_unicode=False).encode("utf-8")
     applied_sha256 = _sha256_bytes(rendered)
     replay = (
@@ -497,7 +534,10 @@ def _prepare_agent(
         if _sha256_bytes(previous_bytes) != contract.replacement.previous_sidecar_sha256:
             raise BootstrapApplyError("existing sidecar does not match the reviewed replacement preimage")
         assert previous_document is not None
-        if previous_document.default_evaluator_bundle.objective.objective_hash != contract.replacement.previous_bundle_objective_hash:
+        previous_bundle = previous_document.default_evaluator_bundle
+        if previous_bundle is None:
+            raise BootstrapApplyError("existing sidecar carries no activated default evaluator bundle")
+        if previous_bundle.objective.objective_hash != contract.replacement.previous_bundle_objective_hash:
             raise BootstrapApplyError("existing sidecar bundle does not match the reviewed replacement lineage")
     lifecycle = _lifecycle(
         contract=contract,
@@ -515,7 +555,9 @@ def _prepare_agent(
         previous_sha256=_sha256_bytes(previous_bytes) if previous_bytes is not None else None,
         applied_sha256=applied_sha256,
         previous_bundle_objective_hash=(
-            previous_document.default_evaluator_bundle.objective.objective_hash if previous_document else None
+            previous_document.default_evaluator_bundle.objective.objective_hash
+            if previous_document is not None and previous_document.default_evaluator_bundle is not None
+            else None
         ),
         activated_bundle_objective_hash=lifecycle.activated_bundle.objective.objective_hash,
         retained_bundle_objective_hash=(
@@ -529,7 +571,12 @@ def _prepare_agent(
     )
 
 
-def _update_registry(repository_root: Path, enabled_agent_ids: Sequence[str]) -> tuple[Path, bytes]:
+def _update_registry(
+    repository_root: Path,
+    enabled_agent_ids: Sequence[str],
+    *,
+    desired_enabled: Mapping[str, bool | None],
+) -> tuple[Path, bytes, tuple[str, ...]]:
     target = _repository_target(repository_root, REGISTRY_PATH)
     data = _read_bytes(target)
     if data is None:
@@ -542,6 +589,8 @@ def _update_registry(repository_root: Path, enabled_agent_ids: Sequence[str]) ->
     known = {item.agent_id.casefold() for item in registry.agents}
     if not enabled <= known:
         raise BootstrapApplyError("activation cannot enable an agent outside the registry")
+    if not set(desired_enabled) <= known:
+        raise BootstrapApplyError("activation cannot update a registry agent outside the repository apply state")
     updated = registry.model_copy(
         update={
             "agents": tuple(
@@ -549,13 +598,22 @@ def _update_registry(repository_root: Path, enabled_agent_ids: Sequence[str]) ->
                     agent_id=item.agent_id,
                     root=item.root,
                     config_path=item.config_path,
-                    enabled=item.agent_id.casefold() in enabled,
+                    enabled=(
+                        desired_enabled[item.agent_id.casefold()]
+                        if item.agent_id.casefold() in desired_enabled
+                        and desired_enabled[item.agent_id.casefold()] is not None
+                        else item.enabled or item.agent_id.casefold() in enabled
+                    ),
                 )
                 for item in registry.agents
             )
         }
     )
-    return target, yaml.safe_dump(updated.model_dump(mode="json"), sort_keys=False, allow_unicode=False).encode("utf-8")
+    return (
+        target,
+        yaml.safe_dump(updated.model_dump(mode="json"), sort_keys=False, allow_unicode=False).encode("utf-8"),
+        tuple(sorted(item.agent_id for item in updated.agents if item.enabled)),
+    )
 
 
 def _update_lock(
@@ -668,7 +726,15 @@ def finalize_evaluation_activation(
     if not prepared:
         raise BootstrapApplyError("no agent reached evaluation activation; nothing may be enabled")
     enabled_ids = tuple(sorted(item.repo_agent_id for item in prepared))
-    registry_path, registry_bytes = _update_registry(repository_root, enabled_ids)
+    desired_enabled = {
+        agent.repo_agent_id.casefold(): agent.enabled
+        for agent in plan_input.repository.selected_agents
+    }
+    registry_path, registry_bytes, actual_enabled_ids = _update_registry(
+        repository_root,
+        enabled_ids,
+        desired_enabled=desired_enabled,
+    )
     registry_sha256 = _sha256_bytes(registry_bytes)
     lock_path, lock_bytes = _update_lock(repository_root, registry_sha256=registry_sha256, finalizations=prepared)
     journal_path = operation_directory(envelope.repository_id, envelope.operation_id, state_root=state_root) / _FINALIZE_JOURNAL
@@ -724,7 +790,7 @@ def finalize_evaluation_activation(
         entries=tuple(sorted(entries, key=lambda item: item.repo_agent_id)),
         registry_sha256=registry_sha256,
         lock_sha256=_sha256_bytes(lock_bytes),
-        enabled_agent_ids=enabled_ids,
+        enabled_agent_ids=actual_enabled_ids,
     )
     per_agent = tuple(
         EvaluationAgentReplacement(

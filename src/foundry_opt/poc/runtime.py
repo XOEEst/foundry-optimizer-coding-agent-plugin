@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from foundry_opt.poc.auth import AuthError, GitHubActionsOidcConfig, build_client_assertion_credential
 from foundry_opt.poc.bootstrap import BootstrapReceipt, load_shared_pin, read_bootstrap_receipt
 from foundry_opt.poc.candidate import CandidateWorkspace, FinalizedCandidate
+from foundry_opt.poc.checks import LocalRepositoryCheckRunner, RepositoryCheckRunnerProtocol
 from foundry_opt.poc.config import (
     AgentMetadata,
     ModelDeploymentContract,
@@ -62,6 +63,7 @@ from foundry_opt.poc.state import (
     StateNotFoundError,
 )
 from foundry_opt.poc.source import SourcePackagingError, package_git_source
+from foundry_opt.poc.verification import VerificationResolution
 from foundry_opt.bootstrap.workflow_integration import protected_editable_patterns_for_repository
 
 
@@ -714,6 +716,7 @@ class ControllerFoundryOperations:
         client: FoundryPocClient,
         artifact_state_path: Path,
         route_fingerprint: RouteFingerprint | str,
+        verification_resolution: VerificationResolution | None = None,
         sidecars: RuntimeSidecarStore | None = None,
         deadline_seconds: float = DEFAULT_DEADLINE_SECONDS,
         monotonic: Callable[[], float] = time.monotonic,
@@ -733,6 +736,7 @@ class ControllerFoundryOperations:
         self._deadline_seconds = load_deadline_seconds(deadline_seconds=deadline_seconds)
         self._monotonic = monotonic
         self._repository_head_loader = repository_head_loader
+        self._verification_resolution = verification_resolution
         self._expected_route = (
             route_fingerprint
             if isinstance(route_fingerprint, RouteFingerprint)
@@ -1391,20 +1395,44 @@ class ControllerFoundryOperations:
             )
 
     def _development_contract(self, *, run_name: str) -> FoundryEvaluationContract:
-        contract = self._metadata.development_evaluation
+        selection = (
+            None
+            if self._verification_resolution is None
+            else self._verification_resolution.foundry_evaluation
+        )
+        if selection is None:
+            contract = self._metadata.development_evaluation
+            return FoundryEvaluationContract(
+                evaluation_id=contract.resolved_evaluation_id,
+                dataset_id=contract.dataset_id,
+                evaluator_ids=contract.custom_evaluator_ids,
+                run_name=run_name,
+            )
         return FoundryEvaluationContract(
-            evaluation_id=contract.resolved_evaluation_id,
-            dataset_id=contract.dataset_id,
-            evaluator_ids=contract.custom_evaluator_ids,
+            evaluation_id=selection.defaults.development_definition_id,
+            dataset_id=selection.development_dataset_id,
+            evaluator_ids=selection.development_evaluator_ids,
             run_name=run_name,
         )
 
     def _validating_contract(self, *, run_name: str) -> FoundryEvaluationContract:
-        contract = self._metadata.validating_evaluation
+        selection = (
+            None
+            if self._verification_resolution is None
+            else self._verification_resolution.foundry_evaluation
+        )
+        if selection is None:
+            contract = self._metadata.validating_evaluation
+            return FoundryEvaluationContract(
+                evaluation_id=contract.resolved_evaluation_id,
+                dataset_id=contract.dataset_id,
+                evaluator_ids=contract.custom_evaluator_ids,
+                run_name=run_name,
+            )
         return FoundryEvaluationContract(
-            evaluation_id=contract.resolved_evaluation_id,
-            dataset_id=contract.dataset_id,
-            evaluator_ids=contract.custom_evaluator_ids,
+            evaluation_id=selection.defaults.validating_definition_id,
+            dataset_id=selection.validating_dataset_id,
+            evaluator_ids=selection.validating_evaluator_ids,
             run_name=run_name,
         )
 
@@ -1677,6 +1705,7 @@ def build_runtime_controller(
     paths: RuntimePaths | None = None,
     settings: RuntimeSettings | None = None,
     captured_route: RouteFingerprint | str | None = None,
+    verification_resolution: VerificationResolution | None = None,
     policy_path: Path | str | None = None,
     metadata_path: Path | str | None = None,
     pin_path: Path | str | None = None,
@@ -1691,6 +1720,7 @@ def build_runtime_controller(
     state_store_factory: Callable[[Path], JobStateStore] = JobStateStore,
     broker_client_factory: Callable[..., UnixSocketBrokerClient] = UnixSocketBrokerClient,
     foundry_operations_factory: Callable[..., ControllerFoundryOperations] = ControllerFoundryOperations,
+    check_runner_factory: Callable[..., RepositoryCheckRunnerProtocol] = LocalRepositoryCheckRunner,
     comments_factory: Callable[..., BrokerIssueComments] = BrokerIssueComments,
     closure_factory: Callable[..., BrokerClosure] = BrokerClosure,
     policy_loader: Callable[..., RepositoryPolicy] = load_repository_policy,
@@ -1758,8 +1788,12 @@ def build_runtime_controller(
         client=client,
         artifact_state_path=runtime_paths.job_root,
         route_fingerprint=expected_route,
+        verification_resolution=verification_resolution,
         sidecars=sidecars,
         deadline_seconds=runtime_settings.deadline_seconds,
+    )
+    check_runner = check_runner_factory(
+        timeout_seconds=min(runtime_settings.deadline_seconds, 300.0),
     )
     comments = comments_factory(
         client=broker_client,
@@ -1776,6 +1810,7 @@ def build_runtime_controller(
         comments=comments,
         closure=closure,
         rules=_decision_rules(runtime_settings.policy),
+        check_runner=check_runner,
     )
 
 

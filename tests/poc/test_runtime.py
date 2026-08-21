@@ -9,6 +9,7 @@ import pytest
 
 from foundry_opt.poc.bootstrap import BootstrapReceipt, write_bootstrap_receipt
 from foundry_opt.poc.candidate import CandidateWorkspace
+from foundry_opt.poc.config import IssueEvaluatorEntry
 from foundry_opt.poc.controller import OptimizeJobController
 from foundry_opt.poc.evidence import (
     RenderedComment,
@@ -51,6 +52,12 @@ from foundry_opt.poc.runtime import (
     load_runtime_settings,
 )
 from foundry_opt.poc.state import BaselineState, CandidateState, JobIdentity, JobStateStore
+from foundry_opt.poc.verification import (
+    FoundryEvaluationPlan,
+    FoundryEvaluationSelection,
+    VerificationResolution,
+)
+from foundry_opt.verification import VerificationDatasetInput
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -325,6 +332,7 @@ class _FakeFoundryClient:
         self.polled: list[str] = []
         self.downloaded: list[str] = []
         self.evaluated: list[tuple[str, str]] = []
+        self.evaluation_contracts: list[object] = []
         self.deleted: list[str] = []
         self._draft_bytes: dict[str, bytes] = {}
         self._counter = 0
@@ -402,6 +410,7 @@ class _FakeFoundryClient:
         del deadline_monotonic
         key = (reference.version, contract.evaluation_id)
         self.evaluated.append(key)
+        self.evaluation_contracts.append(contract)
         return self.evaluations[key]
 
     def delete_exact_owned_version(
@@ -767,6 +776,125 @@ def test_controller_foundry_operations_candidate_resume_validating_and_cleanup(
     assert idempotent.success is True
     assert idempotent.receipt_id == "cleanup:draft-2"
     assert foundry.deleted.count("draft-2") == 1
+
+
+def test_controller_foundry_operations_uses_issue_supplied_verification_resolution(
+    tmp_path: Path,
+) -> None:
+    repository, base_commit, environment = _create_runtime_repository(tmp_path)
+    paths = load_runtime_paths(repository, environment=environment, job_id="job-7")
+    settings = load_runtime_settings(paths, environment=environment, base_commit=base_commit)
+    identity = build_job_identity(
+        settings=settings,
+        issue_number=7,
+        job_id="job-7",
+        route_fingerprint=_route(),
+    )
+    foundry = _FakeFoundryClient(
+        route=_route(),
+        evaluations={
+            ("draft-1", "eval-development"): _evidence(
+                evaluation_id="eval-development",
+                dataset_id="dataset-issue",
+                version="draft-1",
+                quality_passed=2,
+                quality_failed=2,
+                quality_score=0.50,
+            ),
+            ("draft-2", "eval-development"): _evidence(
+                evaluation_id="eval-development",
+                dataset_id="dataset-issue",
+                version="draft-2",
+                quality_passed=4,
+                quality_failed=0,
+                quality_score=1.00,
+            ),
+            ("draft-2", "eval-validating"): _evidence(
+                evaluation_id="eval-validating",
+                dataset_id="dataset-validating",
+                version="draft-2",
+                quality_passed=3,
+                quality_failed=1,
+                quality_score=0.75,
+            ),
+        },
+    )
+    defaults = FoundryEvaluationPlan(
+        development_definition_id=settings.metadata.development_evaluation.resolved_evaluation_id,
+        development_dataset_id=settings.metadata.development_evaluation.dataset_id,
+        development_evaluator_ids=settings.metadata.development_evaluation.custom_evaluator_ids,
+        validating_definition_id=settings.metadata.validating_evaluation.resolved_evaluation_id,
+        validating_dataset_id=settings.metadata.validating_evaluation.dataset_id,
+        validating_evaluator_ids=settings.metadata.validating_evaluation.custom_evaluator_ids,
+    )
+    resolution = VerificationResolution(
+        mode="foundry_evaluation",
+        evaluation_gate_policy="require_foundry_evaluation",
+        foundry_evaluation=FoundryEvaluationSelection(
+            source="issue",
+            defaults=defaults,
+            issue_dataset=VerificationDatasetInput(dataset_id_or_uri="dataset-issue"),
+            issue_evaluators=(
+                IssueEvaluatorEntry(
+                    evaluator_id="azureai://built-in/evaluators/safety",
+                    weight=2.0,
+                ),
+            ),
+        ),
+        provenance=("issue_dataset", "issue_evaluators"),
+        quantitative_decision_allowed=True,
+    )
+    operations = ControllerFoundryOperations(
+        repository=repository,
+        source_root=settings.policy.source_root,
+        policy=settings.policy,
+        metadata=settings.metadata,
+        client=foundry,
+        artifact_state_path=paths.job_root,
+        route_fingerprint=_route(),
+        verification_resolution=resolution,
+    )
+
+    baseline = operations.evaluate_baseline(identity)
+    workspace = CandidateWorkspace(
+        repository,
+        tmp_path / "candidate-root",
+        base_commit,
+        editable_patterns=("src/**", "tests/**"),
+        source_root="src",
+    )
+    prepared = workspace.prepare(
+        "candidate-one",
+        model="candidate",
+        hypothesis="issue override",
+    )
+    (prepared.workspace_path / "src" / "main.py").write_text(
+        "VALUE = 'candidate'\n",
+        encoding="utf-8",
+    )
+    finalized = workspace.finalize("candidate-one")
+
+    candidate = operations.evaluate_candidate(finalized)
+    validating = operations.evaluate_validating(finalized)
+
+    assert baseline.status == "ok"
+    assert candidate.status == "ok"
+    assert validating.status == "ok"
+    assert [contract.evaluation_id for contract in foundry.evaluation_contracts] == [
+        "eval-development",
+        "eval-development",
+        "eval-validating",
+    ]
+    assert [contract.dataset_id for contract in foundry.evaluation_contracts] == [
+        "dataset-issue",
+        "dataset-issue",
+        "dataset-validating",
+    ]
+    assert [contract.evaluator_ids for contract in foundry.evaluation_contracts] == [
+        ("azureai://built-in/evaluators/safety",),
+        ("azureai://built-in/evaluators/safety",),
+        ("azureai://built-in/evaluators/safety",),
+    ]
 
 
 def test_controller_foundry_operations_candidate_verification_failure_blocks_new_drafts(

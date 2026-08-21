@@ -1,5 +1,66 @@
 {
   "$defs": {
+    "ActivationBinding": {
+      "additionalProperties": false,
+      "description": "Binds one persisted sidecar mutation to an approved plan, receipt, and runtime SHA.",
+      "properties": {
+        "approval_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Approval Hash",
+          "type": "string"
+        },
+        "finalization_hash": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Finalization Hash"
+        },
+        "operation_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Operation Id",
+          "type": "string"
+        },
+        "plan_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Plan Hash",
+          "type": "string"
+        },
+        "receipt_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Receipt Hash",
+          "type": "string"
+        },
+        "runtime_commit": {
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+          "title": "Runtime Commit",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "operation_id",
+        "plan_hash",
+        "approval_hash",
+        "receipt_hash",
+        "runtime_commit"
+      ],
+      "title": "ActivationBinding",
+      "type": "object"
+    },
     "ActivationPlan": {
       "additionalProperties": false,
       "properties": {
@@ -206,6 +267,41 @@
       "title": "DecisionPolicy",
       "type": "object"
     },
+    "DefaultEvaluatorBundle": {
+      "additionalProperties": false,
+      "properties": {
+        "datasets": {
+          "items": {
+            "$ref": "#/$defs/ImmutableDatasetReference"
+          },
+          "title": "Datasets",
+          "type": "array"
+        },
+        "definitions": {
+          "items": {
+            "$ref": "#/$defs/ImmutableDefinitionReference"
+          },
+          "title": "Definitions",
+          "type": "array"
+        },
+        "objective": {
+          "$ref": "#/$defs/ResolvedWeightedObjective"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "objective",
+        "datasets",
+        "definitions"
+      ],
+      "title": "DefaultEvaluatorBundle",
+      "type": "object"
+    },
     "DefinitionPlan": {
       "additionalProperties": false,
       "properties": {
@@ -273,6 +369,110 @@
         "require_aligned_binding"
       ],
       "title": "DeploymentSettings",
+      "type": "object"
+    },
+    "EvaluationLineage": {
+      "additionalProperties": false,
+      "description": "Non-secret evaluation lineage persisted in the sidecar after successful activation.",
+      "properties": {
+        "activation_binding": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ActivationBinding"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "bundle_objective_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Bundle Objective Hash",
+          "type": "string"
+        },
+        "dataset_strategy": {
+          "enum": [
+            "trace",
+            "synthetic_only"
+          ],
+          "title": "Dataset Strategy",
+          "type": "string"
+        },
+        "development_case_count": {
+          "minimum": 0,
+          "title": "Development Case Count",
+          "type": "integer"
+        },
+        "evaluator_generation_operation_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Evaluator Generation Operation Id"
+        },
+        "evaluator_provenance": {
+          "enum": [
+            "reused_existing",
+            "auto_generated_unreviewed",
+            "issue_supplied_existing"
+          ],
+          "title": "Evaluator Provenance",
+          "type": "string"
+        },
+        "generation_context_fingerprint": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Generation Context Fingerprint",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "split_algorithm_version": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Split Algorithm Version",
+          "type": "string"
+        },
+        "split_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Split Hash",
+          "type": "string"
+        },
+        "split_lineage_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Split Lineage Hash",
+          "type": "string"
+        },
+        "validating_case_count": {
+          "minimum": 0,
+          "title": "Validating Case Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "split_algorithm_version",
+        "split_hash",
+        "split_lineage_hash",
+        "development_case_count",
+        "validating_case_count",
+        "dataset_strategy",
+        "generation_context_fingerprint",
+        "evaluator_provenance",
+        "bundle_objective_hash"
+      ],
+      "title": "EvaluationLineage",
       "type": "object"
     },
     "EvaluatorNormalization": {
@@ -409,6 +609,49 @@
       "title": "EvaluatorPlan",
       "type": "object"
     },
+    "EvaluatorReference": {
+      "additionalProperties": false,
+      "properties": {
+        "evaluator_id": {
+          "anyOf": [
+            {
+              "pattern": "^azureai://accounts/[^/]+/projects/[^/]+/evaluators/[^/]+/versions/[^/]+$",
+              "type": "string"
+            },
+            {
+              "pattern": "^azureai://built-in/evaluators/[^/]+$",
+              "type": "string"
+            },
+            {
+              "pattern": "^azureml://registries/[^/]+/evaluators/[^/]+/versions/[^/]+$",
+              "type": "string"
+            }
+          ],
+          "title": "Evaluator Id"
+        },
+        "provenance": {
+          "enum": [
+            "reused_existing",
+            "auto_generated_unreviewed",
+            "issue_supplied_existing"
+          ],
+          "title": "Provenance",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "evaluator_id",
+        "provenance"
+      ],
+      "title": "EvaluatorReference",
+      "type": "object"
+    },
     "FoundryProjectSettings": {
       "additionalProperties": false,
       "properties": {
@@ -487,6 +730,48 @@
         "required_pass_rate"
       ],
       "title": "HardGuardrail",
+      "type": "object"
+    },
+    "ImmutableDatasetReference": {
+      "additionalProperties": false,
+      "properties": {
+        "dataset_id": {
+          "pattern": "^azureai://accounts/[^/]+/projects/[^/]+/data/[^/]+/versions/[^/]+$",
+          "title": "Dataset Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "dataset_id"
+      ],
+      "title": "ImmutableDatasetReference",
+      "type": "object"
+    },
+    "ImmutableDefinitionReference": {
+      "additionalProperties": false,
+      "properties": {
+        "definition_id": {
+          "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9._-]*|azureai://accounts/[^/]+/projects/[^/]+/evaluationDefinitions/[^/]+/versions/[^/]+)$",
+          "title": "Definition Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "definition_id"
+      ],
+      "title": "ImmutableDefinitionReference",
       "type": "object"
     },
     "OnboardingBounds": {
@@ -640,6 +925,63 @@
         "previous_validating_definition_id"
       ],
       "title": "ReplacementLineage",
+      "type": "object"
+    },
+    "ResolvedEvaluator": {
+      "additionalProperties": false,
+      "properties": {
+        "normalization": {
+          "$ref": "#/$defs/EvaluatorNormalization"
+        },
+        "reference": {
+          "$ref": "#/$defs/EvaluatorReference"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "weight": {
+          "title": "Weight",
+          "type": "number"
+        }
+      },
+      "required": [
+        "reference",
+        "normalization",
+        "weight"
+      ],
+      "title": "ResolvedEvaluator",
+      "type": "object"
+    },
+    "ResolvedWeightedObjective": {
+      "additionalProperties": false,
+      "properties": {
+        "evaluators": {
+          "items": {
+            "$ref": "#/$defs/ResolvedEvaluator"
+          },
+          "title": "Evaluators",
+          "type": "array"
+        },
+        "objective_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Objective Hash",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "evaluators",
+        "objective_hash"
+      ],
+      "title": "ResolvedWeightedObjective",
       "type": "object"
     },
     "RuntimeProtocolSettings": {
@@ -825,6 +1167,9 @@
           "minLength": 1,
           "title": "Source Root",
           "type": "string"
+        },
+        "verification": {
+          "$ref": "#/$defs/VerificationSettings"
         }
       },
       "required": [
@@ -885,6 +1230,127 @@
         "eligible"
       ],
       "title": "TelemetryProbe",
+      "type": "object"
+    },
+    "VerificationBundle": {
+      "additionalProperties": false,
+      "properties": {
+        "default_evaluator_bundle": {
+          "$ref": "#/$defs/DefaultEvaluatorBundle"
+        },
+        "development_dataset": {
+          "$ref": "#/$defs/ImmutableDatasetReference"
+        },
+        "development_definition": {
+          "$ref": "#/$defs/ImmutableDefinitionReference"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "validating_dataset": {
+          "$ref": "#/$defs/ImmutableDatasetReference"
+        },
+        "validating_definition": {
+          "$ref": "#/$defs/ImmutableDefinitionReference"
+        }
+      },
+      "required": [
+        "development_dataset",
+        "validating_dataset",
+        "development_definition",
+        "validating_definition",
+        "default_evaluator_bundle"
+      ],
+      "title": "VerificationBundle",
+      "type": "object"
+    },
+    "VerificationCheckSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "command",
+            "check"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "value": {
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "value"
+      ],
+      "title": "VerificationCheckSpec",
+      "type": "object"
+    },
+    "VerificationSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "bundle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VerificationBundle"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "evaluation_gate_policy": {
+          "default": "allow_no_evidence",
+          "enum": [
+            "require_foundry_evaluation",
+            "allow_repository_checks",
+            "allow_no_evidence"
+          ],
+          "title": "Evaluation Gate Policy",
+          "type": "string"
+        },
+        "lineage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvaluationLineage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "mode": {
+          "default": "off",
+          "enum": [
+            "off",
+            "optional",
+            "required"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "repository_checks": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/VerificationCheckSpec"
+          },
+          "title": "Repository Checks",
+          "type": "array"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "title": "VerificationSettings",
       "type": "object"
     }
   },

@@ -9,8 +9,10 @@ from typing import Callable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from foundry_opt.poc.checks import RepositoryCheckResult
 from foundry_opt.poc.candidate import FinalizedCandidate, PreparedCandidate
 from foundry_opt.poc.decision import CandidateAssessment, Decision, EvaluationSummary
+from foundry_opt.poc.verification import VerificationResolution
 
 
 STATE_SCHEMA_VERSION = 1
@@ -80,12 +82,12 @@ class ClosureReceipt(_FrozenModel):
 
 
 class BaselineState(_FrozenModel):
-    evaluation: EvaluationSummary
+    evaluation: EvaluationSummary | None = None
     comment_receipt: IssueCommentReceipt | None = None
 
     @model_validator(mode="after")
     def validate_evaluation(self) -> "BaselineState":
-        if self.evaluation.run_kind != "development":
+        if self.evaluation is not None and self.evaluation.run_kind != "development":
             raise ValueError("baseline evaluation must use the development dataset")
         return self
 
@@ -95,6 +97,7 @@ class CandidateState(_FrozenModel):
     finalized: FinalizedCandidate | None = None
     development: EvaluationSummary | None = None
     validating: EvaluationSummary | None = None
+    repository_checks: tuple[RepositoryCheckResult, ...] = ()
     assessment: CandidateAssessment | None = None
     comment_receipt: IssueCommentReceipt | None = None
     draft_id: str | None = Field(default=None, min_length=1, max_length=256)
@@ -119,25 +122,67 @@ class CandidateState(_FrozenModel):
             raise ValueError("validating evidence must use the validating dataset")
         if self.assessment is not None and self.assessment.candidate_id != self.handoff.candidate_id:
             raise ValueError("candidate assessment must match the handoff candidate")
+        check_ids = [check.spec.casefold_key for check in self.repository_checks]
+        if len(check_ids) != len(set(check_ids)):
+            raise ValueError("repository check results must be unique")
         if self.cleanup_receipt is not None:
             if self.draft_id is None or self.cleanup_receipt.draft_id != self.draft_id:
                 raise ValueError("cleanup receipts must bind to the candidate draft")
         return self
+
+    @property
+    def completed(self) -> bool:
+        if self.assessment is None:
+            return False
+        if self.assessment.outcome == "invalid":
+            return False
+        if self.assessment.outcome == "platform_failure":
+            return self.development is not None or bool(self.repository_checks)
+        return True
 
 
 class JobState(_FrozenModel):
     schema_version: Literal[1] = STATE_SCHEMA_VERSION
     generation: int = Field(default=0, ge=0)
     identity: JobIdentity
+    verification: VerificationResolution | None = None
     baseline: BaselineState | None = None
     candidates: tuple[CandidateState, ...] = ()
     decision: Decision | None = None
     provisional_winner_id: str | None = Field(default=None, pattern=r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
     final_winner_id: str | None = Field(default=None, pattern=r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+    selected_candidate_id: str | None = Field(default=None, pattern=r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
     final_comment_receipt: IssueCommentReceipt | None = None
     projection_receipt: ProjectionReceipt | None = None
     no_winner_receipt: ClosureReceipt | None = None
-    terminal_outcome: Literal["winner", "no_winner", "platform_failure"] | None = None
+    terminal_outcome: Literal[
+        "winner",
+        "recommended",
+        "proposed_unverified",
+        "no_winner",
+        "platform_failure",
+    ] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_legacy_selected_candidate(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        payload = dict(value)
+        if payload.get("selected_candidate_id") is None:
+            if isinstance(payload.get("final_winner_id"), str):
+                payload["selected_candidate_id"] = payload["final_winner_id"]
+            elif isinstance(payload.get("projection_receipt"), dict):
+                candidate_id = payload["projection_receipt"].get("candidate_id")
+                if isinstance(candidate_id, str):
+                    payload["selected_candidate_id"] = candidate_id
+            elif isinstance(payload.get("decision"), dict):
+                selected = payload["decision"].get("selected_candidate_id")
+                if isinstance(selected, str):
+                    payload["selected_candidate_id"] = selected
+                elif isinstance(payload["decision"].get("winner_id"), str):
+                    payload["selected_candidate_id"] = payload["decision"]["winner_id"]
+        return payload
 
     @model_validator(mode="after")
     def validate_state(self) -> "JobState":
@@ -148,23 +193,38 @@ class JobState(_FrozenModel):
         for name, value in {
             "provisional_winner_id": self.provisional_winner_id,
             "final_winner_id": self.final_winner_id,
+            "selected_candidate_id": self.selected_candidate_id,
         }.items():
             if value is not None and value not in by_id:
                 raise ValueError(f"{name} must reference a known candidate")
-        if self.final_winner_id is not None and self.terminal_outcome != "winner":
-            raise ValueError("winner projections require terminal_outcome='winner'")
+        if self.final_winner_id is not None:
+            if self.terminal_outcome != "winner":
+                raise ValueError("winner projections require terminal_outcome='winner'")
+            if self.selected_candidate_id != self.final_winner_id:
+                raise ValueError("winner jobs must select the winning candidate")
         if self.projection_receipt is not None:
-            if self.final_winner_id is None:
-                raise ValueError("projection receipts require a final winner")
-            if self.projection_receipt.candidate_id != self.final_winner_id:
-                raise ValueError("projection receipt must match the final winner")
-        if self.no_winner_receipt is not None and self.terminal_outcome == "winner":
-            raise ValueError("winner jobs cannot carry a no-winner closure receipt")
+            if self.selected_candidate_id is None:
+                raise ValueError("projection receipts require a selected candidate")
+            if self.projection_receipt.candidate_id != self.selected_candidate_id:
+                raise ValueError("projection receipt must match the selected candidate")
+        if self.no_winner_receipt is not None and self.terminal_outcome in {
+            "winner",
+            "recommended",
+            "proposed_unverified",
+        }:
+            raise ValueError("positive recommendation jobs cannot carry a no-winner closure receipt")
+        if self.terminal_outcome in {"recommended", "proposed_unverified"}:
+            if self.selected_candidate_id is None:
+                raise ValueError("positive recommendation jobs require a selected candidate")
+            if self.final_winner_id is not None:
+                raise ValueError("non-quantitative recommendations cannot declare a winner")
         if self.decision is not None:
             if self.decision.provisional_winner_id != self.provisional_winner_id:
                 raise ValueError("decision provisional winner must match state")
             if self.decision.winner_id != self.final_winner_id:
                 raise ValueError("decision winner must match state")
+            if self.decision.selected_candidate_id != self.selected_candidate_id:
+                raise ValueError("decision selected candidate must match state")
         return self
 
     @property
@@ -174,11 +234,13 @@ class JobState(_FrozenModel):
 
     @property
     def completed_candidate_count(self) -> int:
-        return sum(
-            1
-            for candidate in self.candidates
-            if candidate.finalized is not None and candidate.development is not None
-        )
+        return sum(1 for candidate in self.candidates if candidate.completed)
+
+    @property
+    def verification_mode(self) -> str:
+        if self.verification is not None:
+            return self.verification.mode
+        return "foundry_evaluation"
 
     def candidate(self, candidate_id: str) -> CandidateState | None:
         for candidate in self.candidates:
@@ -188,6 +250,9 @@ class JobState(_FrozenModel):
 
     def with_baseline(self, baseline: BaselineState) -> "JobState":
         return self.model_copy(update={"baseline": baseline})
+
+    def with_verification(self, verification: VerificationResolution) -> "JobState":
+        return self.model_copy(update={"verification": verification})
 
     def with_candidate(self, candidate: CandidateState) -> "JobState":
         records = {item.handoff.candidate_id: item for item in self.candidates}
@@ -201,6 +266,7 @@ class JobState(_FrozenModel):
                 "decision": decision,
                 "provisional_winner_id": None if decision is None else decision.provisional_winner_id,
                 "final_winner_id": None if decision is None else decision.winner_id,
+                "selected_candidate_id": None if decision is None else decision.selected_candidate_id,
             }
         )
 

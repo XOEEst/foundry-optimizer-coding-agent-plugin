@@ -22,6 +22,8 @@ from foundry_opt.bootstrap.contracts import (
     ResolvedWeightedObjective,
     RootRegistry,
     RuntimeProtocolSettings,
+    VerificationBundle,
+    VerificationSettings,
 )
 from foundry_opt.bootstrap.errors import BootstrapConfigError
 from foundry_opt.poc.config import load_strict_yaml_mapping
@@ -89,13 +91,19 @@ def import_legacy_single_agent_documents(*, lock_document: str | bytes, policy_d
             max_candidates=int(policy_payload['max_candidates']),
             primary_metric=str(policy_payload['primary_metric']),
             decision_policy=DecisionPolicy(**policy_payload['decision_rules']),
-            development_dataset=ImmutableDatasetReference(dataset_id=str(development['dataset_id'])),
-            validating_dataset=ImmutableDatasetReference(dataset_id=str(validating['dataset_id'])),
-            development_definition=ImmutableDefinitionReference(definition_id=str(development['resolved_evaluation_id'])),
-            validating_definition=ImmutableDefinitionReference(definition_id=str(validating['resolved_evaluation_id'])),
-            default_evaluator_bundle=bundle,
             hard_guardrails=tuple(HardGuardrail(evaluator_name=name, required_pass_rate=float(config['required_pass_rate']), required=bool(config.get('required', True))) for name, config in policy_payload['hard_guardrails'].items()),
             deployment=DeploymentSettings(environment='foundry-production', enabled=True, require_aligned_binding=True),
+            verification=VerificationSettings(
+                mode='required',
+                evaluation_gate_policy='require_foundry_evaluation',
+                bundle=VerificationBundle(
+                    development_dataset=ImmutableDatasetReference(dataset_id=str(development['dataset_id'])),
+                    validating_dataset=ImmutableDatasetReference(dataset_id=str(validating['dataset_id'])),
+                    development_definition=ImmutableDefinitionReference(definition_id=str(development['resolved_evaluation_id'])),
+                    validating_definition=ImmutableDefinitionReference(definition_id=str(validating['resolved_evaluation_id'])),
+                    default_evaluator_bundle=bundle,
+                ),
+            ),
         )
         registry = RootRegistry(
             distribution=DistributionSettings(repository=str(lock_payload['repository_url']), channel='legacy-import', pin=str(lock_payload['commit'])),

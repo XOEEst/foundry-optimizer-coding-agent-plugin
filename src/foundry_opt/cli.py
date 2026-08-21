@@ -10,17 +10,22 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import httpx
 import typer
 from pydantic import ValidationError
 
 from foundry_opt import __version__
+from foundry_opt.bootstrap.errors import BootstrapConfigError
 from foundry_opt.bootstrap.cli import register_bootstrap_commands
 from foundry_opt.bootstrap.workflow_integration import (
     build_registered_deployment_plan,
+    normalize_issue_author_permission,
     resolve_registry_selection,
+    verify_issue_check_authority,
+    verify_issue_dataset_authority,
+    verify_issue_evaluator_authority,
 )
 from foundry_opt.poc import runtime as poc_runtime
 from foundry_opt.poc.auth import (
@@ -50,12 +55,15 @@ from foundry_opt.poc.deploy import (
     DeploymentError,
     DeploymentGuardrailError,
     DeploymentPostPublishError,
+    DeploymentRepositoryChecksError,
     DeploymentSupersededError,
     load_deployment_settings,
     load_registered_deployment_settings,
+    load_registered_verification_settings,
     publish_deployment,
     publish_registered_deployment,
     run_deployment_preflight,
+    verify_registered_deployment,
 )
 from foundry_opt.poc.foundry import (
     AzureProjectsEvaluationBackend,
@@ -105,6 +113,12 @@ from foundry_opt.poc.state import (
     StateError,
 )
 from foundry_opt.poc.source import SourcePackagingError
+from foundry_opt.poc.verification import (
+    FoundryEvaluationPlan,
+    FoundryEvaluationSelection,
+    VerificationResolution,
+    resolve_verification,
+)
 
 
 app = typer.Typer(no_args_is_help=True, pretty_exceptions_enable=False)
@@ -135,6 +149,7 @@ _GITHUB_WORKSPACE_ENV = "GITHUB_WORKSPACE"
 _GITHUB_HEAD_REF_ENV = "GITHUB_HEAD_REF"
 _GITHUB_REF_NAME_ENV = "GITHUB_REF_NAME"
 _GITHUB_BINDING_ENV = "FOUNDRY_OPT_GITHUB_BINDING"
+_GITHUB_API_VERSION = "2022-11-28"
 _PULL_REQUEST_NUMBER_ENV = "FOUNDRY_OPT_PULL_REQUEST_NUMBER"
 _PULL_REQUEST_BASE_BRANCH_ENV = "FOUNDRY_OPT_PULL_REQUEST_BASE_BRANCH"
 _PULL_REQUEST_HEAD_BRANCH_ENV = "FOUNDRY_OPT_PULL_REQUEST_HEAD_BRANCH"
@@ -151,6 +166,7 @@ _LINKED_ISSUE_REFERENCE_PATTERN = re.compile(
 
 _JOB_COMMAND_ERRORS = (
     AuthError,
+    BootstrapConfigError,
     CandidateError,
     CleanupError,
     ContractError,
@@ -193,6 +209,7 @@ class _JobRuntimeContext:
     settings: RuntimeSettings
     request: OptimizeIssueRequest
     request_digest_sha256: str
+    verification_resolution: VerificationResolution
     state: JobState | None
     controller: OptimizeJobController | None
     binding: _LoadedBinding | None
@@ -223,6 +240,19 @@ class _PullRequestBindingInputs:
 class _AcceptanceFoundryHandle:
     operations: ControllerFoundryOperations
     close: Callable[[], None]
+
+
+@dataclass(frozen=True, slots=True)
+class _SyntheticVerificationSettings:
+    evaluation_gate_policy: str
+    repository_checks: tuple[object, ...] = ()
+    bundle: object | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _SyntheticVerificationProfile:
+    verification: _SyntheticVerificationSettings
+    foundry_evaluation_plan: FoundryEvaluationPlan | None = None
 
 
 @app.command()
@@ -429,7 +459,9 @@ def deploy_plan(
                 exact_source=exact_source,
                 use_repository_default_evaluators=use_repository_default_evaluators,
             )
-            _echo_json({"status": "planned", **asdict(plan)})
+            payload = asdict(plan)
+            payload["verification"] = plan.verification.model_dump(mode="json")
+            _echo_json({"status": "planned", **payload})
         except _JOB_COMMAND_ERRORS as error:
             _emit_blocked(error)
 
@@ -483,17 +515,19 @@ def deploy_publish(
             _write_json_document(receipt, payload)
         _echo_json(payload)
     except DeploymentGuardrailError as error:
-        _echo_json(
-            {
-                "error": _redact_text(str(error)) or "deployment guardrails failed",
-                "evaluation_link": error.evaluation_link,
-                "guardrails": [
-                    item.model_dump(mode="json")
-                    for item in error.guardrails
-                ],
-                "status": "blocked",
-            }
-        )
+        payload = {
+            "error": _redact_text(str(error)) or "deployment guardrails failed",
+            "evaluation_link": error.evaluation_link,
+            "guardrails": [
+                item.model_dump(mode="json")
+                for item in error.guardrails
+            ],
+            "status": "blocked",
+            "verification": error.verification.model_dump(mode="json"),
+        }
+        if receipt is not None:
+            _write_json_document(receipt, payload)
+        _echo_json(payload)
         raise typer.Exit(code=2)
     except DeploymentSupersededError as error:
         payload = {
@@ -505,14 +539,96 @@ def deploy_publish(
         if receipt is not None:
             _write_json_document(receipt, payload)
         _echo_json(payload)
+    except DeploymentRepositoryChecksError as error:
+        payload = {
+            "error": (
+                _redact_text(str(error))
+                or "deployment repository checks did not all pass"
+            ),
+            "status": "blocked",
+            "verification": error.verification.model_dump(mode="json"),
+        }
+        if receipt is not None:
+            _write_json_document(receipt, payload)
+        _echo_json(payload)
+        raise typer.Exit(code=2)
     except DeploymentPostPublishError as error:
-        _echo_json(
-            {
-                "error": _redact_text(str(error)) or "post-publish verification failed",
-                "published_version": error.reference.version,
-                "status": "blocked",
-            }
+        payload = {
+            "error": _redact_text(str(error)) or "post-publish verification failed",
+            "published_version": error.reference.version,
+            "status": "blocked",
+        }
+        if receipt is not None:
+            _write_json_document(receipt, payload)
+        _echo_json(payload)
+        raise typer.Exit(code=2)
+    except _JOB_COMMAND_ERRORS as error:
+        _emit_blocked(error)
+
+
+@deploy_app.command("verify-registered")
+def deploy_verify_registered(
+    repository: Path = typer.Option(Path("."), "--repository"),
+    repo_agent_id: str = typer.Option(..., "--repo-agent-id"),
+    exact_source: str = typer.Option(..., "--exact-source"),
+    receipt: Path | None = typer.Option(None, "--receipt"),
+    artifact_root: Path | None = typer.Option(
+        None,
+        "--artifact-root",
+        envvar=DEPLOYMENT_ROOT_ENV,
+    ),
+    deadline_seconds: float = typer.Option(
+        DEFAULT_DEADLINE_SECONDS,
+        "--deadline-seconds",
+        envvar=DEADLINE_SECONDS_ENV,
+    ),
+) -> None:
+    """Run the selected deployment gate without creating a regular version."""
+
+    try:
+        settings = load_registered_verification_settings(
+            repository,
+            repo_agent_id=repo_agent_id,
+            exact_source=exact_source,
+            environment=os.environ,
+            artifact_root=artifact_root,
+            deadline_seconds=deadline_seconds,
         )
+        result = verify_registered_deployment(
+            settings,
+            environment=os.environ,
+        )
+        payload = result.model_dump(mode="json")
+        if receipt is not None:
+            _write_json_document(receipt, payload)
+        _echo_json(payload)
+    except DeploymentGuardrailError as error:
+        payload = {
+            "error": _redact_text(str(error)) or "deployment guardrails failed",
+            "evaluation_link": error.evaluation_link,
+            "guardrails": [
+                item.model_dump(mode="json")
+                for item in error.guardrails
+            ],
+            "status": "blocked",
+            "verification": error.verification.model_dump(mode="json"),
+        }
+        if receipt is not None:
+            _write_json_document(receipt, payload)
+        _echo_json(payload)
+        raise typer.Exit(code=2)
+    except DeploymentRepositoryChecksError as error:
+        payload = {
+            "error": (
+                _redact_text(str(error))
+                or "deployment repository checks did not all pass"
+            ),
+            "status": "blocked",
+            "verification": error.verification.model_dump(mode="json"),
+        }
+        if receipt is not None:
+            _write_json_document(receipt, payload)
+        _echo_json(payload)
         raise typer.Exit(code=2)
     except _JOB_COMMAND_ERRORS as error:
         _emit_blocked(error)
@@ -555,18 +671,20 @@ def deploy_publish_registered(
             _write_json_document(receipt, payload)
         _echo_json(payload)
     except DeploymentGuardrailError as error:
-        _echo_json(
-            {
-                "error": _redact_text(str(error))
-                or "deployment guardrails failed",
-                "evaluation_link": error.evaluation_link,
-                "guardrails": [
-                    item.model_dump(mode="json")
-                    for item in error.guardrails
-                ],
-                "status": "blocked",
-            }
-        )
+        payload = {
+            "error": _redact_text(str(error))
+            or "deployment guardrails failed",
+            "evaluation_link": error.evaluation_link,
+            "guardrails": [
+                item.model_dump(mode="json")
+                for item in error.guardrails
+            ],
+            "status": "blocked",
+            "verification": error.verification.model_dump(mode="json"),
+        }
+        if receipt is not None:
+            _write_json_document(receipt, payload)
+        _echo_json(payload)
         raise typer.Exit(code=2)
     except DeploymentSupersededError as error:
         payload = {
@@ -578,15 +696,29 @@ def deploy_publish_registered(
         if receipt is not None:
             _write_json_document(receipt, payload)
         _echo_json(payload)
+    except DeploymentRepositoryChecksError as error:
+        payload = {
+            "error": (
+                _redact_text(str(error))
+                or "deployment repository checks did not all pass"
+            ),
+            "status": "blocked",
+            "verification": error.verification.model_dump(mode="json"),
+        }
+        if receipt is not None:
+            _write_json_document(receipt, payload)
+        _echo_json(payload)
+        raise typer.Exit(code=2)
     except DeploymentPostPublishError as error:
-        _echo_json(
-            {
-                "error": _redact_text(str(error))
-                or "post-publish verification failed",
-                "published_version": error.reference.version,
-                "status": "blocked",
-            }
-        )
+        payload = {
+            "error": _redact_text(str(error))
+            or "post-publish verification failed",
+            "published_version": error.reference.version,
+            "status": "blocked",
+        }
+        if receipt is not None:
+            _write_json_document(receipt, payload)
+        _echo_json(payload)
         raise typer.Exit(code=2)
     except _JOB_COMMAND_ERRORS as error:
         _emit_blocked(error)
@@ -600,15 +732,7 @@ def issue_parse(
 ) -> None:
     """Parse an optimize issue and optionally prove it narrows policy."""
 
-    parsed = parse_issue_body(body_file.read_text(encoding="utf-8"))
-    request = OptimizeIssueRequest(
-        goal=parsed.goal,
-        observed_failures=(parsed.observed_failures,),
-        constraints=(parsed.constraints,),
-        candidate_budget=parsed.candidate_budget,
-        model_subset=parsed.candidate_models or None,
-        editable_scope_subset=parsed.editable_scope or None,
-    )
+    request = _issue_request_from_body(body_file.read_text(encoding="utf-8"))
     narrowed = None
     if policy_path is not None:
         policy = load_repository_policy(
@@ -653,6 +777,23 @@ def broker_launch(
         head_ref=head_ref,
         ref_name=ref_name,
     )
+    issue_author_login, issue_author_permission = _issue_author_binding_fields(
+        issue_binding.repository,
+        issue_number=issue_binding.issue_number,
+        token=token,
+    )
+    try:
+        issue_binding = IssueBinding.model_validate(
+            {
+                **issue_binding.model_dump(mode="json"),
+                "issue_author_login": issue_author_login,
+                "issue_author_permission": issue_author_permission,
+            }
+        )
+    except ValidationError as error:
+        raise typer.BadParameter(
+            "issue author lookup returned invalid trusted binding data"
+        ) from error
     _write_binding(binding, issue=issue_binding, pull_request=None)
     socket = socket.resolve()
     socket.parent.mkdir(parents=True, exist_ok=True)
@@ -823,7 +964,10 @@ def job_start(
             state_root=state_root,
             deadline_seconds=deadline_seconds,
         )
-        state = runtime.controller.start(runtime.identity)
+        state = runtime.controller.start(
+            runtime.identity,
+            verification=runtime.verification_resolution,
+        )
         refreshed_binding = _ensure_runtime_pull_request_binding(
             runtime=runtime,
             identity=runtime.identity,
@@ -1341,9 +1485,15 @@ def _prepare_start_runtime(
     if start.issue_binding is not None:
         _assert_issue_binding_matches_metadata(start.issue_binding, settings.metadata)
     narrowed = _narrow_runtime_settings(settings, start.request)
+    _verify_issue_override_authority(start.request, binding=start.binding)
     if not paths.job_state_path.is_file():
         _delete_file_if_present(_issue_request_path(paths.job_root))
     request_digest_sha256 = _request_digest(start.request)
+    verification_resolution = _resolve_runtime_verification(
+        repository_root=repository_root,
+        settings=narrowed,
+        request=start.request,
+    )
     route = capture_route_fingerprint(
         repository=repository_root,
         environment=os.environ,
@@ -1364,18 +1514,20 @@ def _prepare_start_runtime(
         paths=paths,
         settings=narrowed,
         captured_route=route,
+        verification_resolution=verification_resolution,
         deadline_seconds=deadline_seconds,
     )
     return _JobRuntimeContext(
-        repository_root=repository_root,
+    repository_root=repository_root,
         paths=paths,
         settings=narrowed,
         request=start.request,
         request_digest_sha256=request_digest_sha256,
-        state=None,
-        controller=controller,
-        binding=start.binding,
-        identity=identity,
+    verification_resolution=verification_resolution,
+    state=None,
+    controller=controller,
+    binding=start.binding,
+    identity=identity,
     )
 
 
@@ -1435,9 +1587,18 @@ def _load_existing_runtime(
             "persisted optimize-job issue request does not match the current issue body"
         )
     narrowed = _narrow_runtime_settings(settings, request)
+    verification_resolution = _resolve_runtime_verification(
+        repository_root=repository_root,
+        settings=narrowed,
+        request=request,
+    )
     if state.identity.min_candidates != narrowed.policy.min_candidates:
         raise RuntimeIntegrationError(
             "persisted optimize-job issue request does not match the trusted optimize-job identity"
+        )
+    if state.verification is not None and state.verification != verification_resolution:
+        raise RuntimeIntegrationError(
+            "persisted optimize-job verification resolution does not match current runtime inputs"
         )
     _assert_persisted_runtime_identity(
         state=state,
@@ -1459,6 +1620,7 @@ def _load_existing_runtime(
             paths=paths,
             settings=narrowed,
             captured_route=state.identity.route_fingerprint,
+            verification_resolution=verification_resolution,
             deadline_seconds=deadline_seconds,
         )
     return _JobRuntimeContext(
@@ -1467,6 +1629,7 @@ def _load_existing_runtime(
         settings=narrowed,
         request=request,
         request_digest_sha256=request_digest_sha256,
+        verification_resolution=verification_resolution,
         state=state,
         controller=controller,
         binding=loaded_binding,
@@ -1577,7 +1740,11 @@ def _resolve_start_context(
     event_body: str | None = None
     if event is not None:
         event_binding, event_body = _load_issue_event(event)
-    if loaded_binding is not None and event_binding is not None and loaded_binding.issue != event_binding:
+    if (
+        loaded_binding is not None
+        and event_binding is not None
+        and not _same_issue_binding_identity(loaded_binding.issue, event_binding)
+    ):
         raise typer.BadParameter("issue event and trusted binding do not describe the same optimize job")
     resolved_issue_number = _resolve_issue_number(
         explicit=issue_number,
@@ -1611,7 +1778,11 @@ def _resolve_job_reference(
 ) -> tuple[str, _LoadedBinding | None]:
     loaded_binding = _load_binding(binding) if binding is not None else None
     event_binding = _issue_binding_from_event(event) if event is not None else None
-    if loaded_binding is not None and event_binding is not None and loaded_binding.issue != event_binding:
+    if (
+        loaded_binding is not None
+        and event_binding is not None
+        and not _same_issue_binding_identity(loaded_binding.issue, event_binding)
+    ):
         raise typer.BadParameter("issue event and trusted binding do not describe the same optimize job")
     if job_id is not None:
         if loaded_binding is not None and loaded_binding.issue.job_id != job_id:
@@ -1644,6 +1815,19 @@ def _resolve_issue_number(
     if len(set(values)) != 1:
         raise typer.BadParameter("issue_number is inconsistent across the trusted inputs")
     return values[0]
+
+
+def _same_issue_binding_identity(
+    left: IssueBinding,
+    right: IssueBinding,
+) -> bool:
+    return (
+        left.repository == right.repository
+        and left.issue_number == right.issue_number
+        and left.job_id == right.job_id
+        and left.comment_author_login.casefold()
+        == right.comment_author_login.casefold()
+    )
 
 
 def _resolve_job_id(
@@ -1694,20 +1878,93 @@ def _load_issue_event(path: Path) -> tuple[IssueBinding, str]:
 
 def _issue_request_from_body(body: str) -> OptimizeIssueRequest:
     parsed = parse_issue_body(body)
-    return OptimizeIssueRequest(
-        repo_agent_id=None if parsed.target == "default" else parsed.target,
-        goal=parsed.goal,
-        observed_failures=(parsed.observed_failures,),
-        constraints=(parsed.constraints,),
-        candidate_budget=parsed.candidate_budget,
-        model_subset=parsed.candidate_models or None,
-        editable_scope_subset=parsed.editable_scope or None,
-        issue_evaluators=list(parsed.issue_evaluators) or None,
+    return OptimizeIssueRequest.from_document(
+        {
+            "target": parsed.target,
+            "goal": parsed.goal,
+            "observed_failures": [parsed.observed_failures],
+            "constraints": [parsed.constraints],
+            "candidate_budget": parsed.candidate_budget,
+            "model_subset": list(parsed.candidate_models) or None,
+            "editable_scope_subset": list(parsed.editable_scope) or None,
+            "issue_evaluators": list(parsed.issue_evaluators) or None,
+            "verification_dataset": parsed.verification_dataset,
+            "verification_checks": list(parsed.verification_checks) or None,
+            "acknowledge_no_evidence": parsed.acknowledge_no_evidence,
+        }
     )
 
 
 def _issue_request_path(job_root: Path) -> Path:
     return (job_root / _ISSUE_REQUEST_FILENAME).resolve(strict=False)
+
+
+def _runtime_foundry_plan(settings: RuntimeSettings) -> FoundryEvaluationPlan:
+    return FoundryEvaluationPlan(
+        development_definition_id=settings.metadata.development_evaluation.resolved_evaluation_id,
+        development_dataset_id=settings.metadata.development_evaluation.dataset_id,
+        development_evaluator_ids=settings.metadata.development_evaluation.custom_evaluator_ids,
+        validating_definition_id=settings.metadata.validating_evaluation.resolved_evaluation_id,
+        validating_dataset_id=settings.metadata.validating_evaluation.dataset_id,
+        validating_evaluator_ids=settings.metadata.validating_evaluation.custom_evaluator_ids,
+    )
+
+
+def _legacy_foundry_resolution(settings: RuntimeSettings) -> VerificationResolution:
+    return VerificationResolution(
+        mode="foundry_evaluation",
+        evaluation_gate_policy="require_foundry_evaluation",
+        foundry_evaluation=FoundryEvaluationSelection(
+            source="runtime_metadata",
+            defaults=_runtime_foundry_plan(settings),
+        ),
+        provenance=("runtime_metadata_defaults",),
+        quantitative_decision_allowed=True,
+    )
+
+
+def _verify_issue_override_authority(
+    request: OptimizeIssueRequest,
+    *,
+    binding: _LoadedBinding | None,
+) -> None:
+    permission = None if binding is None else binding.issue.issue_author_permission
+    verify_issue_evaluator_authority(permission, request.issue_evaluators)
+    verify_issue_dataset_authority(permission, request.verification_dataset)
+    verify_issue_check_authority(permission, request.verification_checks)
+
+
+def _resolve_runtime_verification(
+    *,
+    repository_root: Path,
+    settings: RuntimeSettings,
+    request: OptimizeIssueRequest,
+) -> VerificationResolution:
+    if request.explicit_target is None and (repository_root / ".foundry-opt" / "registry.yaml").is_file():
+        selection = resolve_registry_selection(
+            repository_root,
+            repo_agent_id=(
+                None if request.repo_agent_id == "default" else request.repo_agent_id
+            ),
+            explicit_target=request.explicit_target,
+        )
+        return resolve_verification(profile=selection.sidecar, issue=request)
+    synthetic = _SyntheticVerificationProfile(
+        verification=_SyntheticVerificationSettings(
+            evaluation_gate_policy="allow_no_evidence",
+        ),
+        foundry_evaluation_plan=_runtime_foundry_plan(settings),
+    )
+    resolution = resolve_verification(profile=synthetic, issue=request)
+    if (
+        resolution.mode == "none"
+        and request.issue_evaluators is None
+        and request.verification_dataset is None
+        and request.verification_checks is None
+        and not request.acknowledge_no_evidence
+    ):
+        return _legacy_foundry_resolution(settings)
+    return resolution
 
 
 def _persist_issue_request(path: Path, request: OptimizeIssueRequest) -> str:
@@ -1910,15 +2167,17 @@ def _job_payload(
     policy: RepositoryPolicy | None = None,
     pull_request_binding_present: bool = False,
 ) -> dict[str, Any]:
+    baseline_payload = None
+    if state.baseline is not None:
+        baseline_payload = {
+            "comment_recorded": state.baseline.comment_receipt is not None,
+            "evaluation": _evaluation_payload(state.baseline.evaluation),
+        }
+        evaluation_payload = _evaluation_payload(state.baseline.evaluation)
+        if evaluation_payload is not None:
+            baseline_payload.update(evaluation_payload)
     payload: dict[str, Any] = {
-        "baseline": (
-            None
-            if state.baseline is None
-            else {
-                **_evaluation_payload(state.baseline.evaluation),
-                "comment_recorded": state.baseline.comment_receipt is not None,
-            }
-        ),
+        "baseline": baseline_payload,
         "candidates": [_candidate_payload(state, candidate) for candidate in state.candidates],
         "decision": _decision_payload(state.decision),
         "job": {
@@ -1937,6 +2196,7 @@ def _job_payload(
             "source_root": state.identity.source_root,
             "state_digest_sha256": state.digest_sha256,
             "terminal_outcome": state.terminal_outcome,
+            "verification": _verification_payload(state),
         },
         "next_action": next_action,
         "pending_candidates": _pending_candidate_ids(state),
@@ -2003,6 +2263,17 @@ def _candidate_payload(state: JobState, candidate: object) -> dict[str, Any]:
         "model": candidate.handoff.model,
         "parent_id": candidate.handoff.parent_id,
         "phase": _candidate_phase(state, candidate),
+        "repository_checks": [
+            {
+                "kind": result.spec.kind,
+                "value": result.spec.value,
+                "passed": result.passed,
+                "exit_code": result.exit_code,
+                "duration_seconds": result.duration_seconds,
+                "summary": result.summary,
+            }
+            for result in candidate.repository_checks
+        ],
         "validating": _evaluation_payload(candidate.validating),
         "workspace": str(candidate.handoff.workspace_path),
     }
@@ -2013,6 +2284,11 @@ def _candidate_phase(state: JobState, candidate: object) -> str:
         return "handoff"
     if state.final_winner_id == candidate.handoff.candidate_id:
         return "winner"
+    if (
+        state.selected_candidate_id == candidate.handoff.candidate_id
+        and state.terminal_outcome in {"recommended", "proposed_unverified"}
+    ):
+        return state.terminal_outcome
     return candidate.assessment.outcome
 
 
@@ -2040,6 +2316,7 @@ def _decision_payload(decision: object | None) -> dict[str, Any] | None:
         "outcome": decision.outcome,
         "provisional_winner_id": decision.provisional_winner_id,
         "reason": _redact_text(decision.reason),
+        "selected_candidate_id": decision.selected_candidate_id,
         "validating_candidate_id": decision.validating_candidate_id,
         "validating_passed": decision.validating_passed,
         "winner_id": decision.winner_id,
@@ -2054,14 +2331,14 @@ def _next_action(state: JobState, *, binding: _LoadedBinding | None) -> str:
     if state.terminal_outcome is not None:
         if _terminal_side_effects_complete(state):
             return "terminal"
-        if _closure_required(state) and not _has_pull_request_binding(binding):
+        if _binding_required(state) and not _has_pull_request_binding(binding):
             return "blocked"
         return "finish"
     if state.completed_candidate_count < state.identity.min_candidates:
         if len(state.candidates) < state.identity.min_candidates:
             return "handoff-candidate"
         return "blocked"
-    if _closure_required(state) and not _has_pull_request_binding(binding):
+    if _binding_required(state) and not _has_pull_request_binding(binding):
         return "blocked"
     return "finish"
 
@@ -2071,8 +2348,8 @@ def _blocked_reason(state: JobState, *, binding_present: bool) -> str | None:
         return "baseline is unavailable"
     if state.completed_candidate_count < state.identity.min_candidates and len(state.candidates) >= state.identity.min_candidates and not _pending_candidate_ids(state):
         return "candidate budget is exhausted before the minimum completed candidate count was reached"
-    if _closure_required(state) and not binding_present:
-        return "pull request binding is required for no-winner closure"
+    if _binding_required(state) and not binding_present:
+        return _binding_required_reason(state)
     return None
 
 
@@ -2095,7 +2372,7 @@ def _pending_cleanup_candidates(state: JobState) -> list[str]:
 def _terminal_side_effects_complete(state: JobState) -> bool:
     if state.final_comment_receipt is None:
         return False
-    if state.terminal_outcome == "winner" and state.projection_receipt is None:
+    if state.terminal_outcome in {"winner", "recommended", "proposed_unverified"} and state.projection_receipt is None:
         return False
     if state.terminal_outcome == "no_winner" and state.no_winner_receipt is None:
         return False
@@ -2109,12 +2386,71 @@ def _closure_required(state: JobState) -> bool:
         return True
     if state.decision is None:
         return False
+    if state.verification_mode != "foundry_evaluation":
+        return state.decision.selected_candidate_id is None
     if state.decision.provisional_winner_id is None:
         return True
     candidate = state.candidate(state.decision.provisional_winner_id)
     if candidate is None or candidate.validating is None:
         return False
     return state.decision.outcome == "no_winner" and state.final_winner_id is None
+
+
+def _binding_required(state: JobState) -> bool:
+    if state.terminal_outcome == "platform_failure":
+        return False
+    if state.terminal_outcome in {"winner", "recommended", "proposed_unverified"}:
+        return state.projection_receipt is None
+    if _closure_required(state):
+        return True
+    if state.decision is None:
+        return False
+    if state.decision.outcome == "platform_failure":
+        return False
+    if state.completed_candidate_count < state.identity.min_candidates:
+        return False
+    if state.verification_mode == "foundry_evaluation":
+        return True
+    return state.decision.selected_candidate_id is not None
+
+
+def _binding_required_reason(state: JobState) -> str:
+    if state.terminal_outcome == "no_winner" or (
+        state.decision is not None
+        and state.verification_mode == "foundry_evaluation"
+        and state.decision.provisional_winner_id is None
+    ) or (
+        state.decision is not None
+        and state.verification_mode != "foundry_evaluation"
+        and state.decision.selected_candidate_id is None
+    ):
+        return "pull request binding is required for no-winner closure"
+    return "pull request binding is required for draft projection"
+
+
+def _verification_payload(state: JobState) -> dict[str, Any]:
+    if state.verification is None:
+        return {
+            "mode": state.verification_mode,
+            "provenance": ["runtime_metadata_defaults"],
+            "quantitative_decision_allowed": True,
+            "warnings": [],
+        }
+    payload: dict[str, Any] = {
+        "mode": state.verification.mode,
+        "provenance": list(state.verification.provenance),
+        "quantitative_decision_allowed": state.verification.quantitative_decision_allowed,
+        "warnings": list(state.verification.warnings),
+    }
+    if state.verification.repository_checks is not None:
+        payload["repository_checks"] = [
+            {
+                "kind": check.kind,
+                "value": check.value,
+            }
+            for check in state.verification.repository_checks.checks
+        ]
+    return payload
 
 
 def _has_pull_request_binding(binding: _LoadedBinding | None) -> bool:
@@ -2150,7 +2486,7 @@ def _finish_runtime_job(
             require_present=True,
             verify_checkout=False,
         )
-    if state.terminal_outcome == "winner" and state.projection_receipt is None:
+    if state.terminal_outcome in {"winner", "recommended", "proposed_unverified"} and state.projection_receipt is None:
         _ensure_runtime_pull_request_binding(
             runtime=runtime,
             identity=state.identity,
@@ -2161,14 +2497,24 @@ def _finish_runtime_job(
         )
     if state.terminal_outcome is not None:
         return controller.finish(destination_checkout)
-    if state.baseline is None:
-        raise ControllerError("baseline must be recorded before finish")
     if state.completed_candidate_count < state.identity.min_candidates:
         raise ControllerError("minimum candidate count has not been reached")
     state = controller._apply_development_decision(state)
     decision = state.decision
     if decision is None:
         raise ControllerError("decision state is unavailable")
+    if state.verification_mode != "foundry_evaluation":
+        _ensure_runtime_pull_request_binding(
+            runtime=runtime,
+            identity=state.identity,
+            checkout=destination_checkout,
+            pull_request=pull_request,
+            require_present=True,
+            verify_checkout=decision.selected_candidate_id is not None,
+        )
+        return controller.finish(destination_checkout)
+    if state.baseline is None or state.baseline.evaluation is None:
+        raise ControllerError("baseline must be recorded before finish")
     if decision.provisional_winner_id is None:
         state = controller._ensure_final_comment(state)
         _ensure_runtime_pull_request_binding(
@@ -2697,6 +3043,93 @@ def _linked_issue_numbers_from_body(
     return numbers
 
 
+def _github_api_headers(token: str) -> dict[str, str]:
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": f"foundry-opt/{__version__}",
+        "X-GitHub-Api-Version": _GITHUB_API_VERSION,
+    }
+    headers["Authorization"] = "Bearer " + token
+    return headers
+
+
+def _github_get_json_object(
+    *,
+    path: str,
+    token: str,
+    subject: str,
+    transport: httpx.BaseTransport | None = None,
+    not_found_ok: bool = False,
+) -> dict[str, Any] | None:
+    try:
+        with httpx.Client(
+            transport=transport,
+            base_url="https://api.github.com",
+            headers=_github_api_headers(token),
+            follow_redirects=True,
+            timeout=30.0,
+            trust_env=False,
+        ) as client:
+            response = client.get(path)
+    except httpx.HTTPError as error:
+        raise typer.BadParameter(f"{subject} failed") from error
+    if not_found_ok and response.status_code == 404:
+        return None
+    if response.status_code != 200:
+        raise typer.BadParameter(f"{subject} failed with HTTP {response.status_code}")
+    try:
+        payload = response.json()
+    except ValueError as error:
+        raise typer.BadParameter(f"{subject} returned invalid JSON") from error
+    if not isinstance(payload, dict):
+        raise typer.BadParameter(f"{subject} returned an invalid payload")
+    return payload
+
+
+def _issue_author_binding_fields(
+    repository: RepositoryIdentity,
+    *,
+    issue_number: int,
+    token: str,
+    transport: httpx.BaseTransport | None = None,
+) -> tuple[str, str]:
+    issue_payload = _github_get_json_object(
+        path=f"/repos/{repository.full_name}/issues/{issue_number}",
+        token=token,
+        subject=f"issue author lookup for optimize-job issue #{issue_number}",
+        transport=transport,
+    )
+    assert issue_payload is not None
+    user = issue_payload.get("user")
+    if type(user) is not dict:
+        raise typer.BadParameter("issue author lookup returned an invalid user payload")
+    login = user.get("login")
+    if type(login) is not str or not login:
+        raise typer.BadParameter("issue author lookup returned an invalid author login")
+    permission_payload = _github_get_json_object(
+        path=(
+            f"/repos/{repository.full_name}/collaborators/"
+            f"{quote(login, safe='')}/permission"
+        ),
+        token=token,
+        subject=f"repository permission lookup for issue author '{login}'",
+        transport=transport,
+        not_found_ok=True,
+    )
+    if permission_payload is None:
+        return login, "none"
+    raw_permission = permission_payload.get("permission")
+    if type(raw_permission) is not str or not raw_permission:
+        raise typer.BadParameter(
+            "repository permission lookup returned an invalid permission"
+        )
+    try:
+        permission = normalize_issue_author_permission(raw_permission)
+    except BootstrapConfigError as error:
+        raise typer.BadParameter(str(error)) from error
+    return login, permission
+
+
 def _linked_issue_number_from_open_pull_request_branch(
     repository: RepositoryIdentity,
     *,
@@ -2706,12 +3139,7 @@ def _linked_issue_number_from_open_pull_request_branch(
     try:
         response = httpx.get(
             f"https://api.github.com/repos/{repository.full_name}/pulls",
-            headers={
-                "Accept": "application/vnd.github+json",
-                "Authorization": f"Bearer {token}",
-                "User-Agent": f"foundry-opt/{__version__}",
-                "X-GitHub-Api-Version": "2026-03-10",
-            },
+            headers=_github_api_headers(token),
             params={
                 "direction": "asc",
                 "head": f"{repository.owner}:{head_ref}",

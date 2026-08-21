@@ -190,8 +190,10 @@ def test_full_mocked_flow_activates_a_receipt_derived_sidecar(tmp_path: Path) ->
     repo = context["repo"]
     sidecar = repo / SIDECAR_PATH
 
-    # The repository phase deliberately never writes the sidecar.
-    assert not sidecar.exists()
+    quick_profile_bytes = sidecar.read_bytes()
+    quick_profile = BootstrapSidecar.from_document(quick_profile_bytes.decode("utf-8"))
+    assert quick_profile.verification.mode == "off"
+    assert quick_profile.default_evaluator_bundle is None
     registry = RootRegistry.from_document((repo / ".foundry-opt" / "registry.yaml").read_text(encoding="utf-8"))
     assert registry.agents[0].enabled is False
 
@@ -212,6 +214,7 @@ def test_full_mocked_flow_activates_a_receipt_derived_sidecar(tmp_path: Path) ->
     assert binding.receipt_hash == receipt.receipt_hash
     assert binding.runtime_commit == RUNTIME_SHA
     assert binding.finalization_hash == activation.entries[0].finalization_binding_hash
+    assert activation.entries[0].previous_sha256 == sha256(quick_profile_bytes).hexdigest()
     # Immutable ids in the sidecar came from the receipt, not from the approved plan payload.
     approved_payload = [
         action.diagnostics[2]
@@ -275,9 +278,11 @@ def test_reuse_path_activates_without_generating_a_rubric(tmp_path: Path) -> Non
 
 def test_failed_activation_blocks_the_sidecar_mutation(tmp_path: Path) -> None:
     context = _run_phases(tmp_path, adapter_kwargs={"safety_pass_rate": 0.5}, operation_id="op-fail")
+    sidecar = context["repo"] / SIDECAR_PATH
+    quick_profile_bytes = sidecar.read_bytes()
 
     assert context["evaluations_receipt"].state in {"failed", "compensation_required"}
-    assert not (context["repo"] / SIDECAR_PATH).exists()
+    assert sidecar.exists()
     with pytest.raises(BootstrapApplyError, match="requires a successful evaluations phase"):
         finalize_evaluation_activation(
             repository_root=context["repo"],
@@ -286,7 +291,7 @@ def test_failed_activation_blocks_the_sidecar_mutation(tmp_path: Path) -> None:
             runtime_commit=RUNTIME_SHA,
             state_root=context["state_root"],
         )
-    assert not (context["repo"] / SIDECAR_PATH).exists()
+    assert sidecar.read_bytes() == quick_profile_bytes
     registry = RootRegistry.from_document((context["repo"] / ".foundry-opt" / "registry.yaml").read_text(encoding="utf-8"))
     assert registry.agents[0].enabled is False
 
@@ -332,7 +337,8 @@ def test_activation_refuses_a_plan_input_that_does_not_rebuild_the_approved_plan
             runtime_commit=RUNTIME_SHA,
             state_root=context["state_root"],
         )
-    assert not (context["repo"] / SIDECAR_PATH).exists()
+    document = BootstrapSidecar.from_document((context["repo"] / SIDECAR_PATH).read_text(encoding="utf-8"))
+    assert document.verification.mode == "off"
 
 
 def test_ready_unbound_agent_is_scaffolded_but_never_activated(tmp_path: Path) -> None:
@@ -425,7 +431,8 @@ def test_repeated_activation_is_an_idempotent_replay(tmp_path: Path) -> None:
 
     assert (context["repo"] / SIDECAR_PATH).read_bytes() == sidecar_bytes
     assert second.entries[0].applied_sha256 == first.entries[0].applied_sha256
-    assert first.entries[0].previous_sha256 is None
+    assert first.entries[0].previous_sha256 is not None
+    assert first.entries[0].previous_sha256 != first.entries[0].applied_sha256
     assert second.entries[0].previous_sha256 == second.entries[0].applied_sha256
 
 
@@ -557,4 +564,4 @@ def test_persisted_state_and_receipts_never_carry_raw_content(tmp_path: Path) ->
         assert forbidden not in lowered
     # Row identifiers never leave the provider: only counts and lineage hashes are persisted.
     document = yaml.safe_load((context["repo"] / SIDECAR_PATH).read_text(encoding="utf-8"))
-    assert set(document["evaluation_lineage"]) >= {"split_lineage_hash", "development_case_count"}
+    assert set(document["verification"]["lineage"]) >= {"split_lineage_hash", "development_case_count"}

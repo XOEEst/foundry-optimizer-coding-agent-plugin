@@ -19,6 +19,8 @@ an agent optimize job.
   by v1 bootstrap.
 - Authenticate to Foundry with OIDC only.
 - Use draft agent versions only. Never publish or change endpoint routing.
+- Treat deployment as exact-source only: merge-time deployment must come from
+  the reviewed repository source at the pinned commit.
 - Use the broker-backed CLI for issue updates. Do not fall back to built-in
   GitHub comment tools.
 - Evaluate the repository baseline once, then evaluate every implemented
@@ -27,7 +29,7 @@ an agent optimize job.
 - Keep redacted evidence in the original issue. Do not create child issues or
   candidate pull requests.
 - GitHub creates one early draft pull request when the issue is assigned. Apply
-  only the verified winner to that branch, or close it unchanged when there is
+  only the deployable winner to that branch, or close it unchanged when there is
   no winner.
 
 ## Required loop
@@ -55,87 +57,113 @@ an agent optimize job.
 7. Let the CLI rank candidates against the fresh baseline and current best.
 8. Run the validating evaluation only for the provisional winner.
 9. Finish the optimize job:
-   - apply only the verified winning patch to the Copilot branch, or
+   - apply only the deployable winning patch that satisfies the repository
+     verification policy, or
    - leave the branch unchanged and close the draft pull request
 10. Confirm the final issue update contains every candidate, every Foundry
     evaluation link, guardrail results, tradeoffs, and the final decision.
+11. When the issue supplies verification inputs, honor them exactly: either an
+    exact Foundry verification dataset with exact evaluator IDs, exact
+    repository commands, or an explicit acknowledged no-evidence fallback.
+    Named `check: ...` entries are repository-owned and stay reserved for
+    trusted PR/deployment verification profiles. Never widen issue-supplied
+    inputs, never invent missing evidence, and require a trusted
+    write/maintain/admin issue-author permission binding before honoring
+    arbitrary evaluator, dataset, or command overrides.
 
-## Bootstrap UX
+## Bootstrap for first-time owners
 
-1. Run `foundry-opt bootstrap discover` with the verified runtime provenance and
-   repository root. Its `agents` array carries each discovered root, configPath,
-   sourceFingerprint, packageFingerprint, classification, and blockers; use those
-   local digests when constructing or reviewing observed binding evidence.
-2. Explicitly select agents and prepare a reviewed `BootstrapPlanInput`. Preserve
-   discovery `root` as `discovery_root`. Use the managed agent directory as `root`;
-   for a repository-root candidate (`discovery_root: "."`), use its concrete
-   `sourceRoot` (for example `agent`). Binding evidence remains keyed by
-   `discovery_root`, while registry, sidecar, evaluation, and deployment paths use
-   the managed `root`.
-3. To classify a real deployed baseline, supply reviewed binding evidence:
-   `foundry-opt bootstrap binding-evidence --plan-input ... --output ...`
-   downloads each immutable agent version's code archive, verifies its published
-   content hash, and records source/package sha256 fingerprints. Pass it back
-   with `discover --binding-evidence`, or embed it in the plan input under
-   `binding_evidence` (never both). Without content fingerprints an agent stays
-   `bound-unknown`, and metadata alone can never make it `bound-aligned`.
-   Fingerprinting normalizes UTF-8 text line endings to LF on both local and
-   downloaded content while keeping binary bytes exact. After a runtime upgrade,
-   rerun discovery and evidence review in a fresh operation.
-4. Run `foundry-opt bootstrap plan --plan-input ...`; offline plans contain only
-   the repository phase.
-5. Show exact repository diffs and GitHub/Azure/evaluation action summaries.
-   For an adopted Entra application, confirm the identity action carries the
-   application registration `object_id` (not the service-principal ID). Confirm
-   the Azure plan contains exactly two federated-credential subjects and both
-   preserve the reviewed immutable `oidc_subject_prefix`. Report existing
-   broader Azure role assignments separately; bootstrap does not remove them.
-   Treat an existing credential's `name` as descriptive only: adoption is by one
-   exact issuer/subject/audience match. Stop on ambiguous or mismatched matches,
-   and never rename a credential merely to satisfy bootstrap.
-6. Create one approval record for one phase and run
-   `foundry-opt bootstrap apply --phase ... --approval-file ... --plan-input ...`.
-7. Stop on stale plan/SHA drift or any failed/compensation-required receipt.
-8. Use `status` and receipt-bound `rollback` to resume safely.
-9. Run evaluation onboarding in order: `bootstrap evaluation inventory` (reuse
-   first, trace eligibility, split targets), `bootstrap evaluation plan` (one
-   approval-bound composite action per agent), `bootstrap evaluation apply`
-   (staged inventory -> generation -> split -> evaluator -> definitions ->
-   activation -> cleanup), then `bootstrap evaluation activate`. Activation
-   packages the reviewed agent source and creates a temporary owned draft to
-   evaluate; a pre-existing agent version with the requested draft name is a
-   conflict, never a target, and only the operation-created draft is deleted.
-   The repository
-   phase never writes a sidecar; only the receipt-bound `activate` step writes
-   it and enables that agent in the registry. `activate` is the finalization of
-   the same single approval — never a second approval — and is idempotent, so an
-   interrupted activation is safe to re-run. Agents may live in different
-   Foundry projects; each one is applied against its own project.
-10. Collect exactly one evaluations-phase approval. A generated rubric is
-    auto-adopted without a second prompt, but only after structural, execution,
-    headroom, activation, cleanup, and full safety-bundle gates pass against the
-    pre-approved bounds. The safety bundle is resolved from the project's real
-    built-in catalog (violence, sexual, self_harm, hate_unfairness,
-    indirect_attack at minimum); every configured safety evaluator must pass at
-    100% in both phases, and a project missing one blocks activation. Accept
-    trace datasets only at 15+ useful samples; otherwise configure synthetic-only
-    data and never a partial trace output.
-11. Explain that immutable dataset, evaluator, definition, and run ids come from
-    the receipt, never from the approved plan, and that the sidecar is derived
-    from that receipt. Split datasets are materialized by downloading the source
-    dataset through its SAS credential, writing only the selected rows to a
-    short-lived temporary file, and uploading each split once; raw rows are never
-    persisted, reported, or copied into GitHub.
-12. Report `ready-unbound` agents as scaffolded but disabled: they stop before
-    evaluation generation and activation.
-13. Use `bootstrap evaluation inspect|status|replace` for approved bounds,
-    receipt finalization, resume state, and explicit replacement. There is no
-    rubric editor in v1, and a failed replacement retains the previously active
-    bundle. `status`/`inspect` report one bundle and lineage per agent; the
-    single legacy field is only a compatibility projection.
-14. Explain that issue objectives guide mutations, issue-supplied weighted
-    evaluators select optimize winners, and repository defaults govern
-    merge-time deployment.
+Bootstrap prepares a repository for managed Foundry ownership: it discovers
+candidate agents, writes the reviewed managed files, connects GitHub to Azure
+with OIDC, optionally onboards evaluation assets, and finishes with resource
+links. It never changes runtime code, publishes a regular version, mutates
+endpoint routing, stores secrets, copies raw evaluation content into GitHub, or
+deploys from anything other than the reviewed exact source.
+
+### Default owner flow
+
+- Keep bootstrap short, natural-language, and bullet-based for owners.
+- Default to `foundry-opt bootstrap review ...`, `foundry-opt bootstrap connect
+  ...`, and `foundry-opt bootstrap resources ...` summaries. Do not paste raw
+  JSON into owner-facing updates unless you are debugging or implementing.
+- Decision 1 — choose agents: run `foundry-opt bootstrap review discovery ...`.
+  Tell the owner exactly which discovered `repoAgentId` values would become
+  registered in `.foundry-opt/registry.yaml`, which would stay out of scope,
+  and which have blockers. Approval here means “register this reviewed agent
+  set and leave the rest untouched for now.”
+- Decision 2 — review repository setup: run `foundry-opt bootstrap review plan
+  ...`. Tell the owner exactly which managed repository files will be added or
+  updated, which selected agents will start registered only versus registered
+  and enabled, which OIDC subjects and RBAC assignments are planned, and any
+  deployment warnings. Approval here means “apply this reviewed repository
+  setup at the exact runtime pin, with these managed files, these agent states,
+  and this exact-source deployment policy.”
+- Use the owner-facing terms consistently:
+  - `registered` — the agent is listed in `.foundry-opt/registry.yaml`
+  - `enabled` — the reviewed registry/profile intends the agent to participate
+  - `verified` — reviewed evidence or receipt-backed verification is attached
+  - `deployable` — policy currently allows exact-source deployment
+- Verification is optional during bootstrap. Make the choice explicit:
+  - `now` — review binding evidence and attach verification immediately
+  - `later` — finish bootstrap now and add reviewed verification later
+  - `skip` — continue without evidence when policy allows it
+- If verification is deferred or skipped, say so plainly. Unverified deployment
+  may still be allowed by policy, but it must be reported as a warning rather
+  than presented as verified.
+- Decision 3 — connect GitHub to Azure: use `foundry-opt bootstrap connect
+  plan ...`, then `foundry-opt bootstrap connect approve ...` or
+  `foundry-opt bootstrap connect apply --approve ...`. Tell the owner exactly
+  what they approve: the shown GitHub environments, variables, and branch
+  policy; the shown Azure identity create/adopt action; exactly two reviewed
+  federated OIDC subjects; and the reviewed RBAC assignments. This is one
+  combined connection approval with internal child receipts, not separate owner
+  approvals for GitHub and Azure.
+- When optimize-job verification inputs are discussed with owners, use the same
+  plain-language model: repository defaults, exact issue-supplied Foundry
+  evaluators plus dataset, exact issue-supplied repository commands, or an
+  explicit no-evidence acknowledgement when policy allows it. Named
+  `check: ...` entries stay repository-owned and apply only to trusted
+  deployment/PR verification flows.
+- End every successful bootstrap handoff with `foundry-opt bootstrap resources
+  ...` and share the final GitHub, Azure, and Foundry links for the reviewed
+  registered/enabled/verified/deployable state.
+
+## Advanced and recovery
+
+- Low-level inputs such as `bootstrap discover`, reviewed `BootstrapPlanInput`,
+  selection roots, binding-evidence files, operation state, hashes, approval
+  records, and receipt internals belong here, not in the default owner flow.
+- Run `foundry-opt bootstrap discover` with the verified runtime provenance and
+  repository root. Its discovery roots, `sourceFingerprint`, and
+  `packageFingerprint` values are the authoritative local digests for reviewed
+  binding evidence.
+- Preserve discovery `root` as `discovery_root`. Use the managed agent
+  directory as `root`; a repository-root discovery (`discovery_root: "."`)
+  must switch to its concrete `sourceRoot` for managed bootstrap paths.
+- To classify a real deployed baseline, use
+  `foundry-opt bootstrap binding-evidence --plan-input ... --output ...` and
+  pass the reviewed evidence back through `discover --binding-evidence` or the
+  plan input (never both). Without content fingerprints an agent stays
+  `bound-unknown`; metadata alone can never make it `bound-aligned`.
+- `foundry-opt bootstrap plan --plan-input ...` is the low-level plan builder;
+  offline plans include only the repository phase.
+- Stop on stale runtime/SHA drift, plan drift, or failed/compensation-required
+  receipts. Use `foundry-opt bootstrap review status ...`,
+  `foundry-opt bootstrap connect status ...`, and receipt-bound rollback only
+  for recovery.
+- Evaluation onboarding remains ordered and approval-bound:
+  `bootstrap evaluation inventory`, `bootstrap evaluation plan`,
+  `bootstrap evaluation apply`, then `bootstrap evaluation activate`.
+  `activate` finalizes the same single evaluations approval, is idempotent, and
+  preserves the reviewed enabled state while attaching receipt-backed
+  verification lineage.
+- Keep evaluation internals in recovery/debug detail only: immutable dataset,
+  evaluator, definition, run, and finalization ids come from receipts, not the
+  approved plan; raw rows, prompts, traces, and secrets never leave Foundry.
+- Report `ready-unbound` agents as scaffolded but disabled. They can be
+  registered, but they are not verified or deployable until alignment is proven.
+- Use `bootstrap evaluation inspect|status|replace` only for approved bounds,
+  resume state, receipt finalization, or explicit replacement recovery.
 
 ## Candidate discipline
 

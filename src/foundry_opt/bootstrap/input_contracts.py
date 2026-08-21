@@ -13,16 +13,18 @@ from pydantic import Field, StrictBool, StrictInt, StringConstraints, Validation
 
 from foundry_opt.bootstrap.canonical import canonical_sha256
 from foundry_opt.bootstrap.contracts import (
+    BootstrapSidecar,
     BootstrapDocument,
     BuiltInEvaluatorId,
     DatasetUri,
     EvaluationDefinitionId,
     GitHubOidcSubjectPrefix,
     IdentityKind,
+    SelectedAgentProfile,
     VersionedEvaluatorUri,
 )
 from foundry_opt.bootstrap.errors import BootstrapConfigError
-from foundry_opt.bootstrap.evaluation.execution import EvaluationOnboardingRequest
+from foundry_opt.bootstrap.evaluation.execution import EvaluationOnboardingRequest, SidecarPolicy
 from foundry_opt.optimize_job.safety import UnsafeCheckpointContentError, assert_safe_persisted_string
 from foundry_opt.poc.config import POCConfigurationError, _validate_resource_id, load_strict_yaml_mapping, validate_repository_relative_path, validate_repository_relative_paths
 
@@ -248,6 +250,8 @@ class SelectedAgent(BootstrapDocument):
     discovery_root: Annotated[str, StringConstraints(min_length=1, max_length=240)] | None = None
     config_path: RepoRelativePath
     editable_paths: tuple[RepoRelativePath, ...]
+    enabled: StrictBool | None = None
+    profile: SelectedAgentProfile | None = None
 
     @field_validator('root')
     @classmethod
@@ -294,6 +298,47 @@ class SelectedAgent(BootstrapDocument):
     @property
     def discovery_selection_root(self) -> str:
         return self.discovery_root or self.root
+
+    @property
+    def profile_document(self) -> BootstrapSidecar | None:
+        if self.profile is None:
+            return None
+        return BootstrapSidecar.from_selected_agent_profile(
+            repo_agent_id=self.repo_agent_id,
+            source_root=self.root,
+            editable_paths=self.editable_paths,
+            profile=self.profile,
+        )
+
+    @property
+    def rendered_enabled(self) -> bool:
+        return bool(self.enabled)
+
+
+def _profile_from_sidecar_policy(
+    *,
+    repo_agent_id: str,
+    policy: SidecarPolicy,
+    editable_paths: Sequence[str] | None = None,
+) -> BootstrapSidecar:
+    return BootstrapSidecar(
+        repo_agent_id=repo_agent_id,
+        source_root=policy.source_root,
+        package_root=policy.package_root,
+        editable_paths=tuple(editable_paths or policy.editable_paths),
+        runtime=policy.runtime,
+        foundry_project=policy.foundry_project,
+        baseline_model=policy.baseline_model,
+        allowed_models=policy.allowed_models,
+        min_candidates=policy.min_candidates,
+        max_candidates=policy.max_candidates,
+        primary_metric=policy.primary_metric,
+        decision_policy=policy.decision_policy,
+        max_issue_evaluators=policy.max_issue_evaluators,
+        hard_guardrails=policy.hard_guardrails,
+        deployment=policy.deployment,
+        verification=policy.verification,
+    )
 
 
 class RepositoryIdentityInput(BootstrapDocument):
@@ -867,6 +912,9 @@ class BootstrapPlanInput(BootstrapDocument):
         render_ids = {item.repo_agent_id.casefold() for item in self.repository_phase.agent_render_contexts}
         if render_ids != set(selected_by_id):
             raise BootstrapConfigError('repository_phase agent render contexts must match the selected agent set exactly')
+        for selected in self.repository.selected_agents:
+            if selected.profile is not None and selected.profile_document is None:
+                raise BootstrapConfigError('selected agent profile could not be rendered')
         if self.azure_phase is not None and self.azure_phase.github_repository_id.casefold() != self.repository.repository_id.casefold():
             raise BootstrapConfigError('azure github_repository_id must match repository_id')
         if self.offline_plan:
@@ -901,6 +949,29 @@ class BootstrapPlanInput(BootstrapDocument):
                     policy = agent.onboarding_contract.sidecar_policy
                     if policy is not None and policy.source_root != selected.root:
                         raise BootstrapConfigError('onboarding sidecar source_root must match the selected agent root')
+                    if policy is not None and policy.path != selected.config_path:
+                        raise BootstrapConfigError('onboarding sidecar path must match selected agent config_path')
+                    if policy is not None:
+                        for path in policy.editable_paths:
+                            if not any(
+                                path == editable
+                                or path.startswith(editable[:-2])
+                                for editable in selected.editable_paths
+                                if editable.endswith('/**')
+                            ) and path not in selected.editable_paths:
+                                raise BootstrapConfigError(
+                                    'onboarding editable_paths must stay within selected agent editable_paths'
+                                )
+                    if selected.profile is not None and policy is not None:
+                        selected_profile = selected.profile_document
+                        assert selected_profile is not None
+                        contract_profile = _profile_from_sidecar_policy(
+                            repo_agent_id=agent.repo_agent_id,
+                            policy=policy,
+                            editable_paths=selected.editable_paths,
+                        )
+                        if selected_profile.static_fingerprint() != contract_profile.static_fingerprint():
+                            raise BootstrapConfigError('selected profile must match the reviewed onboarding sidecar policy')
                 if agent.sidecar_path != selected.config_path:
                     raise BootstrapConfigError('evaluation sidecar_path must match selected agent config_path')
                 if not _path_is_within(selected.root, agent.sidecar_path):
@@ -914,6 +985,19 @@ class BootstrapPlanInput(BootstrapDocument):
                 endpoint_account = urlparse(agent.project_endpoint).hostname.split('.')[0] if urlparse(agent.project_endpoint).hostname else ''
                 if endpoint_account and f'/accounts/{endpoint_account}'.casefold() not in account_lower:
                     raise BootstrapConfigError('project_endpoint account and account_resource_id must match')
+        if any(selected.enabled for selected in self.repository.selected_agents):
+            approved_policies = {
+                agent.repo_agent_id.casefold(): agent.onboarding_contract.sidecar_policy
+                for agent in (self.evaluations_phase.agents if self.evaluations_phase is not None else ())
+                if agent.onboarding_contract is not None and agent.onboarding_contract.sidecar_policy is not None
+            }
+            for selected in self.repository.selected_agents:
+                if not selected.enabled:
+                    continue
+                if selected.profile is None and approved_policies.get(selected.repo_agent_id.casefold()) is None:
+                    raise BootstrapConfigError(
+                        'enabled selected agents require a reviewed profile or onboarding sidecar policy'
+                    )
         if self.binding_evidence is not None:
             if self.binding_evidence.repository_id.casefold() != self.repository.repository_id.casefold():
                 raise BootstrapConfigError('binding_evidence repository_id must match repository_id')
