@@ -145,6 +145,19 @@ def test_optional_no_response_is_empty() -> None:
     )
 
 
+def test_hidden_model_selector_defaults_to_repository_policy() -> None:
+    model_section = """### Optional narrower model set
+
+```text
+gpt-5-mini
+```
+
+"""
+    parsed = parse_issue_body(BODY.replace(model_section, ""))
+
+    assert parsed.candidate_models == ()
+
+
 @pytest.mark.parametrize(
     ("old", "new", "message"),
     [
