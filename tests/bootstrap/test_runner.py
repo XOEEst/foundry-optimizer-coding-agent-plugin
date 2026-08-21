@@ -1,22 +1,31 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import subprocess
 from datetime import UTC, datetime
 
 import pytest
 
-from foundry_opt.bootstrap.contracts import BootstrapAction, BootstrapPlan, TemplatePayloadSpec
+from foundry_opt.bootstrap.contracts import (
+    BootstrapAction,
+    BootstrapPlan,
+    ReviewedFoundryTarget,
+    TemplatePayloadSpec,
+)
 from foundry_opt.bootstrap.errors import BootstrapApplyError
 from foundry_opt.bootstrap.local_commit import BootstrapLocalCommitHandler, LocalGitCommitCoordinator, build_local_commit_context
 from foundry_opt.bootstrap.runner import (
     BootstrapChildReference,
+    BootstrapFoundryTargetRecord,
     BootstrapRollbackHandlerProtocol,
     BootstrapRunner,
     BootstrapRunnerStateEnvelope,
     BootstrapStageOutcome,
     FileBootstrapRunnerStateStore,
     next_runner_generation,
+    repository_index_file_path,
+    state_file_path,
 )
 
 RUNTIME_REPOSITORY = "https://github.com/example-org/foundry-opt-runtime.git"
@@ -186,6 +195,59 @@ class _RecordingRollbackHandler(BootstrapRollbackHandlerProtocol):
         )
 
 
+class _ReadyTargetResolutionHandler:
+    def prepare(
+        self,
+        *,
+        operation: BootstrapRunnerStateEnvelope,
+    ) -> BootstrapStageOutcome:
+        repo_agent_id = operation.registration_intents[0].repo_agent_id
+        discovered = next(
+            item
+            for item in operation.selection_plan.discovered_agents
+            if item.repo_agent_id == repo_agent_id
+        )
+        return BootstrapStageOutcome(
+            stage="verification_policy",
+            note="Reviewed Foundry target resolved.",
+            foundry_targets=(
+                BootstrapFoundryTargetRecord(
+                    repo_agent_id=repo_agent_id,
+                    root=discovered.root,
+                    reviewed_target=ReviewedFoundryTarget(
+                        state="new_target",
+                        project_endpoint=(
+                            "https://example.services.ai.azure.com/api/projects/example"
+                        ),
+                        project_endpoint_source="owner_answer",
+                        agent_name="root-agent",
+                        agent_name_source="owner_answer",
+                        account_resource_id=(
+                            "/subscriptions/1/resourceGroups/rg/providers/"
+                            "Microsoft.CognitiveServices/accounts/example"
+                        ),
+                        deployment_ready=True,
+                    ),
+                ),
+            ),
+        )
+
+    def build_question(self, *, operation, question_id):
+        return None
+
+    def render_owner_markdown(self, *, operation):
+        return None
+
+    def build_resource_links(self, *, operation):
+        return None
+
+    def persisted_answer_value(self, *, operation, answer):
+        raise AssertionError("target answer is not expected")
+
+    def handle_answer(self, *, operation, answer):
+        raise AssertionError("target answer is not expected")
+
+
 class _RacingStateStore(FileBootstrapRunnerStateStore):
     def __init__(self, *, state_root: Path) -> None:
         super().__init__(state_root=state_root)
@@ -267,9 +329,10 @@ def test_answer_accepts_valid_selection_and_records_a_blocked_target(tmp_path: P
     record = envelope.foundry_targets[0].reviewed_target
 
     assert registration.state == "register_enable"
-    assert turn.state == "verification_policy"
+    assert turn.state == "foundry_target_resolution"
     assert turn.next_question is not None
-    assert turn.next_question.kind == "verification_policy"
+    assert turn.next_question.kind == "foundry_target"
+    assert [action.name for action in turn.available_actions] == ["answer", "status"]
     assert record.state == "blocked"
     assert record.deployment_ready is False
     assert "invalid project_endpoint" in (record.detail or "")
@@ -281,7 +344,10 @@ def test_registration_and_optional_verification_reach_repository_review(
 ) -> None:
     repo = _create_repository(tmp_path)
     store = FileBootstrapRunnerStateStore(state_root=tmp_path / "state")
-    runner = BootstrapRunner(state_store=store)
+    runner = BootstrapRunner(
+        state_store=store,
+        target_resolution_handler=_ReadyTargetResolutionHandler(),
+    )
     first = runner.start(repo)
     registration = runner.answer(
         first.operation_id,
@@ -376,6 +442,150 @@ def test_persistence_and_status_resume_use_private_state_store(tmp_path: Path) -
     assert resumed.state == first.state
     assert resumed.next_question == first.next_question
     assert resumed.resource_links == first.resource_links
+
+
+def test_start_resumes_the_active_repository_operation_after_interruption(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _create_repository(tmp_path)
+    state_root = tmp_path / "private-state"
+    first_runner = BootstrapRunner(
+        state_store=FileBootstrapRunnerStateStore(state_root=state_root)
+    )
+    first = first_runner.start(repo)
+    interrupted = first_runner.answer(
+        first.operation_id,
+        first.next_question.question_id,
+        [first.next_question.choices[0].value],
+    )
+    monkeypatch.setattr(
+        "foundry_opt.bootstrap.runner.discover_repository_agents",
+        lambda _: pytest.fail("resume must not rediscover the repository"),
+    )
+
+    resumed = BootstrapRunner(
+        state_store=FileBootstrapRunnerStateStore(state_root=state_root)
+    ).start(repo)
+
+    assert resumed.operation_id == interrupted.operation_id
+    assert resumed.state == interrupted.state
+    assert resumed.next_question == interrupted.next_question
+
+
+def test_start_replaces_a_stale_completed_operation(tmp_path: Path) -> None:
+    repo = _create_repository(tmp_path)
+    state_root = tmp_path / "state"
+    store = FileBootstrapRunnerStateStore(state_root=state_root)
+    runner = BootstrapRunner(state_store=store)
+    first = runner.start(repo)
+    envelope = store.load(first.operation_id)
+    completed = next_runner_generation(
+        envelope,
+        now=datetime.now(UTC),
+        lifecycle_stage="final_handoff",
+        note="completed",
+    )
+    store.save(
+        completed,
+        expected_generation=envelope.generation,
+        expected_generation_hash=envelope.generation_hash,
+    )
+
+    replacement = runner.start(repo)
+    resumed = runner.start(repo)
+
+    assert replacement.operation_id != first.operation_id
+    assert replacement.state == "agent_selection"
+    assert resumed.operation_id == replacement.operation_id
+
+
+def test_start_rejects_competing_active_operations(tmp_path: Path) -> None:
+    repo = _create_repository(tmp_path)
+    state_root = tmp_path / "state"
+    store = FileBootstrapRunnerStateStore(state_root=state_root)
+    runner = BootstrapRunner(state_store=store)
+    first = runner.start(repo)
+    envelope = store.load(first.operation_id)
+    duplicate_payload = envelope.payload.model_dump(mode="python")
+    duplicate_payload["operation_id"] = "bootstrap-competing"
+    duplicate = BootstrapRunnerStateEnvelope.create(**duplicate_payload)
+    duplicate_path = state_file_path(
+        duplicate.operation_id,
+        state_root=state_root,
+    )
+    duplicate_path.parent.mkdir(parents=True, exist_ok=True)
+    duplicate_path.write_text(duplicate.model_dump_json() + "\n", encoding="utf-8")
+
+    with pytest.raises(
+        BootstrapApplyError,
+        match="multiple active bootstrap operations",
+    ):
+        runner.start(repo)
+
+
+def test_start_rejects_a_tampered_repository_operation_index(
+    tmp_path: Path,
+) -> None:
+    repo = _create_repository(tmp_path)
+    state_root = tmp_path / "state"
+    runner = BootstrapRunner(
+        state_store=FileBootstrapRunnerStateStore(state_root=state_root)
+    )
+    runner.start(repo)
+    index_path = repository_index_file_path(
+        REPOSITORY_ID,
+        state_root=state_root,
+    )
+    payload = json.loads(index_path.read_text(encoding="utf-8"))
+    payload["operation_id"] = "bootstrap-tampered"
+    index_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    with pytest.raises(
+        BootstrapApplyError,
+        match="repository operation index is invalid or tampered",
+    ):
+        runner.start(repo)
+
+
+def test_start_resume_refuses_repository_commit_drift(tmp_path: Path) -> None:
+    repo = _create_repository(tmp_path)
+    runner = BootstrapRunner(
+        state_store=FileBootstrapRunnerStateStore(state_root=tmp_path / "state")
+    )
+    runner.start(repo)
+    _write(repo / "agent" / "extra.py", "print('change')\n")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "--quiet", "-m", "change"],
+        check=True,
+    )
+
+    with pytest.raises(
+        BootstrapApplyError,
+        match="exact repository root, identity, and commit",
+    ):
+        runner.start(repo)
+
+
+def test_start_resume_refuses_runtime_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _create_repository(tmp_path)
+    state_root = tmp_path / "state"
+    BootstrapRunner(
+        state_store=FileBootstrapRunnerStateStore(state_root=state_root)
+    ).start(repo)
+    monkeypatch.setenv("FOUNDRY_OPT_RUNTIME_COMMIT", "b" * 40)
+
+    with pytest.raises(
+        BootstrapApplyError,
+        match="exact runtime repository and commit",
+    ):
+        BootstrapRunner(
+            state_store=FileBootstrapRunnerStateStore(state_root=state_root)
+        ).start(repo)
 
 
 def test_concurrent_generation_conflict_is_rejected(tmp_path: Path) -> None:

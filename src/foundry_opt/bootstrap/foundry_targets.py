@@ -76,6 +76,7 @@ class _PendingQuestion:
     missing_fields: tuple[str, ...]
     project_endpoint: _FieldValue | None
     agent_name: _FieldValue | None
+    blocked_detail: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,9 +304,75 @@ class DefaultFoundryTargetResolutionHandler:
         answer: object,
     ) -> Mapping[str, str]:
         question = self._require_pending_question(operation, operation.foundry_targets)
+        if question.blocked_detail is not None:
+            if isinstance(answer, str):
+                if answer.strip().casefold() == "retry":
+                    payload: dict[str, str] = {}
+                elif len(question.missing_fields) == 1:
+                    payload = {question.missing_fields[0]: answer}
+                else:
+                    raise BootstrapApplyError(
+                        "blocked Foundry target correction requires named fields"
+                    )
+            elif isinstance(answer, Mapping):
+                payload = {str(key): str(value) for key, value in answer.items()}
+            else:
+                raise BootstrapApplyError(
+                    "blocked Foundry target answers must retry or provide corrected fields"
+                )
+            retry = payload.pop("retry", None)
+            if retry is not None and retry.casefold() not in {"true", "yes", "1"}:
+                raise BootstrapApplyError("Foundry target retry must be true")
+            if retry is not None and payload:
+                raise BootstrapApplyError(
+                    "Foundry target retry cannot be combined with corrected fields"
+                )
+            unsupported = set(payload) - {"project_endpoint", "agent_name"}
+            if unsupported:
+                raise BootstrapApplyError(
+                    "unsupported Foundry target field: "
+                    + ", ".join(sorted(unsupported))
+                )
+            merged = {
+                key: value
+                for key, value in (
+                    (
+                        "project_endpoint",
+                        (
+                            question.project_endpoint.value
+                            if question.project_endpoint is not None
+                            else None
+                        ),
+                    ),
+                    (
+                        "agent_name",
+                        (
+                            question.agent_name.value
+                            if question.agent_name is not None
+                            else None
+                        ),
+                    ),
+                )
+                if value is not None
+            }
+            merged.update(payload)
+            missing = {"project_endpoint", "agent_name"} - set(merged)
+            if missing:
+                raise BootstrapApplyError(
+                    "blocked Foundry target correction must provide: "
+                    + ", ".join(sorted(missing))
+                )
+            return {
+                "project_endpoint": _validate_project_endpoint(
+                    merged["project_endpoint"]
+                ),
+                "agent_name": _validate_agent_name(merged["agent_name"]),
+            }
         if isinstance(answer, str):
             if len(question.missing_fields) != 1:
-                raise BootstrapApplyError("foundry target answers must provide both unresolved fields")
+                raise BootstrapApplyError(
+                    "Foundry target question accepts one field at a time"
+                )
             payload = {question.missing_fields[0]: answer}
         elif isinstance(answer, Mapping):
             payload = {str(key): str(value) for key, value in answer.items()}
@@ -313,9 +380,10 @@ class DefaultFoundryTargetResolutionHandler:
             raise BootstrapApplyError("foundry target answer must be a mapping or string")
         expected = set(question.missing_fields)
         actual = set(payload)
-        if actual != expected:
+        allowed = {"project_endpoint", "agent_name"}
+        if not expected.issubset(actual) or not actual.issubset(allowed):
             raise BootstrapApplyError(
-                "foundry target answer must provide exactly these fields: "
+                "foundry target answer must include these fields: "
                 + ", ".join(sorted(expected))
             )
         normalized: dict[str, str] = {}
@@ -337,7 +405,15 @@ class DefaultFoundryTargetResolutionHandler:
         pending = self._next_pending_question(operation, operation.foundry_targets)
         if pending is None:
             return None
-        lines = [f"Provide the unresolved Foundry target fields for `{pending.repo_agent_id}`."]
+        if pending.blocked_detail is not None:
+            lines = [
+                f"The Foundry target for `{pending.repo_agent_id}` is blocked.",
+                f"- Detail: {pending.blocked_detail}",
+            ]
+        else:
+            lines = [
+                f"Provide the unresolved Foundry target fields for `{pending.repo_agent_id}`."
+            ]
         if pending.project_endpoint is not None:
             lines.append(
                 f"- project_endpoint: `{pending.project_endpoint.value}` "
@@ -348,10 +424,27 @@ class DefaultFoundryTargetResolutionHandler:
                 f"- agent_name: `{pending.agent_name.value}` "
                 f"(from {_human_source(pending.agent_name.source)})"
             )
-        lines.append(
-            "- Still needed: " + ", ".join(f"`{field}`" for field in pending.missing_fields)
-        )
-        lines.append("- Answer with a mapping of the missing field names to values.")
+        if pending.blocked_detail is not None:
+            if pending.missing_fields:
+                lines.append(
+                    "- Still needed: "
+                    + ", ".join(
+                        f"`{field}`" for field in pending.missing_fields
+                    )
+                )
+            if pending.blocked_detail.startswith("owner input recorded;"):
+                lines.append("- Provide the remaining field through the skill bridge.")
+            else:
+                lines.append(
+                    "- Retry after correcting Azure access, or provide a corrected "
+                    "project endpoint and/or agent name."
+                )
+        else:
+            lines.append(
+                "- Still needed: "
+                + ", ".join(f"`{field}`" for field in pending.missing_fields)
+            )
+            lines.append("- Provide the requested value or values through the skill bridge.")
         return BootstrapQuestion(
             question_id=question_id,
             kind="foundry_target",
@@ -470,10 +563,61 @@ class DefaultFoundryTargetResolutionHandler:
     ) -> BootstrapStageOutcome:
         normalized = self.persisted_answer_value(operation=operation, answer=answer)
         pending = self._require_pending_question(operation, operation.foundry_targets)
+        merged = {
+            key: value
+            for key, value in (
+                (
+                    "project_endpoint",
+                    (
+                        pending.project_endpoint.value
+                        if pending.project_endpoint is not None
+                        else None
+                    ),
+                ),
+                (
+                    "agent_name",
+                    (
+                        pending.agent_name.value
+                        if pending.agent_name is not None
+                        else None
+                    ),
+                ),
+            )
+            if value is not None
+        }
+        merged.update(normalized)
         records = self._prepare_records(
             operation,
-            owner_overrides={pending.repo_agent_id.casefold(): normalized},
+            owner_overrides={pending.repo_agent_id.casefold(): merged},
         )
+        if not any(
+            item.repo_agent_id.casefold() == pending.repo_agent_id.casefold()
+            for item in records
+        ):
+            context = self._local_context(
+                operation,
+                repo_agent_id=pending.repo_agent_id,
+                owner_overrides=merged,
+            )
+            if context is None:
+                raise BootstrapApplyError(
+                    "selected agent is missing from persisted discovery facts"
+                )
+            records = tuple(
+                sorted(
+                    (
+                        *records,
+                        self._blocked_record(
+                            context,
+                            detail=(
+                                "owner input recorded; still required: "
+                                + ", ".join(context.missing_fields)
+                            ),
+                        ),
+                    ),
+                    key=lambda item: item.repo_agent_id.casefold(),
+                )
+            )
         next_pending = self._next_pending_question(operation, records)
         if next_pending is not None:
             return BootstrapStageOutcome(
@@ -559,21 +703,67 @@ class DefaultFoundryTargetResolutionHandler:
         operation,
         records: Sequence[BootstrapFoundryTargetRecord],
     ) -> _PendingQuestion | None:
-        resolved = {item.repo_agent_id.casefold() for item in records}
+        by_id = {
+            item.repo_agent_id.casefold(): item
+            for item in records
+        }
         for repo_agent_id in sorted(
             self._target_agent_ids(operation),
             key=str.casefold,
         ):
-            if repo_agent_id.casefold() in resolved:
+            record = by_id.get(repo_agent_id.casefold())
+            if record is not None and record.reviewed_target.state != "blocked":
                 continue
-            context = self._local_context(operation, repo_agent_id=repo_agent_id)
+            if record is not None:
+                target = record.reviewed_target
+                return _PendingQuestion(
+                    repo_agent_id=record.repo_agent_id,
+                    root=record.root,
+                    missing_fields=tuple(
+                        field
+                        for field, value in (
+                            ("project_endpoint", target.project_endpoint),
+                            ("agent_name", target.agent_name),
+                        )
+                        if value is None
+                    ),
+                    project_endpoint=(
+                        _FieldValue(
+                            target.project_endpoint,
+                            target.project_endpoint_source,
+                            "blocked target",
+                        )
+                        if (
+                            target.project_endpoint is not None
+                            and target.project_endpoint_source is not None
+                        )
+                        else None
+                    ),
+                    agent_name=(
+                        _FieldValue(
+                            target.agent_name,
+                            target.agent_name_source,
+                            "blocked target",
+                        )
+                        if (
+                            target.agent_name is not None
+                            and target.agent_name_source is not None
+                        )
+                        else None
+                    ),
+                    blocked_detail=target.detail,
+                )
+            context = self._local_context(
+                operation,
+                repo_agent_id=repo_agent_id,
+            )
             if context is None or context.blocked_detail is not None:
                 continue
             if context.missing_fields:
                 return _PendingQuestion(
                     repo_agent_id=context.repo_agent_id,
                     root=context.root,
-                    missing_fields=context.missing_fields,
+                    missing_fields=(context.missing_fields[0],),
                     project_endpoint=context.project_endpoint,
                     agent_name=context.agent_name,
                 )
@@ -807,12 +997,16 @@ class DefaultFoundryTargetResolutionHandler:
         root_path = repository_root if discovered.root == "." else repository_root / discovered.root
         seeds: list[_TargetSeed] = []
         blocked_detail: str | None = None
+        owner_seed, owner_blocked = self._seed_from_owner_answer(
+            owner_overrides or {}
+        )
+        if owner_blocked is not None:
+            blocked_detail = owner_blocked
         for seed in (
             self._seed_from_existing_profile(root_path),
             self._seed_from_agent_metadata(root_path),
             self._seed_from_azure_values(repository_root, selected_count=len(operation.selection_plan.selected_agent_ids)),
             self._seed_from_binding_evidence(discovered.repo_agent_id, discovered.root),
-            self._seed_from_owner_answer(owner_overrides or {}),
         ):
             candidate, blocked = seed
             if blocked is not None:
@@ -820,9 +1014,17 @@ class DefaultFoundryTargetResolutionHandler:
                 break
             if candidate is not None:
                 seeds.append(candidate)
+        if owner_seed is not None:
+            seeds.insert(0, owner_seed)
         project_endpoint = next((item.project_endpoint for item in seeds if item.project_endpoint is not None), None)
         agent_name = next((item.agent_name for item in seeds if item.agent_name is not None), None)
         expected_version = next((item.expected_version for item in seeds if item.expected_version), None)
+        if (
+            owner_seed is not None
+            and owner_seed.project_endpoint is not None
+            and owner_seed.agent_name is not None
+        ):
+            blocked_detail = None
         return _LocalTargetContext(
             repo_agent_id=discovered.repo_agent_id,
             root=discovered.root,

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Literal, Protocol, Self
@@ -66,7 +68,12 @@ BootstrapVerificationChoiceKind = Literal[
 
 _STATE_FILE_NAME = "state.json"
 _LOCK_FILE_NAME = "state.lock"
+_REPOSITORY_INDEX_DIRECTORY_NAME = "repositories"
+_REPOSITORY_INDEX_FILE_NAME = "active-operation.json"
+_REPOSITORY_INDEX_LOCK_FILE_NAME = "active-operation.lock"
 _MAX_STATE_BYTES = 1024 * 1024
+_MAX_REPOSITORY_INDEX_BYTES = 16 * 1024
+_TERMINAL_LIFECYCLE_STAGES = frozenset({"final_handoff", "rolled_back"})
 _QUESTION_KIND_BY_STAGE: dict[BootstrapLifecycleStage, BootstrapQuestionKind] = {
     "agent_selection": "agent_selection",
     "foundry_target_resolution": "foundry_target",
@@ -544,6 +551,60 @@ class BootstrapRunnerStateEnvelope(BootstrapDocument):
         return self
 
 
+class BootstrapRepositoryOperationIndex(BootstrapDocument):
+    repository_id: str
+    operation_id: str
+    index_hash: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+
+    @field_validator("repository_id")
+    @classmethod
+    def _validate_repository_id(cls, value: str) -> str:
+        if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", value) is None:
+            raise BootstrapConfigError(
+                "repository operation index has an invalid repository_id"
+            )
+        return value
+
+    @field_validator("operation_id")
+    @classmethod
+    def _validate_operation_id(cls, value: str) -> str:
+        return require_safe_operation_id(
+            value,
+            message="repository operation index has an invalid operation_id",
+            error_factory=BootstrapConfigError,
+        )
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        repository_id: str,
+        operation_id: str,
+    ) -> "BootstrapRepositoryOperationIndex":
+        payload = {
+            "repository_id": repository_id,
+            "operation_id": operation_id,
+        }
+        return cls.model_validate(
+            {
+                **payload,
+                "index_hash": canonical_sha256(payload),
+            }
+        )
+
+    @model_validator(mode="after")
+    def _validate_hash(self) -> Self:
+        payload = {
+            "repository_id": self.repository_id,
+            "operation_id": self.operation_id,
+        }
+        if self.index_hash != canonical_sha256(payload):
+            raise BootstrapApplyError(
+                "repository operation index hash does not match its payload"
+            )
+        return self
+
+
 class FilesystemProtocol(Protocol):
     def resolve_directory(self, value: str | Path) -> Path: ...
 
@@ -567,6 +628,14 @@ class ClockProtocol(Protocol):
 
 class BootstrapRunnerStateStoreProtocol(Protocol):
     def load(self, operation_id: str) -> BootstrapRunnerStateEnvelope: ...
+    def find_active(
+        self,
+        repository_id: str,
+    ) -> BootstrapRunnerStateEnvelope | None: ...
+    def start_or_resume(
+        self,
+        envelope: BootstrapRunnerStateEnvelope,
+    ) -> BootstrapRunnerStateEnvelope: ...
     def save(
         self,
         envelope: BootstrapRunnerStateEnvelope,
@@ -853,9 +922,54 @@ def lock_file_path(operation_id: str, *, state_root: Path | None = None) -> Path
     return operation_directory(operation_id, state_root=state_root) / _LOCK_FILE_NAME
 
 
+def repository_index_directory(
+    repository_id: str,
+    *,
+    state_root: Path | None = None,
+) -> Path:
+    root = (
+        resolve_state_root(state_root)
+        if state_root is not None
+        else default_runner_state_root()
+    )
+    repository_segment = canonical_sha256({"repository_id": repository_id})
+    return resolve_state_child_directory(
+        root,
+        _REPOSITORY_INDEX_DIRECTORY_NAME,
+        repository_segment,
+        escape_message="repository operation index escapes the state root",
+    )
+
+
+def repository_index_file_path(
+    repository_id: str,
+    *,
+    state_root: Path | None = None,
+) -> Path:
+    return (
+        repository_index_directory(repository_id, state_root=state_root)
+        / _REPOSITORY_INDEX_FILE_NAME
+    )
+
+
+def repository_index_lock_file_path(
+    repository_id: str,
+    *,
+    state_root: Path | None = None,
+) -> Path:
+    return (
+        repository_index_directory(repository_id, state_root=state_root)
+        / _REPOSITORY_INDEX_LOCK_FILE_NAME
+    )
+
+
 class FileBootstrapRunnerStateStore(BootstrapRunnerStateStoreProtocol):
     def __init__(self, *, state_root: Path | None = None) -> None:
-        self._state_root = Path(state_root) if state_root is not None else default_runner_state_root()
+        self._state_root = (
+            resolve_state_root(state_root)
+            if state_root is not None
+            else default_runner_state_root()
+        )
 
     def load(self, operation_id: str) -> BootstrapRunnerStateEnvelope:
         data = state_file_path(operation_id, state_root=self._state_root).read_bytes()
@@ -866,7 +980,74 @@ class FileBootstrapRunnerStateStore(BootstrapRunnerStateStoreProtocol):
         except Exception as exc:
             raise BootstrapApplyError("bootstrap runner state is invalid or tampered") from exc
 
+    def start_or_resume(
+        self,
+        envelope: BootstrapRunnerStateEnvelope,
+    ) -> BootstrapRunnerStateEnvelope:
+        repository_id = envelope.repository_binding.repository_id
+        with self._repository_lock(repository_id):
+            active = self._find_active(repository_id)
+            if active is not None:
+                self._write_repository_index(active)
+                return active
+            self._save_state(envelope)
+            self._write_repository_index(envelope)
+            return envelope
+
+    def find_active(
+        self,
+        repository_id: str,
+    ) -> BootstrapRunnerStateEnvelope | None:
+        with self._repository_lock(repository_id):
+            active = self._find_active(repository_id)
+            if active is not None:
+                self._write_repository_index(active)
+            return active
+
     def save(
+        self,
+        envelope: BootstrapRunnerStateEnvelope,
+        *,
+        expected_generation: int | None = None,
+        expected_generation_hash: str | None = None,
+    ) -> None:
+        repository_id = envelope.repository_binding.repository_id
+        with self._repository_lock(repository_id):
+            if (
+                expected_generation is None
+                and envelope.lifecycle_stage not in _TERMINAL_LIFECYCLE_STAGES
+            ):
+                active = [
+                    item
+                    for item in self._load_repository_operations(repository_id)
+                    if item.lifecycle_stage not in _TERMINAL_LIFECYCLE_STAGES
+                    and item.operation_id != envelope.operation_id
+                ]
+                if active:
+                    raise BootstrapApplyError(
+                        "an active bootstrap operation already exists for repository "
+                        f"{repository_id}: {active[0].operation_id}"
+                    )
+            self._save_state(
+                envelope,
+                expected_generation=expected_generation,
+                expected_generation_hash=expected_generation_hash,
+            )
+            current_index = self._load_repository_index(repository_id)
+            if (
+                current_index is None
+                or current_index.operation_id == envelope.operation_id
+            ):
+                self._write_repository_index(envelope)
+                return
+            indexed = self._load_indexed_operation(current_index)
+            if (
+                indexed.lifecycle_stage in _TERMINAL_LIFECYCLE_STAGES
+                and envelope.lifecycle_stage not in _TERMINAL_LIFECYCLE_STAGES
+            ):
+                self._write_repository_index(envelope)
+
+    def _save_state(
         self,
         envelope: BootstrapRunnerStateEnvelope,
         *,
@@ -900,6 +1081,168 @@ class FileBootstrapRunnerStateStore(BootstrapRunnerStateStoreProtocol):
         finally:
             os.close(lock_fd)
             os.unlink(lock)
+
+    @contextmanager
+    def _repository_lock(self, repository_id: str) -> Iterator[None]:
+        lock = repository_index_lock_file_path(
+            repository_id,
+            state_root=self._state_root,
+        )
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            lock_fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError as exc:
+            raise BootstrapApplyError(
+                "repository operation index is locked by another writer"
+            ) from exc
+        try:
+            yield
+        finally:
+            os.close(lock_fd)
+            os.unlink(lock)
+
+    def _load_repository_operations(
+        self,
+        repository_id: str,
+    ) -> tuple[BootstrapRunnerStateEnvelope, ...]:
+        operation_ids: set[str] = set()
+        index = self._load_repository_index(repository_id)
+        if index is not None:
+            operation_ids.add(index.operation_id)
+        if self._state_root.is_dir():
+            for child in self._state_root.iterdir():
+                if (
+                    not child.is_dir()
+                    or child.name == _REPOSITORY_INDEX_DIRECTORY_NAME
+                ):
+                    continue
+                path = child / _STATE_FILE_NAME
+                if not path.is_file():
+                    continue
+                try:
+                    data = path.read_bytes()
+                    if len(data) > _MAX_STATE_BYTES:
+                        continue
+                    raw = json.loads(data)
+                    payload = raw.get("payload")
+                    binding = (
+                        payload.get("repository_binding")
+                        if isinstance(payload, dict)
+                        else None
+                    )
+                    indexed_repository_id = (
+                        binding.get("repository_id")
+                        if isinstance(binding, dict)
+                        else None
+                    )
+                except (OSError, ValueError):
+                    continue
+                if indexed_repository_id == repository_id:
+                    operation_ids.add(child.name)
+        operations: list[BootstrapRunnerStateEnvelope] = []
+        for operation_id in sorted(operation_ids):
+            try:
+                operation = self.load(operation_id)
+            except FileNotFoundError as exc:
+                raise BootstrapApplyError(
+                    "repository operation state is missing"
+                ) from exc
+            if operation.operation_id != operation_id:
+                raise BootstrapApplyError(
+                    "bootstrap runner state path does not match its operation_id"
+                )
+            if operation.repository_binding.repository_id != repository_id:
+                raise BootstrapApplyError(
+                    "repository operation index points to a different repository"
+                )
+            operations.append(operation)
+        return tuple(operations)
+
+    def _find_active(
+        self,
+        repository_id: str,
+    ) -> BootstrapRunnerStateEnvelope | None:
+        active = [
+            item
+            for item in self._load_repository_operations(repository_id)
+            if item.lifecycle_stage not in _TERMINAL_LIFECYCLE_STAGES
+        ]
+        if len(active) > 1:
+            operation_ids = ", ".join(
+                sorted(item.operation_id for item in active)
+            )
+            raise BootstrapApplyError(
+                "multiple active bootstrap operations exist for repository "
+                f"{repository_id}: {operation_ids}"
+            )
+        return active[0] if active else None
+
+    def _load_repository_index(
+        self,
+        repository_id: str,
+    ) -> BootstrapRepositoryOperationIndex | None:
+        path = repository_index_file_path(
+            repository_id,
+            state_root=self._state_root,
+        )
+        if not path.exists():
+            return None
+        data = path.read_bytes()
+        if len(data) > _MAX_REPOSITORY_INDEX_BYTES:
+            raise BootstrapApplyError("repository operation index exceeds size limit")
+        try:
+            index = BootstrapRepositoryOperationIndex.model_validate_json(data)
+        except Exception as exc:
+            raise BootstrapApplyError(
+                "repository operation index is invalid or tampered"
+            ) from exc
+        if index.repository_id != repository_id:
+            raise BootstrapApplyError(
+                "repository operation index identity does not match its path"
+            )
+        return index
+
+    def _load_indexed_operation(
+        self,
+        index: BootstrapRepositoryOperationIndex,
+    ) -> BootstrapRunnerStateEnvelope:
+        try:
+            operation = self.load(index.operation_id)
+        except FileNotFoundError as exc:
+            raise BootstrapApplyError(
+                "repository operation index references missing state"
+            ) from exc
+        if operation.repository_binding.repository_id != index.repository_id:
+            raise BootstrapApplyError(
+                "repository operation index points to a different repository"
+            )
+        return operation
+
+    def _write_repository_index(
+        self,
+        envelope: BootstrapRunnerStateEnvelope,
+    ) -> None:
+        index = BootstrapRepositoryOperationIndex.create(
+            repository_id=envelope.repository_binding.repository_id,
+            operation_id=envelope.operation_id,
+        )
+        path = repository_index_file_path(
+            index.repository_id,
+            state_root=self._state_root,
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = canonical_json_bytes(index.model_dump(mode="json")) + b"\n"
+        if len(data) > _MAX_REPOSITORY_INDEX_BYTES:
+            raise BootstrapApplyError("repository operation index exceeds size limit")
+        temp = path.with_name(f"{path.stem}.{index.index_hash}.tmp")
+        try:
+            with open(temp, "xb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp, path)
+        finally:
+            temp.unlink(missing_ok=True)
 
 
 def next_runner_generation(
@@ -981,10 +1324,27 @@ class BootstrapRunner:
         repository_id = self._git.repository_id(repository_url)
         repository_head = self._git.head_commit(repository_root)
         repository_branch = self._git.current_branch(repository_root)
+        repository_binding = RepositoryBinding(
+            repository_root=str(repository_root),
+            repository_id=repository_id,
+            repository_url=repository_url,
+            head_commit=repository_head,
+            branch_name=repository_branch,
+        )
         runtime_binding = RuntimeBinding(
             runtime_repository=self._runtime.runtime_repository(),
             runtime_commit=self._runtime.runtime_commit(),
         )
+        find_active = getattr(self._state_store, "find_active", None)
+        if find_active is not None:
+            active = find_active(repository_id)
+            if active is not None:
+                active = self._validate_resume(
+                    active,
+                    current_runtime=runtime_binding,
+                    observed_repository=repository_binding,
+                )
+                return self._build_turn(active)
         discovery = discover_repository_agents(repository_root)
         selection = _selection_plan_from_discovery(discovery)
         stage: BootstrapLifecycleStage = "agent_selection"
@@ -999,19 +1359,24 @@ class BootstrapRunner:
             lifecycle_stage=stage,
             started_at=_isoformat(now),
             updated_at=_isoformat(now),
-            repository_binding=RepositoryBinding(
-                repository_root=str(repository_root),
-                repository_id=repository_id,
-                repository_url=repository_url,
-                head_commit=repository_head,
-                branch_name=repository_branch,
-            ),
+            repository_binding=repository_binding,
             runtime_binding=runtime_binding,
             selection_plan=selection,
             note=note,
         )
-        self._state_store.save(envelope)
-        return self._build_turn(envelope)
+        start_or_resume = getattr(self._state_store, "start_or_resume", None)
+        if start_or_resume is None:
+            self._state_store.save(envelope)
+            selected = envelope
+        else:
+            selected = start_or_resume(envelope)
+        if selected.operation_id != envelope.operation_id:
+            selected = self._validate_resume(
+                selected,
+                current_runtime=runtime_binding,
+                observed_repository=repository_binding,
+            )
+        return self._build_turn(selected)
 
     def answer(
         self,
@@ -1162,14 +1527,11 @@ class BootstrapRunner:
             runtime_repository=self._runtime.runtime_repository(),
             runtime_commit=self._runtime.runtime_commit(),
         )
-        if current_runtime != envelope.runtime_binding:
-            raise BootstrapApplyError("bootstrap resume requires the exact runtime repository and commit")
         root = self._git.repository_root(Path(envelope.repository_binding.repository_root))
         current_url = self._git.repository_url(root)
         current_id = self._git.repository_id(current_url)
         current_head = self._git.head_commit(root)
         current_branch = self._git.current_branch(root)
-        expected = envelope.repository_binding
         observed = RepositoryBinding(
             repository_root=str(root),
             repository_id=current_id,
@@ -1177,7 +1539,24 @@ class BootstrapRunner:
             head_commit=current_head,
             branch_name=current_branch,
         )
-        if observed != expected:
+        return self._validate_resume(
+            envelope,
+            current_runtime=current_runtime,
+            observed_repository=observed,
+        )
+
+    def _validate_resume(
+        self,
+        envelope: BootstrapRunnerStateEnvelope,
+        *,
+        current_runtime: RuntimeBinding,
+        observed_repository: RepositoryBinding,
+    ) -> BootstrapRunnerStateEnvelope:
+        if current_runtime != envelope.runtime_binding:
+            raise BootstrapApplyError(
+                "bootstrap resume requires the exact runtime repository and commit"
+            )
+        if observed_repository != envelope.repository_binding:
             raise BootstrapApplyError("bootstrap resume requires the exact repository root, identity, and commit")
         if self._commit_handler is not None and (
             envelope.lifecycle_stage == "commit_approval"
@@ -2002,5 +2381,8 @@ __all__ = [
     "lock_file_path",
     "next_runner_generation",
     "operation_directory",
+    "repository_index_directory",
+    "repository_index_file_path",
+    "repository_index_lock_file_path",
     "state_file_path",
 ]

@@ -118,6 +118,10 @@ def test_bootstrap_skill_frontmatter_and_owner_contract_describes_canonical_laun
     assert "`<<<FOUNDRY_BOOTSTRAP_TURN>>>`" in normalized
     assert "`next_question.title` plus `next_question.details_markdown`" in normalized
     assert "Never paste or expose its raw JSON to the owner" in normalized
+    assert "--project-endpoint" in normalized
+    assert "--agent-name" in normalized
+    assert "--retry" in normalized
+    assert "--response-json" not in normalized
     assert "status --operation-id <id>" in normalized
     assert "rollback --operation-id <id>" in normalized
     assert "Do not create or switch to a custom agent." in normalized

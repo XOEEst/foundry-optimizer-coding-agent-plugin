@@ -102,6 +102,17 @@ class _FakeFoundryInventory:
         return outcome
 
 
+class _ExplodingRepositoryHandler:
+    def review(self, *, operation):
+        raise AssertionError("blocked target must not render repository review")
+
+    def approve(self, *, operation, approval):
+        raise AssertionError("blocked target must not approve repository review")
+
+    def rollback(self, *, operation, step, child_ref):
+        raise AssertionError("blocked target has no repository work to roll back")
+
+
 def _write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
@@ -367,7 +378,7 @@ def test_questions_only_cover_unresolved_fields_one_agent_at_a_time(tmp_path: Pa
     turn = runner.answer(
         turn.operation_id,
         first_question_id,
-        {"agent_name": "agent-a"},
+        "agent-a",
     )
 
     assert turn.state == "foundry_target_resolution"
@@ -375,22 +386,39 @@ def test_questions_only_cover_unresolved_fields_one_agent_at_a_time(tmp_path: Pa
     assert turn.next_question.question_id != first_question_id
     assert selected[1] in turn.next_question.title
     assert "`project_endpoint`" in turn.next_question.details_markdown
-    assert "`agent_name`" in turn.next_question.details_markdown
+    assert "`agent_name`" not in turn.next_question.details_markdown
 
     with pytest.raises(BootstrapApplyError, match="stale question id"):
         runner.answer(
             turn.operation_id,
             first_question_id,
-            {"agent_name": "agent-a"},
+            "agent-a",
         )
 
-    final = runner.answer(
+    endpoint = runner.answer(
         turn.operation_id,
         turn.next_question.question_id,
-        {
-            "project_endpoint": SECOND_ENDPOINT,
-            "agent_name": "agent-b",
-        },
+        SECOND_ENDPOINT,
+    )
+    assert endpoint.state == "foundry_target_resolution"
+    assert endpoint.next_question is not None
+    assert "`agent_name`" in endpoint.next_question.details_markdown
+    assert "`project_endpoint`" not in endpoint.next_question.details_markdown
+
+    resumed = BootstrapRunner(
+        state_store=FileBootstrapRunnerStateStore(state_root=tmp_path / "state"),
+        target_resolution_handler=DefaultFoundryTargetResolutionHandler(
+            foundry_inventory=foundry_inventory,
+            azure_inventory=azure_inventory,
+        ),
+    ).start(repo)
+    assert resumed.operation_id == endpoint.operation_id
+    assert resumed.next_question == endpoint.next_question
+
+    final = runner.answer(
+        resumed.operation_id,
+        resumed.next_question.question_id,
+        "agent-b",
     )
     records = {
         item.repo_agent_id: item.reviewed_target
@@ -451,13 +479,92 @@ def test_invalid_metadata_blocks_the_target_without_inventory_calls(
     turn = _select_and_enable_all(runner, first)
     record = store.load(turn.operation_id).foundry_targets[0].reviewed_target
 
-    assert turn.state == "verification_policy"
+    assert turn.state == "foundry_target_resolution"
+    assert turn.next_question is not None
+    assert turn.next_question.kind == "foundry_target"
+    assert "blocked" in turn.next_question.details_markdown.casefold()
+    assert [action.name for action in turn.available_actions] == ["answer", "status"]
     assert record.state == "blocked"
     assert record.deployment_ready is False
     assert expected_detail in (record.detail or "")
     assert foundry_inventory.inspect_calls == []
     assert foundry_inventory.observe_calls == []
     assert azure_inventory.calls == []
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected_endpoint", "expected_account_id"),
+    [
+        ({"retry": "true"}, PROJECT_ENDPOINT, ACCOUNT_RESOURCE_ID),
+        ({"project_endpoint": SECOND_ENDPOINT}, SECOND_ENDPOINT, SECOND_ACCOUNT_ID),
+    ],
+)
+def test_azure_account_resolution_failure_stays_renderable_and_recovers(
+    tmp_path: Path,
+    answer: Mapping[str, str],
+    expected_endpoint: str,
+    expected_account_id: str,
+) -> None:
+    repo = _create_repository(
+        tmp_path,
+        agents=[
+            {
+                "root": "agents/app",
+                "metadata": {
+                    "project_endpoint": PROJECT_ENDPOINT,
+                    "agent_name": "example-agent",
+                },
+            }
+        ],
+    )
+    foundry_inventory = _FakeFoundryInventory(
+        latest_versions={
+            PROJECT_ENDPOINT: {},
+            SECOND_ENDPOINT: {},
+        }
+    )
+    azure_inventory = _FakeAzureInventory(
+        {
+            PROJECT_ENDPOINT: None,
+            SECOND_ENDPOINT: SECOND_ACCOUNT_ID,
+        }
+    )
+    store = FileBootstrapRunnerStateStore(state_root=tmp_path / "state")
+    runner = BootstrapRunner(
+        state_store=store,
+        target_resolution_handler=DefaultFoundryTargetResolutionHandler(
+            foundry_inventory=foundry_inventory,
+            azure_inventory=azure_inventory,
+        ),
+        repository_handler=_ExplodingRepositoryHandler(),
+    )
+
+    first = runner.start(repo)
+    blocked = _select_and_enable_all(runner, first)
+    status = runner.status(blocked.operation_id)
+
+    assert blocked.state == "foundry_target_resolution"
+    assert blocked.next_question is not None
+    assert "could not be resolved" in blocked.owner_markdown
+    assert "retry" in blocked.next_question.details_markdown.casefold()
+    assert status.owner_markdown == blocked.owner_markdown
+    assert [action.name for action in status.available_actions] == ["answer", "status"]
+
+    if answer == {"retry": "true"}:
+        azure_inventory._mapping[PROJECT_ENDPOINT] = ACCOUNT_RESOURCE_ID
+    recovered = runner.answer(
+        blocked.operation_id,
+        blocked.next_question.question_id,
+        answer,
+    )
+    record = store.load(recovered.operation_id).foundry_targets[0].reviewed_target
+
+    assert recovered.state == "verification_policy"
+    assert record.state == "new_target"
+    assert record.project_endpoint == expected_endpoint
+    assert record.agent_name == "example-agent"
+    assert record.account_resource_id == expected_account_id
+    assert record.deployment_ready is True
 
 
 def test_existing_diverged_and_existing_unknown_targets_are_recorded(tmp_path: Path) -> None:

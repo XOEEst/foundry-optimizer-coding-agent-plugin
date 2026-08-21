@@ -36,6 +36,8 @@ files, or learn the low-level bootstrap CLI.
    - downloaded skill: `python scripts/bootstrap.py start --repository .`
    - source checkout of this repository:
      `python plugins/foundry-bootstrap/scripts/bootstrap.py start --repository .`
+   `start` resumes the repository's active operation. It creates a new
+   operation only when no active operation remains.
 3. Read only the `<<<FOUNDRY_BOOTSTRAP_OWNER_MARKDOWN>>>` section to the
    owner.
 4. Keep the `<<<FOUNDRY_BOOTSTRAP_TURN>>>` envelope for yourself. Never paste
@@ -49,6 +51,12 @@ files, or learn the low-level bootstrap CLI.
      `python scripts/bootstrap.py answer --operation-id <id> --question-id <question-id> --choice <value> [--choice <value> ...]`
    - free-text question:
      `python scripts/bootstrap.py answer --operation-id <id> --question-id <question-id> --response "<owner response>"`
+   - Foundry target question:
+     `python scripts/bootstrap.py answer --operation-id <id> --question-id <question-id> [--project-endpoint "<endpoint>"] [--agent-name "<name>"]`
+   - blocked Foundry target after correcting Azure access:
+     `python scripts/bootstrap.py answer --operation-id <id> --question-id <question-id> --retry`
+   Supply every Foundry target field named by the question. Never encode an
+   owner answer as JSON.
 7. When `available_actions` includes `approve`, request that exact approval
    from the owner and record it with
    `python scripts/bootstrap.py approve --operation-id <id> --step <repository|connection|commit|deployment> --actor "<owner>" --summary "<approved scope>"`.

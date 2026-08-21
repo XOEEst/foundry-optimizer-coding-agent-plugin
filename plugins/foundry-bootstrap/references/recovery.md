@@ -8,9 +8,14 @@ repository.
 
 ## Resume after interruption
 
-Invoke `/foundry-bootstrap` again. The skill uses the stored operation ID,
-reloads the exact runtime pin, validates repository and commit drift, and shows
-the current review or question.
+Invoke `/foundry-bootstrap` again from the same repository. `start` finds the
+single active operation for that repository and returns its current review or
+question. A completed or rolled-back operation is stale and does not prevent a
+new operation. If more than one active operation exists, bootstrap fails closed
+instead of choosing one.
+
+Resume still requires the exact runtime repository and commit plus the exact
+repository root, identity, branch, and commit recorded by the operation.
 
 ## Stale question
 
@@ -19,6 +24,9 @@ ID. Refresh status and answer only the newly returned question.
 
 ## Failed provider operation
 
+- A blocked Foundry target remains at target resolution. Correct the endpoint
+  or agent name through the documented answer flags, or fix Azure access and
+  retry the same reviewed target.
 - Repository and connection operations retain redacted child receipts.
 - A partial GitHub/Azure connection compensates only resources created by that
   operation.

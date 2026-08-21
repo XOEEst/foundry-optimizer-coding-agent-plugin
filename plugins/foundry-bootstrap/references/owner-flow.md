@@ -18,6 +18,9 @@ JSON, hashes, provider state, or receipt payloads during the normal path.
    - Confirm a Foundry project endpoint and agent name for each enabled agent.
    - Values already proven by a profile, metadata, `azure.yaml`, azd, or
      binding evidence are reused.
+   - If Azure account resolution is blocked, correct either target field or
+     retry after fixing the current Azure login. Bootstrap does not advance to
+     repository review until the enabled target is renderable and resolved.
 3. **Repository changes**
    - Registry, profiles, instructions, issue form, workflows, preserved files,
      and conflicts.

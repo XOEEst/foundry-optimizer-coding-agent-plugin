@@ -362,7 +362,7 @@ def test_rollback_uses_the_recorded_step_with_fake_runner() -> None:
     assert machine_turn["next_question"] is None
 
 
-def test_answer_rejects_malformed_structured_response() -> None:
+def test_answer_uses_dedicated_foundry_target_flags() -> None:
     module = _load_bridge_module()
     runner = _FakeRunner(answer_turn=_status_turn())
     stdout = io.StringIO()
@@ -374,19 +374,73 @@ def test_answer_rejects_malformed_structured_response() -> None:
             "--operation-id",
             "bootstrap-123",
             "--question-id",
-            "agent_selection:0:abc123",
-            "--response-json",
-            "{not-json",
+            "foundry_target:1:def456",
+            "--project-endpoint",
+            "https://example.services.ai.azure.com/api/projects/example",
+            "--agent-name",
+            "example-agent",
         ],
         runner_factory=lambda _: runner,
         stdout=stdout,
         stderr=stderr,
     )
 
-    assert exit_code == 1
-    assert stdout.getvalue() == ""
-    assert "answer JSON is invalid" in stderr.getvalue()
-    assert runner.calls == []
+    assert exit_code == 0
+    assert stderr.getvalue() == ""
+    assert runner.calls == [
+        (
+            "answer",
+            "bootstrap-123",
+            "foundry_target:1:def456",
+            {
+                "project_endpoint": "https://example.services.ai.azure.com/api/projects/example",
+                "agent_name": "example-agent",
+            },
+        )
+    ]
+
+
+def test_answer_uses_retry_without_raw_json() -> None:
+    module = _load_bridge_module()
+    runner = _FakeRunner(answer_turn=_status_turn())
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    exit_code = module.main(
+        [
+            "answer",
+            "--operation-id",
+            "bootstrap-123",
+            "--question-id",
+            "foundry_target:1:def456",
+            "--retry",
+        ],
+        runner_factory=lambda _: runner,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == 0
+    assert stderr.getvalue() == ""
+    assert runner.calls == [
+        (
+            "answer",
+            "bootstrap-123",
+            "foundry_target:1:def456",
+            {"retry": "true"},
+        )
+    ]
+    parser = module._build_parser()
+    subparsers = next(
+        action for action in parser._actions if getattr(action, "choices", None)
+    )
+    answer_parser = subparsers.choices["answer"]
+    option_strings = {
+        option
+        for action in answer_parser._actions
+        for option in action.option_strings
+    }
+    assert "--response-json" not in option_strings
 
 
 def test_answer_reports_stale_question_errors() -> None:

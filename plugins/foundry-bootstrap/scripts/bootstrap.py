@@ -102,7 +102,7 @@ def _build_parser() -> argparse.ArgumentParser:
     answer = subparsers.add_parser("answer", help="Answer the current bootstrap question.")
     answer.add_argument("--operation-id", required=True)
     answer.add_argument("--question-id", required=True)
-    answer_group = answer.add_mutually_exclusive_group(required=True)
+    answer_group = answer.add_mutually_exclusive_group()
     answer_group.add_argument(
         "--choice",
         action="append",
@@ -112,10 +112,6 @@ def _build_parser() -> argparse.ArgumentParser:
     answer_group.add_argument(
         "--response",
         help="Free-form string response.",
-    )
-    answer_group.add_argument(
-        "--response-json",
-        help="Structured JSON response for advanced or recovery flows.",
     )
     answer_group.add_argument(
         "--yes",
@@ -130,6 +126,19 @@ def _build_parser() -> argparse.ArgumentParser:
         const=False,
         dest="boolean_response",
         help="Boolean no response.",
+    )
+    answer.add_argument(
+        "--project-endpoint",
+        help="Reviewed Foundry project endpoint for a target question.",
+    )
+    answer.add_argument(
+        "--agent-name",
+        help="Reviewed deployed Foundry agent name for a target question.",
+    )
+    answer.add_argument(
+        "--retry",
+        action="store_true",
+        help="Retry the current blocked Foundry target after correcting access.",
     )
 
     approve = subparsers.add_parser("approve", help="Record an owner approval.")
@@ -408,18 +417,39 @@ def _load_production_runner_factory(
 
 
 def _coerce_answer(args: argparse.Namespace) -> object:
+    target_values = {
+        key: value
+        for key, value in (
+            ("project_endpoint", args.project_endpoint),
+            ("agent_name", args.agent_name),
+        )
+        if value is not None
+    }
+    modes = sum(
+        (
+            bool(args.choices),
+            args.response is not None,
+            args.boolean_response is not None,
+            bool(target_values),
+            args.retry,
+        )
+    )
+    if modes != 1:
+        raise RuntimeError(
+            "answer requires exactly one response mode: --choice, --response, "
+            "--project-endpoint/--agent-name, --retry, --yes, or --no"
+        )
     if args.choices:
         return list(args.choices)
     if args.response is not None:
         return args.response
-    if args.response_json is not None:
-        try:
-            return json.loads(args.response_json)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError("answer JSON is invalid") from exc
+    if target_values:
+        return target_values
+    if args.retry:
+        return {"retry": "true"}
     if args.boolean_response is not None:
         return args.boolean_response
-    raise RuntimeError("answer requires --choice, --response, --response-json, --yes, or --no")
+    raise RuntimeError("answer response mode is invalid")
 
 
 def _as_jsonable(value: Any) -> Any:
