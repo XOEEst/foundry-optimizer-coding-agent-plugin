@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Annotated, Literal, Self
@@ -23,6 +22,10 @@ from foundry_opt.bootstrap.errors import BootstrapApplyError, BootstrapConfigErr
 from foundry_opt.bootstrap.operation_state import default_state_root
 from foundry_opt.bootstrap.orchestrator import PhaseDriver
 from foundry_opt.bootstrap.receipts import PhaseReceipt, failure_receipt, summarize_receipt
+from foundry_opt.bootstrap.state_lock import (
+    atomic_replace_state,
+    state_file_lock,
+)
 
 ConnectionPhaseName = Literal["github", "azure"]
 ConnectionPhaseStateName = Literal[
@@ -475,11 +478,10 @@ def write_connection_state(
         envelope.operation_id,
         state_root=state_root,
     )
-    try:
-        lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError as exc:
-        raise BootstrapApplyError("connection state is locked by another writer") from exc
-    try:
+    with state_file_lock(
+        lock_path,
+        locked_message="connection state is locked by another writer",
+    ):
         if expected_generation is None and path.exists():
             raise BootstrapApplyError("connection state already exists")
         if expected_generation is not None and path.exists():
@@ -493,15 +495,11 @@ def write_connection_state(
         data = canonical_json_bytes(envelope.model_dump(mode="json")) + b"\n"
         if len(data) > _MAX_STATE_BYTES:
             raise BootstrapApplyError("connection state exceeds the safe size limit")
-        temp = path.with_name(f"{path.stem}.{envelope.generation_hash}.tmp")
-        with open(temp, "xb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp, path)
-    finally:
-        os.close(lock_fd)
-        os.unlink(lock_path)
+        atomic_replace_state(
+            path,
+            data,
+            generation_hash=envelope.generation_hash,
+        )
     return path
 
 

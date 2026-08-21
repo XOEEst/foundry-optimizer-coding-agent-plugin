@@ -276,6 +276,87 @@ class _RacingStateStore(FileBootstrapRunnerStateStore):
         )
 
 
+class _RollbackConflictStateStore(FileBootstrapRunnerStateStore):
+    def __init__(self, *, state_root: Path) -> None:
+        super().__init__(state_root=state_root)
+        self._inject_conflict = False
+
+    def arm_conflict(self) -> None:
+        self._inject_conflict = True
+
+    def save(
+        self,
+        envelope: BootstrapRunnerStateEnvelope,
+        *,
+        expected_generation: int | None = None,
+        expected_generation_hash: str | None = None,
+    ) -> None:
+        if expected_generation is not None and self._inject_conflict:
+            current = self.load(envelope.operation_id)
+            conflict = next_runner_generation(
+                current,
+                now=datetime.now(UTC),
+                note="forced parent CAS conflict",
+            )
+            self._inject_conflict = False
+            super().save(
+                conflict,
+                expected_generation=current.generation,
+                expected_generation_hash=current.generation_hash,
+            )
+        super().save(
+            envelope,
+            expected_generation=expected_generation,
+            expected_generation_hash=expected_generation_hash,
+        )
+
+
+class _IdempotentRollbackHandler(BootstrapRollbackHandlerProtocol):
+    def __init__(self) -> None:
+        self.rollback_calls: list[str] = []
+        self.reconcile_calls: list[str] = []
+        self.rolled_back: set[str] = set()
+
+    @staticmethod
+    def _outcome(
+        operation: BootstrapRunnerStateEnvelope,
+        step: str,
+    ) -> BootstrapStageOutcome:
+        return BootstrapStageOutcome(
+            stage="rolled_back",
+            note=f"Rolled back {step} child work.",
+            child_refs=tuple(
+                item for item in operation.child_refs if item.step != step
+            ),
+        )
+
+    def rollback(
+        self,
+        *,
+        operation: BootstrapRunnerStateEnvelope,
+        step: str,
+        child_ref: BootstrapChildReference,
+    ) -> BootstrapStageOutcome:
+        assert child_ref.step == step
+        assert step not in self.rolled_back
+        self.rollback_calls.append(step)
+        self.rolled_back.add(step)
+        return self._outcome(operation, step)
+
+    def reconcile_rollback(
+        self,
+        *,
+        operation: BootstrapRunnerStateEnvelope,
+        step: str,
+        child_ref: BootstrapChildReference,
+    ) -> BootstrapStageOutcome | None:
+        assert child_ref.step == step
+        self.reconcile_calls.append(step)
+        if step not in self.rolled_back:
+            return None
+        return self._outcome(operation, step)
+
+
 @pytest.fixture(autouse=True)
 def _runtime_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FOUNDRY_OPT_RUNTIME_REPOSITORY", RUNTIME_REPOSITORY)
@@ -645,6 +726,136 @@ def test_rollback_delegates_to_child_handler(tmp_path: Path) -> None:
     assert rolled.resource_links.github[0].url == "https://github.com/example-org/example-repo/actions"
 
 
+def test_rollback_rejects_steps_outside_server_side_dependency_order(
+    tmp_path: Path,
+) -> None:
+    repo = _create_repository(tmp_path)
+    state_root = tmp_path / "state"
+    store = FileBootstrapRunnerStateStore(state_root=state_root)
+    rollback_handler = _RecordingRollbackHandler()
+    runner = BootstrapRunner(
+        state_store=store,
+        rollback_handler=rollback_handler,
+    )
+    turn = runner.start(repo)
+    envelope = store.load(turn.operation_id)
+    updated = next_runner_generation(
+        envelope,
+        now=datetime.now(UTC),
+        lifecycle_stage="final_handoff",
+        child_refs=(
+            BootstrapChildReference(
+                step="repository",
+                kind="repository-operation",
+                identifier="repository-child",
+            ),
+            BootstrapChildReference(
+                step="connection",
+                kind="connection-operation",
+                identifier="connection-child",
+            ),
+            BootstrapChildReference(
+                step="commit",
+                kind="commit-operation",
+                identifier="commit-child",
+            ),
+        ),
+    )
+    store.save(
+        updated,
+        expected_generation=envelope.generation,
+        expected_generation_hash=envelope.generation_hash,
+    )
+
+    for step in ("repository", "connection", "deployment"):
+        with pytest.raises(
+            BootstrapApplyError,
+            match="next permitted rollback step is commit",
+        ):
+            runner.rollback(turn.operation_id, step)
+
+    assert rollback_handler.calls == []
+
+
+@pytest.mark.parametrize("step", ("repository", "connection", "commit"))
+def test_rollback_reconciles_child_after_forced_parent_cas_conflict(
+    tmp_path: Path,
+    step: str,
+) -> None:
+    repo = _create_repository(tmp_path)
+    store = _RollbackConflictStateStore(state_root=tmp_path / "state")
+    rollback_handler = _IdempotentRollbackHandler()
+    runner = BootstrapRunner(
+        state_store=store,
+        rollback_handler=rollback_handler,
+    )
+    turn = runner.start(repo)
+    envelope = store.load(turn.operation_id)
+    updated = next_runner_generation(
+        envelope,
+        now=datetime.now(UTC),
+        lifecycle_stage="final_handoff",
+        child_refs=(
+            BootstrapChildReference(
+                step=step,
+                kind=f"{step}-operation",
+                identifier=f"{step}-child",
+            ),
+        ),
+    )
+    store.save(
+        updated,
+        expected_generation=envelope.generation,
+        expected_generation_hash=envelope.generation_hash,
+    )
+    store.arm_conflict()
+
+    rolled = runner.rollback(turn.operation_id, step)
+    persisted = store.load(turn.operation_id)
+
+    assert rolled.state == "rolled_back"
+    assert persisted.child_refs == ()
+    assert rollback_handler.rollback_calls == [step]
+    assert rollback_handler.reconcile_calls.count(step) >= 1
+
+
+def test_status_reconciles_an_already_rolled_back_child(
+    tmp_path: Path,
+) -> None:
+    repo = _create_repository(tmp_path)
+    store = FileBootstrapRunnerStateStore(state_root=tmp_path / "state")
+    rollback_handler = _IdempotentRollbackHandler()
+    runner = BootstrapRunner(
+        state_store=store,
+        rollback_handler=rollback_handler,
+    )
+    turn = runner.start(repo)
+    envelope = store.load(turn.operation_id)
+    updated = next_runner_generation(
+        envelope,
+        now=datetime.now(UTC),
+        lifecycle_stage="final_handoff",
+        child_refs=(
+            BootstrapChildReference(
+                step="connection",
+                kind="connection-operation",
+                identifier="connection-child",
+            ),
+        ),
+    )
+    store.save(
+        updated,
+        expected_generation=envelope.generation,
+        expected_generation_hash=envelope.generation_hash,
+    )
+    rollback_handler.rolled_back.add("connection")
+
+    status = runner.status(turn.operation_id)
+
+    assert status.state == "rolled_back"
+    assert store.load(turn.operation_id).child_refs == ()
+
+
 def test_commit_handler_renders_review_and_records_exact_local_commit(tmp_path: Path) -> None:
     repo = _create_repository(tmp_path)
     state_root = tmp_path / "state"
@@ -748,7 +959,7 @@ def test_commit_handler_rollback_restores_base_repository_binding(tmp_path: Path
     repo = _create_repository(tmp_path)
     state_root = tmp_path / "state"
     commit_state_root = tmp_path / "commit-state"
-    store = FileBootstrapRunnerStateStore(state_root=state_root)
+    store = _RollbackConflictStateStore(state_root=state_root)
     commit_handler = BootstrapLocalCommitHandler(
         coordinator=LocalGitCommitCoordinator(state_root=commit_state_root)
     )
@@ -824,6 +1035,7 @@ def test_commit_handler_rollback_restores_base_repository_binding(tmp_path: Path
         summary="approve exact source",
     )
 
+    store.arm_conflict()
     rolled = runner.rollback(approved.operation_id, "commit")
     persisted = store.load(approved.operation_id)
 

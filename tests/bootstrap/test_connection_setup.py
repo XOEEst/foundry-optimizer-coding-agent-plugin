@@ -468,6 +468,8 @@ def test_connection_rollback_restores_registry_identity(
     )
 
     state = coordinator.rollback(operation)
+    calls_after_first_rollback = tuple(drivers.calls)
+    repeated = coordinator.rollback(operation)
     restored = yaml.safe_load(
         (repository / ".foundry-opt" / "registry.yaml").read_text(
             encoding="utf-8"
@@ -476,6 +478,8 @@ def test_connection_rollback_restores_registry_identity(
 
     assert applied["identity"]["kind"] == "user_assigned_managed_identity"
     assert state.lifecycle_state == "rolled_back"
+    assert repeated == state
+    assert tuple(drivers.calls) == calls_after_first_rollback
     assert restored["identity"]["kind"] == "unresolved_migration"
 
 

@@ -300,8 +300,10 @@ def test_local_commit_rollback_restores_original_branch_and_dirty_snapshot(tmp_p
     coordinator.apply(review, approval)
 
     status = coordinator.rollback(review, approval)
+    repeated = coordinator.rollback(review, approval)
 
     assert status.overall_state == "rolled_back"
+    assert repeated == status
     assert _git(repo, "branch", "--show-current") == original_branch
     assert _git(repo, "rev-parse", "HEAD") == review.base_commit
     assert "bootstrap source" in target.read_text(encoding="utf-8")

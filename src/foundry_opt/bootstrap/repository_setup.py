@@ -42,6 +42,10 @@ from foundry_opt.bootstrap.repository.engine import (
     rollback_repository,
 )
 from foundry_opt.bootstrap.shared import require_safe_operation_id
+from foundry_opt.bootstrap.state_lock import (
+    atomic_replace_state,
+    state_file_lock,
+)
 
 RepositorySetupLifecycleState = Literal[
     "awaiting_approval",
@@ -272,6 +276,8 @@ class RepositorySetupCoordinator:
 
     def rollback(self, operation) -> RepositorySetupStateEnvelope:
         envelope = self.build(operation)
+        if envelope.lifecycle_state == "rolled_back":
+            return envelope
         if envelope.lifecycle_state != "applied" or envelope.receipt is None:
             raise BootstrapApplyError(
                 "repository setup rollback requires an applied receipt"
@@ -374,13 +380,12 @@ class RepositorySetupCoordinator:
         )
         path.parent.mkdir(parents=True, exist_ok=True)
         lock = path.parent / _LOCK_FILE_NAME
-        try:
-            lock_fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError as exc:
-            raise BootstrapApplyError(
+        with state_file_lock(
+            lock,
+            locked_message=(
                 "repository setup state is locked by another writer"
-            ) from exc
-        try:
+            ),
+        ):
             if expected is None:
                 if path.exists():
                     raise BootstrapApplyError(
@@ -399,17 +404,11 @@ class RepositorySetupCoordinator:
                         "repository setup state generation conflict"
                     )
             data = canonical_json_bytes(envelope.model_dump(mode="json")) + b"\n"
-            temp = path.with_name(
-                f"{path.stem}.{envelope.generation_hash}.tmp"
+            atomic_replace_state(
+                path,
+                data,
+                generation_hash=envelope.generation_hash,
             )
-            with open(temp, "xb") as handle:
-                handle.write(data)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temp, path)
-        finally:
-            os.close(lock_fd)
-            os.unlink(lock)
 
     @staticmethod
     def _next(
@@ -487,13 +486,48 @@ class BootstrapRepositorySetupHandler:
         )
 
     def rollback(self, *, operation, step, child_ref) -> object:
-        from foundry_opt.bootstrap.runner import BootstrapStageOutcome
-
         if step != "repository" or child_ref.step != "repository":
             raise BootstrapApplyError(
                 "repository setup handler can only roll back repository work"
             )
+        state = self._coordinator.status(operation)
+        if (
+            state.receipt is None
+            or child_ref.identifier != state.receipt.receipt_hash
+        ):
+            raise BootstrapApplyError(
+                "repository rollback child reference does not match state"
+            )
         self._coordinator.rollback(operation)
+        return self._rollback_outcome(operation)
+
+    def reconcile_rollback(
+        self,
+        *,
+        operation,
+        step,
+        child_ref,
+    ) -> object | None:
+        if step != "repository" or child_ref.step != "repository":
+            raise BootstrapApplyError(
+                "repository setup handler can only reconcile repository work"
+            )
+        state = self._coordinator.status(operation)
+        if state.lifecycle_state != "rolled_back":
+            return None
+        if (
+            state.receipt is None
+            or child_ref.identifier != state.receipt.receipt_hash
+        ):
+            raise BootstrapApplyError(
+                "repository rollback child reference does not match state"
+            )
+        return self._rollback_outcome(operation)
+
+    @staticmethod
+    def _rollback_outcome(operation) -> object:
+        from foundry_opt.bootstrap.runner import BootstrapStageOutcome
+
         remaining = tuple(
             item for item in operation.child_refs if item.step != "repository"
         )

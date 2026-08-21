@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Literal
 
@@ -11,6 +10,10 @@ from foundry_opt.bootstrap.contracts import AgentId, BindingAssessment, BindingC
 from foundry_opt.bootstrap.errors import BootstrapApplyError, BootstrapConfigError
 from foundry_opt.bootstrap.receipts import ApplyPhaseName, ApprovalRecord, EvaluationReplacementRecord, PhaseReceipt, merge_phase_receipts
 from foundry_opt.bootstrap.shared import default_state_root, require_safe_operation_id, resolve_state_child_directory, resolve_state_root
+from foundry_opt.bootstrap.state_lock import (
+    atomic_replace_state,
+    state_file_lock,
+)
 
 GenerationStatus = Literal["draft", "applied", "blocked"]
 
@@ -270,11 +273,10 @@ def write_operation_state(envelope: OperationStateEnvelope, *, expected_generati
     path = state_file_path(envelope.repository_id, envelope.operation_id, state_root=state_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = lock_file_path(envelope.repository_id, envelope.operation_id, state_root=state_root)
-    try:
-        lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError as exc:
-        raise BootstrapApplyError("operation state is locked by another writer") from exc
-    try:
+    with state_file_lock(
+        lock_path,
+        locked_message="operation state is locked by another writer",
+    ):
         if expected_generation is None and path.exists():
             raise BootstrapApplyError("operation state already exists")
         if expected_generation is not None and path.exists():
@@ -284,15 +286,11 @@ def write_operation_state(envelope: OperationStateEnvelope, *, expected_generati
         data = canonical_json_bytes(envelope.model_dump(mode="json")) + b"\n"
         if len(data) > _MAX_STATE_BYTES:
             raise BootstrapApplyError("operation state exceeds size limit")
-        temp = path.with_name(f"{path.stem}.{envelope.generation_hash}.tmp")
-        with open(temp, "xb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp, path)
-    finally:
-        os.close(lock_fd)
-        os.unlink(lock_path)
+        atomic_replace_state(
+            path,
+            data,
+            generation_hash=envelope.generation_hash,
+        )
     return path
 
 

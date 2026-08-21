@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Annotated, Literal, Protocol, Self
@@ -32,6 +31,10 @@ from foundry_opt.bootstrap.local_commit import (
 from foundry_opt.bootstrap.operation_state import default_state_root
 from foundry_opt.bootstrap.owner_review import ResourceLink, ResourceLinksReview
 from foundry_opt.bootstrap.shared import require_safe_operation_id
+from foundry_opt.bootstrap.state_lock import (
+    atomic_replace_state,
+    state_file_lock,
+)
 from foundry_opt.bootstrap.workflow_integration import resolve_registry_selection
 from foundry_opt.poc.config import validate_repository_relative_path
 from foundry_opt.poc.deploy import (
@@ -923,13 +926,12 @@ class LocalDeploymentCoordinator:
         )
         path.parent.mkdir(parents=True, exist_ok=True)
         lock = path.parent / _LOCK_FILE_NAME
-        try:
-            lock_fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError as exc:
-            raise BootstrapApplyError(
+        with state_file_lock(
+            lock,
+            locked_message=(
                 "local deployment state is locked by another writer"
-            ) from exc
-        try:
+            ),
+        ):
             if expected is None:
                 if path.exists():
                     raise BootstrapApplyError(
@@ -948,17 +950,11 @@ class LocalDeploymentCoordinator:
                         "local deployment state generation conflict"
                     )
             data = canonical_json_bytes(envelope.model_dump(mode="json")) + b"\n"
-            temp = path.with_name(
-                f"{path.stem}.{envelope.generation_hash}.tmp"
+            atomic_replace_state(
+                path,
+                data,
+                generation_hash=envelope.generation_hash,
             )
-            with open(temp, "xb") as handle:
-                handle.write(data)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temp, path)
-        finally:
-            os.close(lock_fd)
-            os.unlink(lock)
 
     @staticmethod
     def _next(

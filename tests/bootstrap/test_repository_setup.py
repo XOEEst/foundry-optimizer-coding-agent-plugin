@@ -205,3 +205,21 @@ def test_repository_handler_applies_reviewed_files_and_returns_commit_context(
     local_commit = outcome.handler_context["local_commit"]
     assert local_commit["commit_agent_ids"] == ["example-agent"]
     assert ".foundry-opt/registry.yaml" in local_commit["managed_paths"]
+
+
+def test_repository_rollback_is_idempotent_after_parent_cas_loss(
+    tmp_path: Path,
+) -> None:
+    operation = _operation(tmp_path)
+    coordinator = RepositorySetupCoordinator(state_root=tmp_path / "state")
+    coordinator.approve(
+        operation,
+        actor="repo-owner",
+        summary="Apply the reviewed repository bootstrap files.",
+    )
+
+    first = coordinator.rollback(operation)
+    second = coordinator.rollback(operation)
+
+    assert first.lifecycle_state == "rolled_back"
+    assert second == first

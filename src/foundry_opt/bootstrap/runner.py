@@ -25,6 +25,10 @@ from foundry_opt.bootstrap.errors import BootstrapApplyError, BootstrapConfigErr
 from foundry_opt.bootstrap.operation_state import DiscoveredAgentRecord, DiscoveryBlockerRecord, SelectionPlan
 from foundry_opt.bootstrap.owner_review import ResourceLinksReview, build_discovery_review, build_resource_links
 from foundry_opt.bootstrap.shared import github_remote_identity, require_safe_operation_id, resolve_state_child_directory, resolve_state_root, runtime_commit_from_environment, runtime_repository_from_environment, scoped_state_root
+from foundry_opt.bootstrap.state_lock import (
+    atomic_replace_state,
+    state_file_lock,
+)
 from foundry_opt.models import FrozenModel
 
 BootstrapQuestionKind = Literal[
@@ -74,6 +78,7 @@ _REPOSITORY_INDEX_LOCK_FILE_NAME = "active-operation.lock"
 _MAX_STATE_BYTES = 1024 * 1024
 _MAX_REPOSITORY_INDEX_BYTES = 16 * 1024
 _TERMINAL_LIFECYCLE_STAGES = frozenset({"final_handoff", "rolled_back"})
+_MAX_PARENT_CAS_ATTEMPTS = 8
 _QUESTION_KIND_BY_STAGE: dict[BootstrapLifecycleStage, BootstrapQuestionKind] = {
     "agent_selection": "agent_selection",
     "foundry_target_resolution": "foundry_target",
@@ -1057,11 +1062,12 @@ class FileBootstrapRunnerStateStore(BootstrapRunnerStateStoreProtocol):
         path = state_file_path(envelope.operation_id, state_root=self._state_root)
         path.parent.mkdir(parents=True, exist_ok=True)
         lock = lock_file_path(envelope.operation_id, state_root=self._state_root)
-        try:
-            lock_fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError as exc:
-            raise BootstrapApplyError("bootstrap runner state is locked by another writer") from exc
-        try:
+        with state_file_lock(
+            lock,
+            locked_message=(
+                "bootstrap runner state is locked by another writer"
+            ),
+        ):
             if expected_generation is None:
                 if path.exists():
                     raise BootstrapApplyError("bootstrap runner state already exists")
@@ -1072,15 +1078,11 @@ class FileBootstrapRunnerStateStore(BootstrapRunnerStateStoreProtocol):
             data = canonical_json_bytes(envelope.model_dump(mode="json")) + b"\n"
             if len(data) > _MAX_STATE_BYTES:
                 raise BootstrapApplyError("bootstrap runner state exceeds size limit")
-            temp = path.with_name(f"{path.stem}.{envelope.generation_hash}.tmp")
-            with open(temp, "xb") as handle:
-                handle.write(data)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temp, path)
-        finally:
-            os.close(lock_fd)
-            os.unlink(lock)
+            atomic_replace_state(
+                path,
+                data,
+                generation_hash=envelope.generation_hash,
+            )
 
     @contextmanager
     def _repository_lock(self, repository_id: str) -> Iterator[None]:
@@ -1492,37 +1494,58 @@ class BootstrapRunner:
         operation_id: str,
         step: BootstrapApprovalStep,
     ) -> BootstrapTurn:
-        envelope = self._load_validated(operation_id)
-        if step == "repository" and self._repository_handler is not None:
-            handler = self._repository_handler
-        elif step == "connection" and self._connection_handler is not None:
-            handler = self._connection_handler
-        elif step == "commit" and self._commit_handler is not None:
-            handler = self._commit_handler
-        elif self._rollback_handler is not None:
-            handler = self._rollback_handler
-        else:
-            raise BootstrapApplyError("rollback handler is not configured")
-        child_ref = next((item for item in envelope.child_refs if item.step == step), None)
-        if child_ref is None:
-            raise BootstrapApplyError("rollback requires a recorded child reference")
-        updated = self._apply_stage_outcome(
-            envelope,
-            outcome=handler.rollback(
+        child_completed = False
+        for _ in range(_MAX_PARENT_CAS_ATTEMPTS):
+            envelope = self._state_store.load(operation_id)
+            self._validate_runtime_binding(envelope)
+            self._validate_repository_identity(envelope)
+            permitted_step = _next_rollback_step(envelope.child_refs)
+            if permitted_step != step:
+                if (
+                    child_completed
+                    and all(item.step != step for item in envelope.child_refs)
+                ):
+                    return self._build_turn(
+                        self._validate_loaded(envelope)
+                    )
+                if permitted_step is None:
+                    raise BootstrapApplyError(
+                        "rollback has no permitted recorded child step"
+                    )
+                raise BootstrapApplyError(
+                    "next permitted rollback step is "
+                    f"{permitted_step}"
+                )
+            child_ref = next(
+                item for item in envelope.child_refs if item.step == step
+            )
+            handler = self._rollback_handler_for_step(step)
+            outcome = self._reconcile_handler_rollback(
+                handler,
                 operation=envelope,
                 step=step,
                 child_ref=child_ref,
-            ),
+            )
+            if outcome is None:
+                self._validate_loaded(envelope)
+                outcome = handler.rollback(
+                    operation=envelope,
+                    step=step,
+                    child_ref=child_ref,
+                )
+            child_completed = True
+            updated = self._apply_stage_outcome(
+                envelope,
+                outcome=outcome,
+            )
+            if self._save_after_parent_cas(envelope, updated):
+                return self._build_turn(updated)
+        raise BootstrapApplyError(
+            "bootstrap runner state kept changing during rollback"
         )
-        self._state_store.save(
-            updated,
-            expected_generation=envelope.generation,
-            expected_generation_hash=envelope.generation_hash,
-        )
-        return self._build_turn(updated)
 
     def _load_validated(self, operation_id: str) -> BootstrapRunnerStateEnvelope:
-        envelope = self._state_store.load(operation_id)
+        envelope = self._reconcile_rolled_back_children(operation_id)
         current_runtime = RuntimeBinding(
             runtime_repository=self._runtime.runtime_repository(),
             runtime_commit=self._runtime.runtime_commit(),
@@ -1575,6 +1598,163 @@ class BootstrapRunner:
         ):
             self._deployment_handler.validate_resume(operation=envelope)
         return envelope
+
+    def _validate_loaded(
+        self,
+        envelope: BootstrapRunnerStateEnvelope,
+    ) -> BootstrapRunnerStateEnvelope:
+        return self._validate_resume(
+            envelope,
+            current_runtime=RuntimeBinding(
+                runtime_repository=self._runtime.runtime_repository(),
+                runtime_commit=self._runtime.runtime_commit(),
+            ),
+            observed_repository=self._observed_repository_binding(envelope),
+        )
+
+    def _validate_runtime_binding(
+        self,
+        envelope: BootstrapRunnerStateEnvelope,
+    ) -> None:
+        current_runtime = RuntimeBinding(
+            runtime_repository=self._runtime.runtime_repository(),
+            runtime_commit=self._runtime.runtime_commit(),
+        )
+        if current_runtime != envelope.runtime_binding:
+            raise BootstrapApplyError("bootstrap resume requires the exact runtime repository and commit")
+
+    def _observed_repository_binding(
+        self,
+        envelope: BootstrapRunnerStateEnvelope,
+    ) -> RepositoryBinding:
+        root = self._git.repository_root(Path(envelope.repository_binding.repository_root))
+        current_url = self._git.repository_url(root)
+        current_id = self._git.repository_id(current_url)
+        current_head = self._git.head_commit(root)
+        current_branch = self._git.current_branch(root)
+        return RepositoryBinding(
+            repository_root=str(root),
+            repository_id=current_id,
+            repository_url=current_url,
+            head_commit=current_head,
+            branch_name=current_branch,
+        )
+
+    def _validate_repository_identity(
+        self,
+        envelope: BootstrapRunnerStateEnvelope,
+    ) -> None:
+        observed = self._observed_repository_binding(envelope)
+        expected = envelope.repository_binding
+        if (
+            observed.repository_root != expected.repository_root
+            or observed.repository_id != expected.repository_id
+            or observed.repository_url != expected.repository_url
+        ):
+            raise BootstrapApplyError("bootstrap resume requires the exact repository root, identity, and commit")
+
+    def _reconcile_rolled_back_children(
+        self,
+        operation_id: str,
+    ) -> BootstrapRunnerStateEnvelope:
+        for _ in range(_MAX_PARENT_CAS_ATTEMPTS):
+            envelope = self._state_store.load(operation_id)
+            self._validate_runtime_binding(envelope)
+            self._validate_repository_identity(envelope)
+            step = _next_rollback_step(envelope.child_refs)
+            if step is None:
+                return envelope
+            handler = self._rollback_handler_for_step(
+                step,
+                required=False,
+            )
+            if handler is None:
+                return envelope
+            child_ref = next(
+                item for item in envelope.child_refs if item.step == step
+            )
+            outcome = self._reconcile_handler_rollback(
+                handler,
+                operation=envelope,
+                step=step,
+                child_ref=child_ref,
+            )
+            if outcome is None:
+                return envelope
+            updated = self._apply_stage_outcome(
+                envelope,
+                outcome=outcome,
+            )
+            if self._save_after_parent_cas(envelope, updated):
+                continue
+        raise BootstrapApplyError(
+            "bootstrap runner state kept changing during rollback reconciliation"
+        )
+
+    def _rollback_handler_for_step(
+        self,
+        step: BootstrapApprovalStep,
+        *,
+        required: bool = True,
+    ) -> BootstrapRollbackHandlerProtocol | None:
+        handler: BootstrapRollbackHandlerProtocol | None = None
+        if step == "repository" and self._repository_handler is not None:
+            handler = self._repository_handler
+        elif step == "connection" and self._connection_handler is not None:
+            handler = self._connection_handler
+        elif step == "commit" and self._commit_handler is not None:
+            handler = self._commit_handler
+        elif self._rollback_handler is not None:
+            handler = self._rollback_handler
+        if handler is None and required:
+            raise BootstrapApplyError("rollback handler is not configured")
+        return handler
+
+    @staticmethod
+    def _reconcile_handler_rollback(
+        handler: BootstrapRollbackHandlerProtocol,
+        *,
+        operation: BootstrapRunnerStateEnvelope,
+        step: BootstrapApprovalStep,
+        child_ref: BootstrapChildReference,
+    ) -> BootstrapStageOutcome | None:
+        reconcile = getattr(handler, "reconcile_rollback", None)
+        if not callable(reconcile):
+            return None
+        outcome = reconcile(
+            operation=operation,
+            step=step,
+            child_ref=child_ref,
+        )
+        if outcome is not None and not isinstance(
+            outcome,
+            BootstrapStageOutcome,
+        ):
+            raise BootstrapApplyError(
+                "rollback reconciliation returned an invalid outcome"
+            )
+        return outcome
+
+    def _save_after_parent_cas(
+        self,
+        expected: BootstrapRunnerStateEnvelope,
+        updated: BootstrapRunnerStateEnvelope,
+    ) -> bool:
+        try:
+            self._state_store.save(
+                updated,
+                expected_generation=expected.generation,
+                expected_generation_hash=expected.generation_hash,
+            )
+        except BootstrapApplyError:
+            latest = self._state_store.load(expected.operation_id)
+            if (
+                latest.generation == expected.generation
+                and latest.generation_hash == expected.generation_hash
+            ):
+                raise
+            return False
+        return True
 
     def _apply_stage_outcome(
         self,
@@ -2299,16 +2479,25 @@ def _approval_step_for_question(kind: BootstrapQuestionKind) -> BootstrapApprova
 def _next_rollback_actions(
     child_refs: Sequence[BootstrapChildReference],
 ) -> tuple[BootstrapAvailableAction, ...]:
+    step = _next_rollback_step(child_refs)
+    if step is not None:
+        return (
+            BootstrapAvailableAction(
+                name="rollback",
+                step=step,
+            ),
+        )
+    return ()
+
+
+def _next_rollback_step(
+    child_refs: Sequence[BootstrapChildReference],
+) -> BootstrapApprovalStep | None:
     recorded = {item.step for item in child_refs}
     for step in ("commit", "connection", "repository"):
         if step in recorded:
-            return (
-                BootstrapAvailableAction(
-                    name="rollback",
-                    step=step,
-                ),
-            )
-    return ()
+            return step
+    return None
 
 
 def _isoformat(value: datetime) -> str:

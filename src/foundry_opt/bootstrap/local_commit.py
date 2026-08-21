@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import os
 import re
 import subprocess
 from collections.abc import Mapping, Sequence
@@ -18,6 +17,10 @@ from foundry_opt.bootstrap.discovery import _ScanCache, _fingerprint_root
 from foundry_opt.bootstrap.errors import BootstrapApplyError, BootstrapConfigError
 from foundry_opt.bootstrap.operation_state import default_state_root
 from foundry_opt.bootstrap.repository.engine import LOCK_PATH
+from foundry_opt.bootstrap.state_lock import (
+    atomic_replace_state,
+    state_file_lock,
+)
 from foundry_opt.poc.config import validate_repository_relative_path
 
 _STEP_ID = "bootstrap-local-commit"
@@ -718,11 +721,10 @@ def write_local_commit_state(
     path = state_file_path(review.repository_identity, review.operation_id, state_root=state_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = lock_file_path(review.repository_identity, review.operation_id, state_root=state_root)
-    try:
-        lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError as exc:
-        raise BootstrapApplyError("local commit state is locked by another writer") from exc
-    try:
+    with state_file_lock(
+        lock_path,
+        locked_message="local commit state is locked by another writer",
+    ):
         if expected_generation is None:
             if path.exists():
                 raise BootstrapApplyError("local commit state already exists")
@@ -740,15 +742,11 @@ def write_local_commit_state(
         data = canonical_json_bytes(envelope.model_dump(mode="json")) + b"\n"
         if len(data) > _MAX_STATE_BYTES:
             raise BootstrapApplyError("local commit state exceeds size limit")
-        temp = path.with_name(f"{path.stem}.{envelope.generation_hash}.tmp")
-        with open(temp, "xb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp, path)
-    finally:
-        os.close(lock_fd)
-        os.unlink(lock_path)
+        atomic_replace_state(
+            path,
+            data,
+            generation_hash=envelope.generation_hash,
+        )
     return path
 
 
@@ -1562,8 +1560,6 @@ class BootstrapLocalCommitHandler:
         )
 
     def rollback(self, *, operation, step, child_ref) -> object:
-        from foundry_opt.bootstrap.runner import BootstrapStageOutcome
-
         if step != "commit" or child_ref.step != "commit":
             raise BootstrapApplyError("local commit handler can only roll back the commit step")
         review = self.review(operation=operation)
@@ -1574,7 +1570,62 @@ class BootstrapLocalCommitHandler:
         )
         if state.approval is None:
             raise BootstrapApplyError("local commit rollback requires a recorded approval")
+        self._validate_rollback_child(operation, child_ref, state)
         self._coordinator.rollback(review, state.approval)
+        return self._rollback_outcome(operation, review)
+
+    def reconcile_rollback(
+        self,
+        *,
+        operation,
+        step,
+        child_ref,
+    ) -> object | None:
+        if step != "commit" or child_ref.step != "commit":
+            raise BootstrapApplyError(
+                "local commit handler can only reconcile the commit step"
+            )
+        state = self._coordinator.load_state(
+            repository_identity=operation.repository_binding.repository_id,
+            operation_id=operation.operation_id,
+            runtime_commit=operation.runtime_binding.runtime_commit,
+        )
+        if state.lifecycle_state != "rolled_back":
+            return None
+        self._validate_rollback_child(operation, child_ref, state)
+        return self._rollback_outcome(operation, state.review)
+
+    def _validate_rollback_child(
+        self,
+        operation,
+        child_ref,
+        state: LocalCommitStateEnvelope,
+    ) -> None:
+        review = state.review
+        context = self._context(operation)
+        if (
+            review.operation_id != operation.operation_id
+            or review.repository_root
+            != operation.repository_binding.repository_root
+            or review.repository_identity
+            != operation.repository_binding.repository_id
+            or review.runtime_repository
+            != operation.runtime_binding.runtime_repository
+            or review.runtime_commit
+            != operation.runtime_binding.runtime_commit
+            or review.repository_plan_hash
+            != str(context["repository_plan_hash"])
+            or state.receipt is None
+            or child_ref.identifier != state.receipt.commit_sha
+        ):
+            raise BootstrapApplyError(
+                "local commit rollback child reference does not match state"
+            )
+
+    @staticmethod
+    def _rollback_outcome(operation, review: LocalCommitReview) -> object:
+        from foundry_opt.bootstrap.runner import BootstrapStageOutcome
+
         remaining = tuple(item for item in operation.child_refs if item.step != "commit")
         return BootstrapStageOutcome(
             stage="rolled_back",
