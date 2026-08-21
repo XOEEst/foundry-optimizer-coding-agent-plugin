@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal, cast
@@ -93,11 +93,16 @@ def resolve_registry_selection(
     *,
     repo_agent_id: str | None = None,
     explicit_target: str | None = None,
+    content_reader: Callable[[str], bytes] | None = None,
 ) -> RegistrySelection:
     if explicit_target is not None:
         raise BootstrapConfigError("explicit Foundry targets are not allowed for registry-managed workflow execution")
-    registry_path = repository_root / ".foundry-opt" / "registry.yaml"
-    registry_bytes = registry_path.read_bytes()
+    reader = (
+        content_reader
+        if content_reader is not None
+        else lambda relative: (repository_root / relative).read_bytes()
+    )
+    registry_bytes = reader(".foundry-opt/registry.yaml")
     registry = RootRegistry.from_document(registry_bytes.decode("utf-8"))
     enabled = tuple(agent for agent in registry.agents if agent.enabled)
     if repo_agent_id is None:
@@ -109,9 +114,8 @@ def resolve_registry_selection(
         if len(matches) != 1:
             raise BootstrapConfigError("repoAgentId must resolve exactly one enabled registry agent")
         selected = matches[0]
-    sidecar_path = repository_root / selected.config_path
     try:
-        sidecar_bytes = sidecar_path.read_bytes()
+        sidecar_bytes = reader(selected.config_path)
     except OSError as exc:
         raise BootstrapConfigError("enabled registry entry requires a profile at config_path") from exc
     sidecar = BootstrapSidecar.from_document(sidecar_bytes.decode("utf-8"))

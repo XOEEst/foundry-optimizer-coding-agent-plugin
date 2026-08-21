@@ -13,7 +13,6 @@ from pydantic import Field, StringConstraints, field_validator, model_validator
 
 from foundry_opt.bootstrap.canonical import canonical_json_bytes, canonical_sha256, safe_persisted_document
 from foundry_opt.bootstrap.contracts import AgentId, BootstrapDocument, BootstrapPlan, BootstrapSidecar, GitCommit, RepositoryIdentity, RepositoryUrl, RootRegistry, Sha256
-from foundry_opt.bootstrap.discovery import _ScanCache, _fingerprint_root
 from foundry_opt.bootstrap.errors import BootstrapApplyError, BootstrapConfigError
 from foundry_opt.bootstrap.operation_state import default_state_root
 from foundry_opt.bootstrap.repository.engine import LOCK_PATH
@@ -22,6 +21,7 @@ from foundry_opt.bootstrap.state_lock import (
     state_file_lock,
 )
 from foundry_opt.poc.config import validate_repository_relative_path
+from foundry_opt.poc.source import SourcePackagingError, fingerprint_git_root
 
 _STEP_ID = "bootstrap-local-commit"
 _BRANCH_PREFIX = "foundry-opt/bootstrap/"
@@ -1253,32 +1253,58 @@ class LocalGitCommitCoordinator:
         commit_sha: str,
         tree_sha: str,
     ) -> LocalCommitReceipt:
-        registry_sha256 = self._file_sha256(repository_root / review.registry_path)
+        registry_bytes = self._commit_file_bytes(
+            repository_root,
+            commit_sha,
+            review.registry_path,
+        )
+        registry_sha256 = hashlib.sha256(registry_bytes).hexdigest()
         profile_hashes = tuple(
             LocalCommitProfileHash(
                 repo_agent_id=agent.repo_agent_id,
                 profile_path=agent.profile_path,
-                sha256=self._file_sha256(repository_root / agent.profile_path),
+                sha256=hashlib.sha256(
+                    self._commit_file_bytes(
+                        repository_root,
+                        commit_sha,
+                        agent.profile_path,
+                    )
+                ).hexdigest(),
             )
             for agent in review.selected_agents
         )
-        cache = _ScanCache(repository_root)
         agent_hashes = []
         for agent in review.selected_agents:
-            sidecar = BootstrapSidecar.from_document(
-                (repository_root / agent.profile_path).read_text(encoding="utf-8")
+            profile_bytes = self._commit_file_bytes(
+                repository_root,
+                commit_sha,
+                agent.profile_path,
             )
+            sidecar = BootstrapSidecar.from_document(profile_bytes.decode("utf-8"))
             if sidecar.repo_agent_id != agent.repo_agent_id:
                 raise BootstrapApplyError("selected agent profile does not match the reviewed repoAgentId")
-            agent_hashes.append(
-                LocalCommitAgentHash(
-                    repo_agent_id=agent.repo_agent_id,
-                    source_root=sidecar.source_root,
-                    source_sha256=_fingerprint_root(cache, sidecar.source_root),
-                    package_root=sidecar.package_root,
-                    package_sha256=_fingerprint_root(cache, sidecar.package_root),
+            try:
+                agent_hashes.append(
+                    LocalCommitAgentHash(
+                        repo_agent_id=agent.repo_agent_id,
+                        source_root=sidecar.source_root,
+                        source_sha256=fingerprint_git_root(
+                            repository_root,
+                            commit=commit_sha,
+                            source_root=sidecar.source_root,
+                        ),
+                        package_root=sidecar.package_root,
+                        package_sha256=fingerprint_git_root(
+                            repository_root,
+                            commit=commit_sha,
+                            source_root=sidecar.package_root,
+                        ),
+                    )
                 )
-            )
+            except SourcePackagingError as error:
+                raise BootstrapApplyError(
+                    "local commit could not fingerprint the exact committed agent source"
+                ) from error
         return LocalCommitReceipt.create(
             operation_id=review.operation_id,
             repository_identity=review.repository_identity,
@@ -1410,6 +1436,22 @@ class LocalGitCommitCoordinator:
 
     def _tree_sha(self, repository_root: Path, commit_sha: str) -> str:
         return self._run_text(repository_root, "rev-parse", f"{commit_sha}^{{tree}}")
+
+    def _commit_file_bytes(
+        self,
+        repository_root: Path,
+        commit_sha: str,
+        relative_path: str,
+    ) -> bytes:
+        path = validate_repository_relative_path(
+            relative_path,
+            field="committed file path",
+        )
+        return self._run_checked(
+            repository_root,
+            "show",
+            f"{commit_sha}:{path}",
+        ).stdout
 
     def _status_entries(self, repository_root: Path) -> tuple["_RawStatusEntry", ...]:
         result = self._run_checked(repository_root, "status", "--porcelain=v1", "-z", "--untracked-files=all")

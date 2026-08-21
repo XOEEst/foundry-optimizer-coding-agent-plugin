@@ -12,10 +12,19 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Callable
 
+from foundry_opt.bootstrap.discovery import (
+    fingerprint_content_sha256,
+    fingerprint_files,
+    is_fingerprintable_path,
+)
 from foundry_opt.packaging import build_deterministic_zip
+from foundry_opt.poc.config import validate_repository_relative_path
 
 
 DEFAULT_MAX_GIT_ARCHIVE_BYTES = 128 * 1024 * 1024
+DEFAULT_MAX_FINGERPRINT_FILE_BYTES = 2 * 1024 * 1024
+DEFAULT_MAX_FINGERPRINT_BYTES = 16 * 1024 * 1024
+DEFAULT_MAX_FINGERPRINT_FILES = 2000
 _COMMIT_PATTERN = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 
 
@@ -91,6 +100,94 @@ def package_git_source(
             tree_sha256=built.tree_sha256,
             zip_sha256=built.zip_sha256,
         )
+
+
+def fingerprint_git_root(
+    repository: Path,
+    *,
+    commit: str,
+    source_root: str,
+    max_file_bytes: int = DEFAULT_MAX_FINGERPRINT_FILE_BYTES,
+    max_aggregate_bytes: int = DEFAULT_MAX_FINGERPRINT_BYTES,
+    max_files: int = DEFAULT_MAX_FINGERPRINT_FILES,
+) -> str:
+    repository_root = _repository_root(repository)
+    normalized_commit = _validate_commit(commit)
+    normalized_source_root = _validate_source_root(source_root)
+    if max_file_bytes <= 0 or max_aggregate_bytes <= 0 or max_files <= 0:
+        raise ValueError("Git fingerprint limits must be positive")
+    arguments = [
+        "ls-tree",
+        "-r",
+        "-z",
+        "--full-tree",
+        normalized_commit,
+    ]
+    if normalized_source_root != ".":
+        arguments.extend(["--", normalized_source_root])
+    raw_entries = _git_bytes(repository_root, *arguments)
+    files: dict[str, str] = {}
+    casefold_paths: dict[str, str] = {}
+    aggregate_bytes = 0
+    for raw_entry in raw_entries.split(b"\0"):
+        if not raw_entry:
+            continue
+        try:
+            raw_metadata, raw_path = raw_entry.split(b"\t", 1)
+            mode, object_type, object_id = raw_metadata.decode("ascii").split()
+            relative = raw_path.decode("utf-8")
+        except (UnicodeDecodeError, ValueError) as error:
+            raise SourcePackagingError(
+                "Git tree contained an unsupported entry"
+            ) from error
+        if object_type != "blob" or mode == "120000":
+            raise SourcePackagingError(
+                "Git source tree contained an unsupported entry type"
+            )
+        if not is_fingerprintable_path(relative):
+            continue
+        key = relative.casefold()
+        previous = casefold_paths.get(key)
+        if previous is not None and previous != relative:
+            raise SourcePackagingError(
+                "Git source tree contained case-fold duplicate paths"
+            )
+        content = _git_bytes(repository_root, "cat-file", "blob", object_id)
+        if len(content) > max_file_bytes:
+            raise SourcePackagingError(
+                f"Git fingerprint input exceeded the size limit: {relative}"
+            )
+        aggregate_bytes += len(content)
+        if aggregate_bytes > max_aggregate_bytes:
+            raise SourcePackagingError(
+                "Git fingerprint inputs exceeded the aggregate size limit"
+            )
+        if len(files) >= max_files:
+            raise SourcePackagingError(
+                "Git fingerprint inputs exceeded the file count limit"
+            )
+        casefold_paths[key] = relative
+        files[relative] = fingerprint_content_sha256(relative, content)
+    return fingerprint_files(files)
+
+
+def read_git_file(
+    repository: Path,
+    *,
+    commit: str,
+    relative_path: str,
+) -> bytes:
+    repository_root = _repository_root(repository)
+    normalized_commit = _validate_commit(commit)
+    normalized_path = validate_repository_relative_path(
+        relative_path,
+        field="Git file path",
+    )
+    return _git_bytes(
+        repository_root,
+        "show",
+        f"{normalized_commit}:{normalized_path}",
+    )
 
 
 def _extract_source_tree(

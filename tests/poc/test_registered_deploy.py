@@ -38,6 +38,7 @@ from foundry_opt.poc.deploy import (
     verify_registered_deployment,
 )
 from foundry_opt.poc.runtime import RuntimeIntegrationError
+from foundry_opt.poc.source import package_git_source
 from foundry_opt.verification import VerificationCheckSpec
 
 
@@ -266,8 +267,23 @@ def _registered_repository(
     _git(repository, "add", ".")
     _git(repository, "commit", "-m", "fixture")
     commit = _git(repository, "rev-parse", "HEAD")
+    event_path = tmp_path / "github-event.json"
+    event_path.write_text(
+        json.dumps(
+            {
+                "repository": {
+                    "default_branch": "main",
+                    "full_name": "example-org/example-repo",
+                    "id": 123456789,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
     environment = {
         "GITHUB_ACTIONS": "true",
+        "GITHUB_EVENT_NAME": "push",
+        "GITHUB_EVENT_PATH": str(event_path),
         "GITHUB_REPOSITORY": "example-org/example-repo",
         "GITHUB_REPOSITORY_ID": "123456789",
         "GITHUB_REPOSITORY_OWNER_ID": "987654321",
@@ -443,7 +459,8 @@ def test_registered_verification_settings_accept_pull_request_context(
         {
             "GITHUB_REF": "refs/pull/17/merge",
             "GITHUB_REF_NAME": "17/merge",
-            "GITHUB_BASE_REF": "main",
+            "GITHUB_BASE_REF": "release",
+            "GITHUB_EVENT_NAME": "pull_request",
         }
     )
 
@@ -456,6 +473,27 @@ def test_registered_verification_settings_accept_pull_request_context(
 
     assert settings.release_commit == commit
     assert settings.metadata.default_branch == "main"
+
+
+def test_registered_publish_settings_reject_feature_branch_dispatch(
+    tmp_path: Path,
+) -> None:
+    repository, commit, environment = _registered_repository(tmp_path)
+    environment.update(
+        {
+            "GITHUB_EVENT_NAME": "workflow_dispatch",
+            "GITHUB_REF": "refs/heads/feature/provenance",
+            "GITHUB_REF_NAME": "feature/provenance",
+        }
+    )
+
+    with pytest.raises(RuntimeIntegrationError, match="default branch"):
+        load_registered_deployment_settings(
+            repository,
+            repo_agent_id="example-agent",
+            exact_source=commit,
+            environment=environment,
+        )
 
 
 def test_registered_publish_settings_reject_pull_request_context(
@@ -494,6 +532,80 @@ def test_registered_settings_reject_uncommitted_sidecar_drift(tmp_path: Path) ->
             exact_source=commit,
             environment=environment,
         )
+
+
+def test_registered_reconciliation_uses_exact_commit_with_dirty_worktree(
+    tmp_path: Path,
+) -> None:
+    repository, commit, environment = _registered_repository(tmp_path)
+    clean = load_registered_deployment_settings(
+        repository,
+        repo_agent_id="example-agent",
+        exact_source=commit,
+        environment=environment,
+    )
+    (repository / "agent" / "main.py").write_text(
+        "print('dirty worktree must not deploy')\n",
+        encoding="utf-8",
+    )
+
+    dirty = load_registered_deployment_settings(
+        repository,
+        repo_agent_id="example-agent",
+        exact_source=commit,
+        environment=environment,
+    )
+
+    assert dirty.reconciliation_metadata == clean.reconciliation_metadata
+
+
+def test_registered_merge_sha_with_identical_package_remains_a_noop(
+    tmp_path: Path,
+) -> None:
+    repository, original_commit, environment = _registered_repository(tmp_path)
+    original = load_registered_deployment_settings(
+        repository,
+        repo_agent_id="example-agent",
+        exact_source=original_commit,
+        environment=environment,
+    )
+    original_package = package_git_source(
+        repository,
+        commit=original_commit,
+        source_root=original.policy.source_root,
+        work_root=tmp_path / "original-package",
+    )
+    main_branch = _git(repository, "branch", "--show-current")
+    _git(repository, "checkout", "-b", "feature/noop")
+    _git(repository, "commit", "--allow-empty", "-m", "feature")
+    _git(repository, "checkout", main_branch)
+    _git(repository, "commit", "--allow-empty", "-m", "main")
+    _git(repository, "merge", "--no-ff", "feature/noop", "-m", "merge feature")
+    merge_commit = _git(repository, "rev-parse", "HEAD")
+    environment["GITHUB_SHA"] = merge_commit
+    for relative in (
+        ".foundry-opt/registry.yaml",
+        "agent/.foundry/foundry-opt.yaml",
+    ):
+        path = repository / relative
+        content = path.read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+        path.write_bytes(content.replace(b"\n", b"\r\n"))
+
+    merged = load_registered_deployment_settings(
+        repository,
+        repo_agent_id="example-agent",
+        exact_source=merge_commit,
+        environment=environment,
+    )
+    merged_package = package_git_source(
+        repository,
+        commit=merge_commit,
+        source_root=merged.policy.source_root,
+        work_root=tmp_path / "merged-package",
+    )
+
+    assert merged_package.archive_bytes == original_package.archive_bytes
+    assert merged.reconciliation_metadata == original.reconciliation_metadata
 
 
 def test_registered_publish_packages_exact_source_and_closes_clients(

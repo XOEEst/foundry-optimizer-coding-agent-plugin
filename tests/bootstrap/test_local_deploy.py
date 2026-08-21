@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
 from foundry_opt.bootstrap.contracts import BootstrapSidecar, ReviewedFoundryTarget
 from foundry_opt.bootstrap.errors import BootstrapApplyError
@@ -20,6 +21,7 @@ from foundry_opt.bootstrap.local_deploy import (
     LocalDeploymentAgentPlan,
     LocalDeploymentAgentReceipt,
     LocalDeploymentCoordinator,
+    LocalDeploymentPlan,
 )
 from foundry_opt.bootstrap.operation_state import (
     DiscoveredAgentRecord,
@@ -32,6 +34,7 @@ from foundry_opt.bootstrap.runner import (
     RepositoryBinding,
     RuntimeBinding,
 )
+from foundry_opt.poc.source import fingerprint_git_root, read_git_file
 
 RUNTIME_REPOSITORY = "https://github.com/example/runtime.git"
 RUNTIME_COMMIT = "1" * 40
@@ -233,8 +236,25 @@ def _fixture(
     _git(repository, "commit", "--quiet", "-m", "bootstrap")
     commit = _git(repository, "rev-parse", "HEAD")
     tree = _git(repository, "rev-parse", "HEAD^{tree}")
-    registry_sha = hashlib.sha256(registry_path.read_bytes()).hexdigest()
-    profile_sha = hashlib.sha256(sidecar_path.read_bytes()).hexdigest()
+    registry_sha = hashlib.sha256(
+        read_git_file(
+            repository,
+            commit=commit,
+            relative_path=".foundry-opt/registry.yaml",
+        )
+    ).hexdigest()
+    profile_sha = hashlib.sha256(
+        read_git_file(
+            repository,
+            commit=commit,
+            relative_path="agent/.foundry/foundry-opt.yaml",
+        )
+    ).hexdigest()
+    source_sha = fingerprint_git_root(
+        repository,
+        commit=commit,
+        source_root="agent",
+    )
     receipt = LocalCommitReceipt.create(
         operation_id="bootstrap-local-deploy",
         repository_identity="example-org/example-repo",
@@ -266,9 +286,9 @@ def _fixture(
             LocalCommitAgentHash(
                 repo_agent_id="example-agent",
                 source_root="agent",
-                source_sha256="5" * 64,
+                source_sha256=source_sha,
                 package_root="agent",
-                package_sha256="6" * 64,
+                package_sha256=source_sha,
             ),
         ),
     )
@@ -309,8 +329,8 @@ def _fixture(
                     config_path="agent/.foundry/foundry-opt.yaml",
                     source_root="agent",
                     package_root="agent",
-                    source_fingerprint="5" * 64,
-                    package_fingerprint="6" * 64,
+                    source_fingerprint=source_sha,
+                    package_fingerprint=source_sha,
                     classification="ready-unbound",
                     confidence=1.0,
                 ),
@@ -349,6 +369,30 @@ def test_local_deployment_plan_binds_exact_commit_profile_and_target(
     ).casefold()
     assert "current local Azure identity" in plan.render_markdown()
     assert adapter.calls == []
+
+
+def test_local_deployment_plan_rejects_duplicate_normalized_targets(
+    tmp_path: Path,
+) -> None:
+    _, operation, commit_coordinator = _fixture(tmp_path)
+    coordinator = LocalDeploymentCoordinator(
+        adapter=_DeploymentAdapter(),
+        commit_coordinator=commit_coordinator,
+        state_root=tmp_path / "state",
+    )
+    plan = coordinator.build_plan(operation)
+    duplicate = plan.agents[0].model_copy(
+        update={
+            "repo_agent_id": "second-agent",
+            "project_endpoint": f"{plan.agents[0].project_endpoint}/",
+            "agent_name": plan.agents[0].agent_name.upper(),
+        }
+    )
+    payload = plan.model_dump(mode="python", exclude={"plan_hash"})
+    payload["agents"] = (plan.agents[0], duplicate)
+
+    with pytest.raises(ValidationError, match="duplicate Foundry target"):
+        LocalDeploymentPlan.create(**payload)
 
 
 def test_local_deployment_approval_publishes_and_resumes_idempotently(

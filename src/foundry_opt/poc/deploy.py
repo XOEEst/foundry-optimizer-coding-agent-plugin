@@ -16,7 +16,6 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from foundry_opt.bootstrap.canonical import canonical_sha256
 from foundry_opt.bootstrap.contracts import BootstrapLock, RootRegistry
-from foundry_opt.bootstrap.discovery import discover_repository_agents
 from foundry_opt.bootstrap.workflow_integration import (
     RegistrySelection,
     resolve_registry_selection,
@@ -76,7 +75,13 @@ from foundry_opt.poc.runtime import (
     load_deadline_seconds,
     select_oidc_principal,
 )
-from foundry_opt.poc.source import PackagedSource, package_git_source
+from foundry_opt.poc.source import (
+    PackagedSource,
+    SourcePackagingError,
+    fingerprint_git_root,
+    package_git_source,
+    read_git_file,
+)
 
 
 DEPLOYMENT_ROOT_ENV = "FOUNDRY_OPT_DEPLOY_ROOT"
@@ -94,6 +99,7 @@ REGISTRY_FINGERPRINT_METADATA_KEY = "foundry_opt_registry_fingerprint"
 TARGET_FINGERPRINT_METADATA_KEY = "foundry_opt_target_fingerprint"
 REPO_AGENT_ID_METADATA_KEY = "foundry_opt_repo_agent_id"
 _UNUSED_DEPLOYMENT_VERIFICATION_TOKEN = "deployment-verification-not-required"
+_MAX_GITHUB_EVENT_BYTES = 2 * 1024 * 1024
 
 _COMMIT_PATTERN = r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
@@ -1073,7 +1079,21 @@ def _load_registered_settings(
         )
     root = _repository_root(repository)
     release_commit = _resolve_release_commit(root, exact_source)
-    selection = resolve_registry_selection(root, repo_agent_id=repo_agent_id)
+    live_selection = resolve_registry_selection(root, repo_agent_id=repo_agent_id)
+    try:
+        selection = resolve_registry_selection(
+            root,
+            repo_agent_id=repo_agent_id,
+            content_reader=lambda path: read_git_file(
+                root,
+                commit=release_commit,
+                relative_path=path,
+            ),
+        )
+    except SourcePackagingError as error:
+        raise RuntimeIntegrationError(
+            "registered deployment could not read the exact source contract"
+        ) from error
     sidecar = selection.sidecar
     if not sidecar.deployment.enabled:
         raise RuntimeIntegrationError("selected registered agent deployment is disabled")
@@ -1096,48 +1116,58 @@ def _load_registered_settings(
     registry_path = root / ".foundry-opt" / "registry.yaml"
     sidecar_path = root / selection.config_path
     lock_path = root / ".foundry-opt" / "bootstrap.lock.json"
-    registry_bytes = registry_path.read_bytes()
-    sidecar_bytes = sidecar_path.read_bytes()
+    live_registry_bytes = registry_path.read_bytes()
+    live_sidecar_bytes = sidecar_path.read_bytes()
     try:
-        lock_bytes = lock_path.read_bytes()
+        live_lock_bytes = lock_path.read_bytes()
     except OSError as error:
         raise RuntimeIntegrationError(
             "registered deployment managed lock is missing"
         ) from error
-    if hashlib.sha256(registry_bytes).hexdigest() != selection.registry_hash:
+    if (
+        live_selection.config_path != selection.config_path
+        or hashlib.sha256(live_registry_bytes).hexdigest()
+        != live_selection.registry_hash
+    ):
         raise RuntimeIntegrationError(
             "registered deployment registry changed during selection"
         )
-    if hashlib.sha256(sidecar_bytes).hexdigest() != selection.sidecar_hash:
+    if (
+        hashlib.sha256(live_sidecar_bytes).hexdigest()
+        != live_selection.sidecar_hash
+    ):
         raise RuntimeIntegrationError(
             "registered deployment sidecar changed during selection"
         )
-    if _normalized_text_bytes(registry_bytes) != _normalized_text_bytes(
-        _git_bytes(
-            root,
-            "show",
-            f"{release_commit}:.foundry-opt/registry.yaml",
-        )
+    registry_bytes = read_git_file(
+        root,
+        commit=release_commit,
+        relative_path=".foundry-opt/registry.yaml",
+    )
+    sidecar_bytes = read_git_file(
+        root,
+        commit=release_commit,
+        relative_path=selection.config_path,
+    )
+    lock_bytes = read_git_file(
+        root,
+        commit=release_commit,
+        relative_path=".foundry-opt/bootstrap.lock.json",
+    )
+    if _normalized_text_bytes(live_registry_bytes) != _normalized_text_bytes(
+        registry_bytes
     ):
         raise RuntimeIntegrationError(
             "registered deployment registry does not match the exact source commit"
         )
-    if _normalized_text_bytes(sidecar_bytes) != _normalized_text_bytes(
-        _git_bytes(
-            root,
-            "show",
-            f"{release_commit}:{selection.config_path}",
-        )
+    if _normalized_text_bytes(live_sidecar_bytes) != _normalized_text_bytes(
+        sidecar_bytes
     ):
         raise RuntimeIntegrationError(
             "registered deployment sidecar does not match the exact source commit"
         )
-    if _normalized_text_bytes(lock_bytes) != _normalized_text_bytes(
-        _git_bytes(
-            root,
-            "show",
-            f"{release_commit}:.foundry-opt/bootstrap.lock.json",
-        )
+    if _normalized_text_bytes(live_lock_bytes) != _normalized_text_bytes(
+        lock_bytes
     ):
         raise RuntimeIntegrationError(
             "registered deployment managed lock does not match the exact source commit"
@@ -1157,12 +1187,24 @@ def _load_registered_settings(
             "registered deployment lock and distribution pin do not match"
         )
     managed = {entry.path: entry for entry in lock.managed_files}
-    for path, content in (
-        (".foundry-opt/registry.yaml", registry_bytes),
-        (selection.config_path, sidecar_bytes),
+    for path, live_content, committed_content in (
+        (
+            ".foundry-opt/registry.yaml",
+            live_registry_bytes,
+            registry_bytes,
+        ),
+        (
+            selection.config_path,
+            live_sidecar_bytes,
+            sidecar_bytes,
+        ),
     ):
         entry = managed.get(path)
-        if entry is None or hashlib.sha256(content).hexdigest() != entry.applied_sha256:
+        accepted_hashes = {
+            hashlib.sha256(live_content).hexdigest(),
+            hashlib.sha256(committed_content).hexdigest(),
+        }
+        if entry is None or entry.applied_sha256 not in accepted_hashes:
             raise RuntimeIntegrationError(
                 f"registered deployment managed digest does not match: {path}"
             )
@@ -1200,8 +1242,14 @@ def _load_registered_settings(
         raise RuntimeIntegrationError(
             "GITHUB_REPOSITORY_ID must be a positive integer"
         )
-    default_branch = _registered_branch_context(
+    default_branch = _registered_default_branch(
         env,
+        repository_identity=repository_identity,
+        repository_id=repository_id,
+    )
+    _validate_registered_ref(
+        env,
+        default_branch=default_branch,
         require_exact_branch_ref=require_exact_branch_ref,
     )
 
@@ -1262,26 +1310,74 @@ def _load_registered_settings(
         reconciliation_metadata=_registered_reconciliation_metadata(
             root,
             selection,
+            release_commit=release_commit,
         ),
     )
 
 
-def _registered_branch_context(
+def _registered_default_branch(
     environment: Mapping[str, str],
     *,
-    require_exact_branch_ref: bool,
+    repository_identity: str,
+    repository_id: int,
 ) -> str:
-    if require_exact_branch_ref:
-        branch = _required_environment_value(environment, "GITHUB_REF_NAME")
-        if environment.get("GITHUB_REF") != f"refs/heads/{branch}":
-            raise RuntimeIntegrationError(
-                "registered deployment requires an exact branch push ref"
-            )
-        return branch
-    base_branch = environment.get("GITHUB_BASE_REF", "").strip()
-    if base_branch:
-        return base_branch
-    return _required_environment_value(environment, "GITHUB_REF_NAME")
+    event_path = _required_environment_value(environment, "GITHUB_EVENT_PATH")
+    try:
+        data = Path(event_path).read_bytes()
+    except OSError as error:
+        raise RuntimeIntegrationError(
+            "GitHub event payload could not be read"
+        ) from error
+    if len(data) > _MAX_GITHUB_EVENT_BYTES:
+        raise RuntimeIntegrationError("GitHub event payload exceeds the size limit")
+    try:
+        payload = json.loads(data)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeIntegrationError("GitHub event payload is invalid") from error
+    repository = payload.get("repository") if isinstance(payload, Mapping) else None
+    if not isinstance(repository, Mapping):
+        raise RuntimeIntegrationError(
+            "GitHub event payload is missing repository metadata"
+        )
+    full_name = repository.get("full_name")
+    if full_name is not None and str(full_name) != repository_identity:
+        raise RuntimeIntegrationError(
+            "GitHub event repository does not match GITHUB_REPOSITORY"
+        )
+    event_repository_id = repository.get("id")
+    if event_repository_id is not None and str(event_repository_id) != str(
+        repository_id
+    ):
+        raise RuntimeIntegrationError(
+            "GitHub event repository id does not match GITHUB_REPOSITORY_ID"
+        )
+    default_branch = repository.get("default_branch")
+    if (
+        not isinstance(default_branch, str)
+        or not default_branch.strip()
+        or any(ord(character) < 32 for character in default_branch)
+    ):
+        raise RuntimeIntegrationError(
+            "GitHub event repository default branch is invalid"
+        )
+    return default_branch
+
+
+def _validate_registered_ref(
+    environment: Mapping[str, str],
+    *,
+    default_branch: str,
+    require_exact_branch_ref: bool,
+) -> None:
+    if not require_exact_branch_ref:
+        return
+    if (
+        environment.get("GITHUB_REF") != f"refs/heads/{default_branch}"
+        or environment.get("GITHUB_REF_NAME") != default_branch
+    ):
+        raise RuntimeIntegrationError(
+            "registered deployment requires an exact branch push ref for the repository default branch"
+        )
 
 
 _RegisteredOperation = TypeVar("_RegisteredOperation")
@@ -1455,33 +1551,24 @@ def _normalize_reconciliation_metadata(
 def _registered_reconciliation_metadata(
     repository_root: Path,
     selection: RegistrySelection,
+    *,
+    release_commit: str,
 ) -> dict[str, str]:
-    discovery = discover_repository_agents(
-        repository_root,
-        selected_agents=(
-            {
-                "root": selection.root,
-                "repoAgentId": selection.repo_agent_id,
-            },
-        ),
-    )
-    matches = [
-        item
-        for item in discovery.agents
-        if item.repoAgentId.casefold() == selection.repo_agent_id.casefold()
-    ]
-    if len(matches) != 1:
+    try:
+        source_fingerprint = fingerprint_git_root(
+            repository_root,
+            commit=release_commit,
+            source_root=selection.sidecar.source_root,
+        )
+        package_fingerprint = fingerprint_git_root(
+            repository_root,
+            commit=release_commit,
+            source_root=selection.sidecar.package_root,
+        )
+    except SourcePackagingError as error:
         raise RuntimeIntegrationError(
             "registered deployment could not resolve exact source/package fingerprints"
-        )
-    discovered = matches[0]
-    if (
-        discovered.sourceRoot != selection.sidecar.source_root
-        or discovered.packageRoot != selection.sidecar.package_root
-    ):
-        raise RuntimeIntegrationError(
-            "registered deployment discovery does not match the selected profile roots"
-        )
+        ) from error
     if selection.sidecar.foundry_target is not None:
         target_payload: object = selection.sidecar.foundry_target.model_dump(
             mode="json"
@@ -1495,8 +1582,8 @@ def _registered_reconciliation_metadata(
     return _normalize_reconciliation_metadata(
         {
             REPO_AGENT_ID_METADATA_KEY: selection.repo_agent_id,
-            SOURCE_FINGERPRINT_METADATA_KEY: discovered.sourceFingerprint,
-            PACKAGE_FINGERPRINT_METADATA_KEY: discovered.packageFingerprint,
+            SOURCE_FINGERPRINT_METADATA_KEY: source_fingerprint,
+            PACKAGE_FINGERPRINT_METADATA_KEY: package_fingerprint,
             PROFILE_FINGERPRINT_METADATA_KEY: selection.sidecar_hash,
             REGISTRY_FINGERPRINT_METADATA_KEY: selection.registry_hash,
             TARGET_FINGERPRINT_METADATA_KEY: canonical_sha256(target_payload),
@@ -1527,7 +1614,7 @@ def deployment_freshness_check(
             "GitHub token is required to verify the default branch before publication"
         )
 
-    def check(release_commit: str) -> None:
+    def query(path: str, jq: str) -> str:
         command_environment = os.environ.copy()
         command_environment.update(env)
         command_environment["GH_TOKEN"] = token
@@ -1536,9 +1623,9 @@ def deployment_freshness_check(
                 [
                     "gh",
                     "api",
-                    f"repos/{repository}/commits/{branch}",
+                    path,
                     "--jq",
-                    ".sha",
+                    jq,
                 ],
                 check=False,
                 capture_output=True,
@@ -1559,7 +1646,21 @@ def deployment_freshness_check(
             raise RuntimeIntegrationError(
                 "GitHub default-branch verification failed"
             )
-        current = completed.stdout.strip()
+        return completed.stdout.strip()
+
+    def check(release_commit: str) -> None:
+        current_default = query(
+            f"repos/{repository}",
+            ".default_branch",
+        )
+        if current_default != branch:
+            raise RuntimeIntegrationError(
+                "GitHub repository default branch changed before publication"
+            )
+        current = query(
+            f"repos/{repository}/commits/{current_default}",
+            ".sha",
+        )
         if not _valid_commit(current):
             raise RuntimeIntegrationError(
                 "GitHub default-branch verification returned an invalid commit"

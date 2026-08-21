@@ -21,7 +21,10 @@ from foundry_opt.bootstrap.contracts import (
     Sha256,
 )
 from foundry_opt.bootstrap.errors import BootstrapApplyError, BootstrapConfigError
-from foundry_opt.bootstrap.foundry_targets import build_local_user_credential
+from foundry_opt.bootstrap.foundry_targets import (
+    build_local_user_credential,
+    normalized_foundry_target_key,
+)
 from foundry_opt.bootstrap.local_commit import (
     LocalCommitReceipt,
     LocalCommitReview,
@@ -50,7 +53,12 @@ from foundry_opt.poc.deploy import (
     build_repository_policy_from_registry_selection,
 )
 from foundry_opt.poc.foundry import AzureProjectsEvaluationBackend, FoundryPocClient
-from foundry_opt.poc.source import package_git_source
+from foundry_opt.poc.source import (
+    SourcePackagingError,
+    fingerprint_git_root,
+    package_git_source,
+    read_git_file,
+)
 from foundry_opt.poc.verification import resolve_deployment_verification
 
 LocalDeploymentLifecycleState = Literal[
@@ -164,6 +172,17 @@ class LocalDeploymentPlan(BootstrapDocument):
         if len(ids) != len(set(ids)):
             raise BootstrapConfigError(
                 "local deployment plan contains duplicate repoAgentId values"
+            )
+        targets = [
+            normalized_foundry_target_key(
+                item.project_endpoint,
+                item.agent_name,
+            )
+            for item in self.agents
+        ]
+        if len(targets) != len(set(targets)):
+            raise BootstrapConfigError(
+                "local deployment plan contains a duplicate Foundry target"
             )
         if any(
             item.repository_identity != self.repository_identity
@@ -427,12 +446,34 @@ class DefaultLocalDeploymentAdapter(LocalDeploymentAdapterProtocol):
         selection = resolve_registry_selection(
             repository_root,
             repo_agent_id=plan.repo_agent_id,
+            content_reader=lambda path: read_git_file(
+                repository_root,
+                commit=plan.commit_sha,
+                relative_path=path,
+            ),
         )
+        try:
+            source_sha256 = fingerprint_git_root(
+                repository_root,
+                commit=plan.commit_sha,
+                source_root=selection.sidecar.source_root,
+            )
+            package_sha256 = fingerprint_git_root(
+                repository_root,
+                commit=plan.commit_sha,
+                source_root=selection.sidecar.package_root,
+            )
+        except SourcePackagingError as error:
+            raise BootstrapApplyError(
+                "local deployment could not fingerprint the exact committed source"
+            ) from error
         if (
             selection.config_path != plan.config_path
             or selection.registry_hash != plan.registry_sha256
             or selection.sidecar_hash != plan.profile_sha256
             or selection.sidecar.package_root != plan.package_root
+            or source_sha256 != plan.source_sha256
+            or package_sha256 != plan.package_sha256
             or selection.sidecar.foundry_project.project_endpoint
             != plan.project_endpoint
             or selection.sidecar.foundry_project.agent_name != plan.agent_name
@@ -657,7 +698,27 @@ class LocalDeploymentCoordinator:
             selection = resolve_registry_selection(
                 repository_root,
                 repo_agent_id=repo_agent_id,
+                content_reader=lambda path: read_git_file(
+                    repository_root,
+                    commit=commit_receipt.commit_sha,
+                    relative_path=path,
+                ),
             )
+            try:
+                source_sha256 = fingerprint_git_root(
+                    repository_root,
+                    commit=commit_receipt.commit_sha,
+                    source_root=selection.sidecar.source_root,
+                )
+                package_sha256 = fingerprint_git_root(
+                    repository_root,
+                    commit=commit_receipt.commit_sha,
+                    source_root=selection.sidecar.package_root,
+                )
+            except SourcePackagingError as error:
+                raise BootstrapApplyError(
+                    "local deployment could not fingerprint the exact committed source"
+                ) from error
             sidecar_target = selection.sidecar.foundry_target
             if sidecar_target is None or sidecar_target != target:
                 raise BootstrapApplyError(
@@ -667,7 +728,10 @@ class LocalDeploymentCoordinator:
                 selection.registry_hash != commit_receipt.registry_sha256
                 or selection.sidecar_hash != profile_hash.sha256
                 or selection.config_path != profile_hash.profile_path
+                or selection.sidecar.source_root != agent_hash.source_root
                 or selection.sidecar.package_root != agent_hash.package_root
+                or source_sha256 != agent_hash.source_sha256
+                or package_sha256 != agent_hash.package_sha256
             ):
                 raise BootstrapApplyError(
                     "committed registry/profile fingerprints do not match deployment inputs"
@@ -690,9 +754,9 @@ class LocalDeploymentCoordinator:
                     agent_name=target.agent_name,
                     target_state=target.state,
                     previous_version=target.latest_agent_version,
-                    package_root=agent_hash.package_root,
-                    source_sha256=agent_hash.source_sha256,
-                    package_sha256=agent_hash.package_sha256,
+                    package_root=selection.sidecar.package_root,
+                    source_sha256=source_sha256,
+                    package_sha256=package_sha256,
                     profile_sha256=profile_hash.sha256,
                     registry_sha256=commit_receipt.registry_sha256,
                     target_sha256=canonical_sha256(

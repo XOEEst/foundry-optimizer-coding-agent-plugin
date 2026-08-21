@@ -48,6 +48,13 @@ def _validate_agent_name(value: str) -> str:
     return value
 
 
+def normalized_foundry_target_key(
+    project_endpoint: str,
+    agent_name: str,
+) -> tuple[str, str]:
+    return project_endpoint.rstrip("/").casefold(), agent_name.casefold()
+
+
 def _human_source(source: FoundryTargetSource | None) -> str:
     if source is None:
         return "unknown source"
@@ -659,6 +666,22 @@ class DefaultFoundryTargetResolutionHandler:
             if item.repo_agent_id.casefold() not in overrides
         }
         records: list[BootstrapFoundryTargetRecord] = list(existing.values())
+        targets_by_key: dict[tuple[str, str], str] = {}
+        for record in records:
+            target = record.reviewed_target
+            if target.project_endpoint is None or target.agent_name is None:
+                continue
+            key = normalized_foundry_target_key(
+                target.project_endpoint,
+                target.agent_name,
+            )
+            previous = targets_by_key.get(key)
+            if previous is not None and previous.casefold() != record.repo_agent_id.casefold():
+                raise BootstrapApplyError(
+                    "duplicate Foundry target resolved for different repo agents: "
+                    f"{previous} and {record.repo_agent_id}"
+                )
+            targets_by_key[key] = record.repo_agent_id
         selected = {
             item.casefold(): item
             for item in self._target_agent_ids(operation)
@@ -690,6 +713,17 @@ class DefaultFoundryTargetResolutionHandler:
                 continue
             assert context.project_endpoint is not None
             assert context.agent_name is not None
+            target_key = normalized_foundry_target_key(
+                context.project_endpoint.value,
+                context.agent_name.value,
+            )
+            previous = targets_by_key.get(target_key)
+            if previous is not None and previous.casefold() != context.repo_agent_id.casefold():
+                raise BootstrapApplyError(
+                    "duplicate Foundry target resolved for different repo agents: "
+                    f"{previous} and {context.repo_agent_id}"
+                )
+            targets_by_key[target_key] = context.repo_agent_id
             records.append(self._classify_target(context))
         filtered = [
             item
@@ -1360,5 +1394,6 @@ __all__ = [
     "DefaultFoundryTargetResolutionHandler",
     "FoundryProjectInventory",
     "FoundryTargetInventoryAdapterProtocol",
+    "normalized_foundry_target_key",
     "build_local_user_credential",
 ]

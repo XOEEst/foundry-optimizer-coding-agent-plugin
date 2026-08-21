@@ -431,6 +431,46 @@ def test_questions_only_cover_unresolved_fields_one_agent_at_a_time(tmp_path: Pa
     assert all(item.deployment_ready for item in records.values())
 
 
+def test_duplicate_normalized_targets_across_agents_are_rejected(
+    tmp_path: Path,
+) -> None:
+    repo = _create_repository(
+        tmp_path,
+        agents=[
+            {
+                "root": "agents/a",
+                "metadata": {
+                    "project_endpoint": PROJECT_ENDPOINT,
+                    "agent_name": "example-agent",
+                },
+            },
+            {
+                "root": "agents/b",
+                "metadata": {
+                    "project_endpoint": f"{PROJECT_ENDPOINT}/",
+                    "agent_name": "EXAMPLE-AGENT",
+                },
+            },
+        ],
+    )
+    runner = BootstrapRunner(
+        state_store=FileBootstrapRunnerStateStore(state_root=tmp_path / "state"),
+        target_resolution_handler=DefaultFoundryTargetResolutionHandler(
+            foundry_inventory=_FakeFoundryInventory(
+                latest_versions={PROJECT_ENDPOINT: {}}
+            ),
+            azure_inventory=_FakeAzureInventory(
+                {PROJECT_ENDPOINT: ACCOUNT_RESOURCE_ID}
+            ),
+        ),
+    )
+
+    first = runner.start(repo)
+
+    with pytest.raises(BootstrapApplyError, match="duplicate Foundry target"):
+        _select_and_enable_all(runner, first)
+
+
 @pytest.mark.parametrize(
     ("metadata", "expected_detail"),
     [

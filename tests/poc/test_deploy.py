@@ -41,7 +41,11 @@ from foundry_opt.poc.foundry import (
     ServiceError,
 )
 from foundry_opt.poc.source import PackagedSource
-from foundry_opt.poc.runtime import BOOTSTRAP_RECEIPT_ENV, build_oidc_config
+from foundry_opt.poc.runtime import (
+    BOOTSTRAP_RECEIPT_ENV,
+    RuntimeIntegrationError,
+    build_oidc_config,
+)
 
 
 def _configuration() -> tuple[RepositoryPolicy, AgentMetadata]:
@@ -690,6 +694,54 @@ def test_deployment_rechecks_main_after_draft_validation() -> None:
 
     assert "cleanup" in foundry.calls
     assert "publish" not in foundry.calls
+
+
+def test_deployment_freshness_revalidates_the_true_default_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release_commit = "a" * 40
+    calls: list[list[str]] = []
+
+    def run(arguments: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(arguments)
+        output = "main\n" if arguments[-1] == ".default_branch" else f"{release_commit}\n"
+        return subprocess.CompletedProcess(arguments, 0, output, "")
+
+    monkeypatch.setattr(deploy_module.subprocess, "run", run)
+    check = deploy_module.deployment_freshness_check(
+        repository="example-org/example-agent",
+        branch="main",
+        environment={"GITHUB_ACTIONS": "true", "GH_TOKEN": "token"},
+    )
+
+    assert check is not None
+    check(release_commit)
+    assert calls[0][2] == "repos/example-org/example-agent"
+    assert calls[1][2] == "repos/example-org/example-agent/commits/main"
+
+
+def test_deployment_freshness_rejects_a_changed_default_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        deploy_module.subprocess,
+        "run",
+        lambda arguments, **_kwargs: subprocess.CompletedProcess(
+            arguments,
+            0,
+            "release\n",
+            "",
+        ),
+    )
+    check = deploy_module.deployment_freshness_check(
+        repository="example-org/example-agent",
+        branch="main",
+        environment={"GITHUB_ACTIONS": "true", "GH_TOKEN": "token"},
+    )
+
+    assert check is not None
+    with pytest.raises(RuntimeIntegrationError, match="default branch changed"):
+        check("a" * 40)
 
 
 def test_deployment_reconciles_unchanged_latest_source_without_new_version() -> None:

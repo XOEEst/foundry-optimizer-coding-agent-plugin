@@ -123,6 +123,11 @@ def test_setup_and_validation_allow_missing_inactive_sidecars() -> None:
 
 def test_deploy_workflow_computes_dynamic_noop_matrix() -> None:
     text = _workflow_text(WORKFLOW_ROOT / "foundry-opt-deploy.yml")
+    assert "repos/${GITHUB_REPOSITORY}" in text
+    assert ".default_branch" in text
+    assert 'refs/heads/$default_branch' in text
+    assert 'commits/$default_branch' in text
+    assert 'test "$GITHUB_SHA" = "$default_tip"' in text
     assert 'shared_source_relations' in text
     assert "example-agent" not in text
     assert "matrix = {'include': include}" in text
