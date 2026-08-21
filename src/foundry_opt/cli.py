@@ -10,7 +10,7 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import httpx
 import typer
@@ -21,7 +21,11 @@ from foundry_opt.bootstrap.errors import BootstrapConfigError
 from foundry_opt.bootstrap.cli import register_bootstrap_commands
 from foundry_opt.bootstrap.workflow_integration import (
     build_registered_deployment_plan,
+    normalize_issue_author_permission,
     resolve_registry_selection,
+    verify_issue_check_authority,
+    verify_issue_dataset_authority,
+    verify_issue_evaluator_authority,
 )
 from foundry_opt.poc import runtime as poc_runtime
 from foundry_opt.poc.auth import (
@@ -145,6 +149,7 @@ _GITHUB_WORKSPACE_ENV = "GITHUB_WORKSPACE"
 _GITHUB_HEAD_REF_ENV = "GITHUB_HEAD_REF"
 _GITHUB_REF_NAME_ENV = "GITHUB_REF_NAME"
 _GITHUB_BINDING_ENV = "FOUNDRY_OPT_GITHUB_BINDING"
+_GITHUB_API_VERSION = "2022-11-28"
 _PULL_REQUEST_NUMBER_ENV = "FOUNDRY_OPT_PULL_REQUEST_NUMBER"
 _PULL_REQUEST_BASE_BRANCH_ENV = "FOUNDRY_OPT_PULL_REQUEST_BASE_BRANCH"
 _PULL_REQUEST_HEAD_BRANCH_ENV = "FOUNDRY_OPT_PULL_REQUEST_HEAD_BRANCH"
@@ -772,6 +777,23 @@ def broker_launch(
         head_ref=head_ref,
         ref_name=ref_name,
     )
+    issue_author_login, issue_author_permission = _issue_author_binding_fields(
+        issue_binding.repository,
+        issue_number=issue_binding.issue_number,
+        token=token,
+    )
+    try:
+        issue_binding = IssueBinding.model_validate(
+            {
+                **issue_binding.model_dump(mode="json"),
+                "issue_author_login": issue_author_login,
+                "issue_author_permission": issue_author_permission,
+            }
+        )
+    except ValidationError as error:
+        raise typer.BadParameter(
+            "issue author lookup returned invalid trusted binding data"
+        ) from error
     _write_binding(binding, issue=issue_binding, pull_request=None)
     socket = socket.resolve()
     socket.parent.mkdir(parents=True, exist_ok=True)
@@ -1463,6 +1485,7 @@ def _prepare_start_runtime(
     if start.issue_binding is not None:
         _assert_issue_binding_matches_metadata(start.issue_binding, settings.metadata)
     narrowed = _narrow_runtime_settings(settings, start.request)
+    _verify_issue_override_authority(start.request, binding=start.binding)
     if not paths.job_state_path.is_file():
         _delete_file_if_present(_issue_request_path(paths.job_root))
     request_digest_sha256 = _request_digest(start.request)
@@ -1717,7 +1740,11 @@ def _resolve_start_context(
     event_body: str | None = None
     if event is not None:
         event_binding, event_body = _load_issue_event(event)
-    if loaded_binding is not None and event_binding is not None and loaded_binding.issue != event_binding:
+    if (
+        loaded_binding is not None
+        and event_binding is not None
+        and not _same_issue_binding_identity(loaded_binding.issue, event_binding)
+    ):
         raise typer.BadParameter("issue event and trusted binding do not describe the same optimize job")
     resolved_issue_number = _resolve_issue_number(
         explicit=issue_number,
@@ -1751,7 +1778,11 @@ def _resolve_job_reference(
 ) -> tuple[str, _LoadedBinding | None]:
     loaded_binding = _load_binding(binding) if binding is not None else None
     event_binding = _issue_binding_from_event(event) if event is not None else None
-    if loaded_binding is not None and event_binding is not None and loaded_binding.issue != event_binding:
+    if (
+        loaded_binding is not None
+        and event_binding is not None
+        and not _same_issue_binding_identity(loaded_binding.issue, event_binding)
+    ):
         raise typer.BadParameter("issue event and trusted binding do not describe the same optimize job")
     if job_id is not None:
         if loaded_binding is not None and loaded_binding.issue.job_id != job_id:
@@ -1784,6 +1815,19 @@ def _resolve_issue_number(
     if len(set(values)) != 1:
         raise typer.BadParameter("issue_number is inconsistent across the trusted inputs")
     return values[0]
+
+
+def _same_issue_binding_identity(
+    left: IssueBinding,
+    right: IssueBinding,
+) -> bool:
+    return (
+        left.repository == right.repository
+        and left.issue_number == right.issue_number
+        and left.job_id == right.job_id
+        and left.comment_author_login.casefold()
+        == right.comment_author_login.casefold()
+    )
 
 
 def _resolve_job_id(
@@ -1877,6 +1921,17 @@ def _legacy_foundry_resolution(settings: RuntimeSettings) -> VerificationResolut
         provenance=("runtime_metadata_defaults",),
         quantitative_decision_allowed=True,
     )
+
+
+def _verify_issue_override_authority(
+    request: OptimizeIssueRequest,
+    *,
+    binding: _LoadedBinding | None,
+) -> None:
+    permission = None if binding is None else binding.issue.issue_author_permission
+    verify_issue_evaluator_authority(permission, request.issue_evaluators)
+    verify_issue_dataset_authority(permission, request.verification_dataset)
+    verify_issue_check_authority(permission, request.verification_checks)
 
 
 def _resolve_runtime_verification(
@@ -2988,6 +3043,93 @@ def _linked_issue_numbers_from_body(
     return numbers
 
 
+def _github_api_headers(token: str) -> dict[str, str]:
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": f"foundry-opt/{__version__}",
+        "X-GitHub-Api-Version": _GITHUB_API_VERSION,
+    }
+    headers["Authorization"] = "Bearer " + token
+    return headers
+
+
+def _github_get_json_object(
+    *,
+    path: str,
+    token: str,
+    subject: str,
+    transport: httpx.BaseTransport | None = None,
+    not_found_ok: bool = False,
+) -> dict[str, Any] | None:
+    try:
+        with httpx.Client(
+            transport=transport,
+            base_url="https://api.github.com",
+            headers=_github_api_headers(token),
+            follow_redirects=True,
+            timeout=30.0,
+            trust_env=False,
+        ) as client:
+            response = client.get(path)
+    except httpx.HTTPError as error:
+        raise typer.BadParameter(f"{subject} failed") from error
+    if not_found_ok and response.status_code == 404:
+        return None
+    if response.status_code != 200:
+        raise typer.BadParameter(f"{subject} failed with HTTP {response.status_code}")
+    try:
+        payload = response.json()
+    except ValueError as error:
+        raise typer.BadParameter(f"{subject} returned invalid JSON") from error
+    if not isinstance(payload, dict):
+        raise typer.BadParameter(f"{subject} returned an invalid payload")
+    return payload
+
+
+def _issue_author_binding_fields(
+    repository: RepositoryIdentity,
+    *,
+    issue_number: int,
+    token: str,
+    transport: httpx.BaseTransport | None = None,
+) -> tuple[str, str]:
+    issue_payload = _github_get_json_object(
+        path=f"/repos/{repository.full_name}/issues/{issue_number}",
+        token=token,
+        subject=f"issue author lookup for optimize-job issue #{issue_number}",
+        transport=transport,
+    )
+    assert issue_payload is not None
+    user = issue_payload.get("user")
+    if type(user) is not dict:
+        raise typer.BadParameter("issue author lookup returned an invalid user payload")
+    login = user.get("login")
+    if type(login) is not str or not login:
+        raise typer.BadParameter("issue author lookup returned an invalid author login")
+    permission_payload = _github_get_json_object(
+        path=(
+            f"/repos/{repository.full_name}/collaborators/"
+            f"{quote(login, safe='')}/permission"
+        ),
+        token=token,
+        subject=f"repository permission lookup for issue author '{login}'",
+        transport=transport,
+        not_found_ok=True,
+    )
+    if permission_payload is None:
+        return login, "none"
+    raw_permission = permission_payload.get("permission")
+    if type(raw_permission) is not str or not raw_permission:
+        raise typer.BadParameter(
+            "repository permission lookup returned an invalid permission"
+        )
+    try:
+        permission = normalize_issue_author_permission(raw_permission)
+    except BootstrapConfigError as error:
+        raise typer.BadParameter(str(error)) from error
+    return login, permission
+
+
 def _linked_issue_number_from_open_pull_request_branch(
     repository: RepositoryIdentity,
     *,
@@ -2997,12 +3139,7 @@ def _linked_issue_number_from_open_pull_request_branch(
     try:
         response = httpx.get(
             f"https://api.github.com/repos/{repository.full_name}/pulls",
-            headers={
-                "Accept": "application/vnd.github+json",
-                "Authorization": f"Bearer {token}",
-                "User-Agent": f"foundry-opt/{__version__}",
-                "X-GitHub-Api-Version": "2026-03-10",
-            },
+            headers=_github_api_headers(token),
             params={
                 "direction": "asc",
                 "head": f"{repository.owner}:{head_ref}",

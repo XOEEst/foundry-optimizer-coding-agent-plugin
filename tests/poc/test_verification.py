@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from foundry_opt.bootstrap.contracts import (
     ActivationBinding,
     BootstrapSidecar,
@@ -16,6 +18,7 @@ from foundry_opt.bootstrap.contracts import (
     VerificationBundle,
     VerificationSettings,
 )
+from foundry_opt.bootstrap.errors import BootstrapConfigError
 from foundry_opt.poc.config import IssueEvaluatorEntry, OptimizeIssueRequest
 from foundry_opt.poc.verification import resolve_verification
 from foundry_opt.verification import VerificationCheckSpec, VerificationDatasetInput
@@ -237,6 +240,25 @@ def test_resolver_uses_repository_checks_when_no_foundry_evidence_exists() -> No
     assert resolution.repository_checks is not None
     assert resolution.repository_checks.source == "repository"
     assert resolution.provenance == ("repository_default_checks",)
+
+
+def test_resolver_rejects_issue_named_checks_even_if_validation_is_bypassed() -> None:
+    profile = _profile(bundle=_bundle())
+    issue = OptimizeIssueRequest(
+        repo_agent_id="example-agent",
+        goal="Improve quality.",
+        observed_failures=("Failing case.",),
+        candidate_budget=2,
+    ).model_copy(
+        update={
+            "verification_checks": (
+                VerificationCheckSpec(kind="check", value="CI / unit-tests"),
+            ),
+        }
+    )
+
+    with pytest.raises(BootstrapConfigError, match="command: .*check:"):
+        resolve_verification(profile=profile, issue=issue)
 
 
 def test_resolver_returns_none_for_explicit_no_evidence_mode() -> None:

@@ -246,7 +246,6 @@ def test_issue_request_accepts_dataset_checks_and_no_evidence_acknowledgement() 
             "verification_dataset": "azureai://accounts/a/projects/p/data/dev/versions/1",
             "verification_checks": [
                 "command: python -m pytest tests/agent -q",
-                "check: CI / unit-tests",
             ],
             "acknowledge_no_evidence": "acknowledge",
         }
@@ -260,7 +259,6 @@ def test_issue_request_accepts_dataset_checks_and_no_evidence_acknowledgement() 
             kind="command",
             value="python -m pytest tests/agent -q",
         ),
-        VerificationCheckSpec(kind="check", value="CI / unit-tests"),
     )
     assert issue.acknowledge_no_evidence is True
 
@@ -332,7 +330,19 @@ def test_issue_request_rejects_duplicate_verification_checks() -> None:
             {
                 **_generic_issue_request(),
                 "verification_checks": [
-                    "check: CI / unit-tests",
+                    "command: python -m pytest tests/agent -q",
+                    "command: python -m pytest tests/agent -q",
+                ],
+            }
+        )
+
+
+def test_issue_request_rejects_named_verification_checks() -> None:
+    with pytest.raises(POCConfigurationError, match="command: .*check:"):
+        OptimizeIssueRequest.from_document(
+            {
+                **_generic_issue_request(),
+                "verification_checks": [
                     "check: CI / unit-tests",
                 ],
             }

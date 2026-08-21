@@ -116,7 +116,10 @@ def _evaluated_sidecar() -> BootstrapSidecar:
     )
 
 
-def _repository_checks_sidecar() -> BootstrapSidecar:
+def _repository_checks_sidecar(
+    *,
+    evaluation_gate_policy: str = "allow_repository_checks",
+) -> BootstrapSidecar:
     profile = BootstrapSidecar.from_document(
         (TEMPLATE_ROOT / "agent" / ".foundry" / "foundry-opt.yaml").read_text(
             encoding="utf-8"
@@ -132,7 +135,7 @@ def _repository_checks_sidecar() -> BootstrapSidecar:
                         value="python -c \"print('deployment-check')\"",
                     ),
                 ),
-                evaluation_gate_policy="allow_repository_checks",
+                evaluation_gate_policy=evaluation_gate_policy,  # type: ignore[arg-type]
             )
         }
     )
@@ -315,6 +318,28 @@ def test_registered_settings_support_repository_checks_without_bundle(
     assert settings.verification.evaluator_ids == ()
     assert settings.verification.check_results[0].status == "planned"
     assert settings.metadata.development_evaluation.custom_evaluator_ids == ()
+
+
+def test_registered_settings_support_repository_checks_when_allow_no_evidence(
+    tmp_path: Path,
+) -> None:
+    repository, commit, environment = _registered_repository(
+        tmp_path,
+        sidecar=_repository_checks_sidecar(
+            evaluation_gate_policy="allow_no_evidence"
+        ),
+    )
+
+    settings = load_registered_deployment_settings(
+        repository,
+        repo_agent_id="example-agent",
+        exact_source=commit,
+        environment=environment,
+    )
+
+    assert settings.verification.mode == "repository_checks"
+    assert settings.verification.evaluation_gate_policy == "allow_no_evidence"
+    assert settings.verification.check_results[0].status == "planned"
 
 
 def test_registered_settings_allow_unverified_publication_without_bundle(

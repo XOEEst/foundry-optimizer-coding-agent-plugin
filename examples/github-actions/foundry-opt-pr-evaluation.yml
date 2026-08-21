@@ -32,6 +32,7 @@ jobs:
     env:
       FOUNDRY_OPT_DEPLOYMENT_CLIENT_ID: ${{ vars.AZURE_OPTIMIZER_CLIENT_ID }}
       AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Resolve exact source and repoAgentId
         id: inputs

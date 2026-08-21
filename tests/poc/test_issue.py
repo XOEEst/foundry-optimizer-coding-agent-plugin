@@ -79,7 +79,6 @@ azureai://accounts/example/projects/example/data/validation/versions/1
 
 ```text
 command: python -m pytest tests/agent -q
-check: CI / unit-tests
 ```
 
 ### Optional no-evidence acknowledgement
@@ -91,9 +90,22 @@ acknowledge
     assert parsed.verification_dataset == "azureai://accounts/example/projects/example/data/validation/versions/1"
     assert parsed.verification_checks == (
         "command: python -m pytest tests/agent -q",
-        "check: CI / unit-tests",
     )
     assert parsed.acknowledge_no_evidence is True
+
+
+def test_parse_issue_body_rejects_named_check_entries() -> None:
+    with pytest.raises(IssueDocumentError, match="command: .*check:"):
+        parse_issue_body(
+            BODY
+            + """
+### Optional verification commands or checks
+
+```text
+check: CI / unit-tests
+```
+"""
+        )
 
 
 def test_optional_no_response_is_empty() -> None:

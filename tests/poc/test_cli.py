@@ -8,6 +8,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 import typer
 from typer.testing import CliRunner
@@ -588,12 +589,18 @@ def _issue_body(
     candidate_budget: int,
     model_lines: tuple[str, ...] = (),
     editable_scope_lines: tuple[str, ...] = (),
+    issue_evaluator_lines: tuple[str, ...] = (),
     verification_dataset: str | None = None,
     verification_check_lines: tuple[str, ...] = (),
     acknowledge_no_evidence: bool = False,
 ) -> str:
     models = "_No response_" if not model_lines else "\n".join(model_lines)
     editable_scope = "_No response_" if not editable_scope_lines else "\n".join(editable_scope_lines)
+    evaluators = (
+        "_No response_"
+        if not issue_evaluator_lines
+        else "\n".join(issue_evaluator_lines)
+    )
     body = f"""### Optimization goal
 
 Improve coverage.
@@ -617,6 +624,10 @@ Preserve safety.
 ### Optional narrower model set
 
 {models}
+
+### Optional exact evaluator IDs
+
+{evaluators}
 """
     if verification_dataset is not None:
         body += f"""
@@ -793,23 +804,274 @@ def test_issue_binding_from_event_context_uses_head_ref_lookup_when_event_lacks_
     ]
 
 
+def test_job_start_accepts_trusted_write_authority_for_issue_foundry_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repository, _, environment = _create_runtime_repository(tmp_path)
+    event = _write_issue_event(
+        tmp_path,
+        body=_issue_body(
+            candidate_budget=1,
+            model_lines=("candidate",),
+            issue_evaluator_lines=("azureai://built-in/evaluators/safety",),
+            verification_dataset="azureai://accounts/a/projects/p/data/dev/versions/9",
+        ),
+    )
+    environment[cli_module._GITHUB_BINDING_ENV] = str(
+        _write_binding(
+            tmp_path / "binding.json",
+            issue_author_login="octocat",
+            issue_author_permission="write",
+        )
+    )
+    harness = ControllerHarness(
+        candidate_results={},
+        validating_results={},
+        cleanup_results={},
+    )
+    monkeypatch.setattr(cli_module, "capture_route_fingerprint", lambda **_: _route())
+    monkeypatch.setattr(cli_module, "build_runtime_controller", harness.builder)
+
+    start = _invoke(
+        ["job", "start", "--repository", str(repository), "--event", str(event)],
+        environment,
+    )
+
+    assert start.exit_code == 0, start.stdout
+    payload = json.loads(start.stdout)
+    assert payload["job"]["verification"]["mode"] == "foundry_evaluation"
+    assert payload["job"]["verification"]["provenance"] == [
+        "issue_dataset",
+        "issue_evaluators",
+    ]
+
+
+def test_job_start_accepts_trusted_write_authority_for_issue_command_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repository, _, environment = _create_runtime_repository(tmp_path)
+    event = _write_issue_event(
+        tmp_path,
+        body=_issue_body(
+            candidate_budget=1,
+            model_lines=("candidate",),
+            verification_check_lines=("command: python -m pytest tests -q",),
+        ),
+    )
+    environment[cli_module._GITHUB_BINDING_ENV] = str(
+        _write_binding(
+            tmp_path / "binding.json",
+            issue_author_login="octocat",
+            issue_author_permission="maintain",
+        )
+    )
+    harness = ControllerHarness(
+        candidate_results={},
+        validating_results={},
+        cleanup_results={},
+    )
+    monkeypatch.setattr(cli_module, "capture_route_fingerprint", lambda **_: _route())
+    monkeypatch.setattr(cli_module, "build_runtime_controller", harness.builder)
+
+    start = _invoke(
+        ["job", "start", "--repository", str(repository), "--event", str(event)],
+        environment,
+    )
+
+    assert start.exit_code == 0, start.stdout
+    payload = json.loads(start.stdout)
+    assert payload["job"]["verification"]["mode"] == "repository_checks"
+    assert payload["job"]["verification"]["provenance"] == ["issue_repository_checks"]
+
+
+@pytest.mark.parametrize(
+    ("permission", "expected_error"),
+    [
+        ("read", "write, maintain, or admin"),
+        ("owner", "unknown issue author permission"),
+    ],
+)
+def test_job_start_rejects_issue_overrides_with_untrusted_permissions(
+    tmp_path: Path,
+    permission: str,
+    expected_error: str,
+) -> None:
+    repository, _, environment = _create_runtime_repository(tmp_path)
+    event = _write_issue_event(
+        tmp_path,
+        body=_issue_body(
+            candidate_budget=1,
+            model_lines=("candidate",),
+            verification_check_lines=("command: python -m pytest tests -q",),
+        ),
+    )
+    if permission == "owner":
+        binding = _write_legacy_binding(
+            tmp_path / "binding.json",
+            issue_extras={
+                "issue_author_login": "octocat",
+                "issue_author_permission": permission,
+            },
+        )
+    else:
+        binding = _write_binding(
+            tmp_path / "binding.json",
+            issue_author_login="octocat",
+            issue_author_permission=permission,
+        )
+    environment[cli_module._GITHUB_BINDING_ENV] = str(binding)
+
+    start = _invoke(
+        ["job", "start", "--repository", str(repository), "--event", str(event)],
+        environment,
+    )
+
+    assert start.exit_code == 2, start.stdout
+    assert expected_error in json.loads(start.stdout)["error"]
+
+
+def test_job_start_rejects_issue_overrides_with_missing_binding_permission(
+    tmp_path: Path,
+) -> None:
+    repository, _, environment = _create_runtime_repository(tmp_path)
+    event = _write_issue_event(
+        tmp_path,
+        body=_issue_body(
+            candidate_budget=1,
+            model_lines=("candidate",),
+            verification_check_lines=("command: python -m pytest tests -q",),
+        ),
+    )
+    environment[cli_module._GITHUB_BINDING_ENV] = str(
+        _write_legacy_binding(tmp_path / "binding.json")
+    )
+
+    start = _invoke(
+        ["job", "start", "--repository", str(repository), "--event", str(event)],
+        environment,
+    )
+
+    assert start.exit_code == 2, start.stdout
+    assert "trusted issue author permission" in json.loads(start.stdout)["error"]
+
+
+def test_job_start_rejects_body_file_overrides_without_trusted_binding_permission(
+    tmp_path: Path,
+) -> None:
+    repository, _, environment = _create_runtime_repository(tmp_path)
+    body_file = tmp_path / "issue.md"
+    body_file.write_text(
+        _issue_body(
+            candidate_budget=1,
+            model_lines=("candidate",),
+            verification_check_lines=("command: python -m pytest tests -q",),
+        ),
+        encoding="utf-8",
+    )
+
+    start = _invoke(
+        [
+            "job",
+            "start",
+            "--repository",
+            str(repository),
+            "--body-file",
+            str(body_file),
+            "--issue-number",
+            "7",
+        ],
+        environment,
+    )
+
+    assert start.exit_code == 2, start.stdout
+    assert "trusted issue author permission" in json.loads(start.stdout)["error"]
+
+
+def test_job_start_allows_legacy_binding_without_permission_when_no_issue_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repository, _, environment = _create_runtime_repository(tmp_path)
+    event = _write_issue_event(
+        tmp_path,
+        body=_issue_body(
+            candidate_budget=1,
+            model_lines=("candidate",),
+        ),
+    )
+    environment[cli_module._GITHUB_BINDING_ENV] = str(
+        _write_legacy_binding(tmp_path / "binding.json")
+    )
+    harness = ControllerHarness(
+        candidate_results={},
+        validating_results={},
+        cleanup_results={},
+    )
+    monkeypatch.setattr(cli_module, "capture_route_fingerprint", lambda **_: _route())
+    monkeypatch.setattr(cli_module, "build_runtime_controller", harness.builder)
+
+    start = _invoke(
+        ["job", "start", "--repository", str(repository), "--event", str(event)],
+        environment,
+    )
+
+    assert start.exit_code == 0, start.stdout
+    assert json.loads(start.stdout)["job"]["verification"]["mode"] == "foundry_evaluation"
+
+
 def _write_binding(
     path: Path,
     *,
     issue_number: int = 7,
     pull_request: PullRequestBinding | None = None,
+    issue_author_login: str | None = None,
+    issue_author_permission: str | None = None,
 ) -> Path:
-    issue = IssueBinding(
-        repository=RepositoryIdentity(
-            owner="example-org",
-            name="example-agent",
-            repository_id=123456789,
-        ),
-        issue_number=issue_number,
-        job_id=f"optimize-{issue_number}",
-        comment_author_login="github-actions[bot]",
+    issue = IssueBinding.model_validate(
+        {
+            "repository": {
+                "owner": "example-org",
+                "name": "example-agent",
+                "repository_id": 123456789,
+            },
+            "issue_number": issue_number,
+            "job_id": f"optimize-{issue_number}",
+            "comment_author_login": "github-actions[bot]",
+            "issue_author_login": issue_author_login,
+            "issue_author_permission": issue_author_permission,
+        }
     )
     cli_module._write_binding(path, issue=issue, pull_request=pull_request)
+    return path
+
+
+def _write_legacy_binding(
+    path: Path,
+    *,
+    issue_number: int = 7,
+    pull_request: PullRequestBinding | None = None,
+    issue_extras: dict[str, Any] | None = None,
+) -> Path:
+    payload = {
+        "issue": {
+            "repository": {
+                "owner": "example-org",
+                "name": "example-agent",
+                "repository_id": 123456789,
+            },
+            "issue_number": issue_number,
+            "job_id": f"optimize-{issue_number}",
+            "comment_author_login": "github-actions[bot]",
+        },
+        "pull_request": (
+            None if pull_request is None else pull_request.model_dump(mode="json")
+        ),
+    }
+    if issue_extras:
+        payload["issue"].update(issue_extras)
+    path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
     return path
 
 
@@ -847,6 +1109,57 @@ def _pull_request_binding(
         expected_author_login=expected_author_login,
         expected_author_type=expected_author_type,
     )
+
+
+def test_issue_author_binding_fields_use_token_without_persisting_it(
+    tmp_path: Path,
+) -> None:
+    token = "ghp_exampletoken12345678"
+    headers: list[str | None] = []
+    repository = RepositoryIdentity(
+        owner="example-org",
+        name="example-agent",
+        repository_id=123456789,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        headers.append(request.headers.get("Authorization"))
+        if request.url.path == "/repos/example-org/example-agent/issues/7":
+            return httpx.Response(
+                200,
+                json={"user": {"login": "octocat"}},
+                request=request,
+            )
+        if (
+            request.url.path
+            == "/repos/example-org/example-agent/collaborators/octocat/permission"
+        ):
+            return httpx.Response(
+                200,
+                json={"permission": "write"},
+                request=request,
+            )
+        raise AssertionError(f"unexpected GitHub API path: {request.url.path}")
+
+    login, permission = cli_module._issue_author_binding_fields(
+        repository,
+        issue_number=7,
+        token=token,
+        transport=httpx.MockTransport(handler),
+    )
+    binding = _write_binding(
+        tmp_path / "binding.json",
+        issue_author_login=login,
+        issue_author_permission=permission,
+    )
+
+    payload = json.loads(binding.read_text(encoding="utf-8"))
+    assert login == "octocat"
+    assert permission == "write"
+    assert headers == [f"Bearer {token}", f"Bearer {token}"]
+    assert token not in binding.read_text(encoding="utf-8")
+    assert payload["issue"]["issue_author_login"] == "octocat"
+    assert payload["issue"]["issue_author_permission"] == "write"
 
 
 def _create_runtime_repository(tmp_path: Path) -> tuple[Path, str, dict[str, str]]:
@@ -2502,6 +2815,7 @@ def test_job_repository_checks_mode_blocks_until_binding_and_projects_recommenda
 ) -> None:
     repository, _, environment = _create_runtime_repository(tmp_path)
     _checkout_branch(repository, "copilot/job-7")
+    binding_path = tmp_path / "binding.json"
     check_spec = "command: python -m pytest tests -q"
     event = _write_issue_event(
         tmp_path,
@@ -2510,6 +2824,13 @@ def test_job_repository_checks_mode_blocks_until_binding_and_projects_recommenda
             model_lines=("candidate",),
             verification_check_lines=(check_spec,),
         ),
+    )
+    environment[cli_module._GITHUB_BINDING_ENV] = str(
+        _write_binding(
+            binding_path,
+            issue_author_login="octocat",
+            issue_author_permission="write",
+        )
     )
     harness = ControllerHarness(
         candidate_results={},
@@ -2631,8 +2952,10 @@ def test_job_repository_checks_mode_blocks_until_binding_and_projects_recommenda
     assert resume_payload["resumed"] is True
 
     binding = _write_binding(
-        tmp_path / "binding.json",
+        binding_path,
         pull_request=_pull_request_binding(repository),
+        issue_author_login="octocat",
+        issue_author_permission="write",
     )
     environment[cli_module._GITHUB_BINDING_ENV] = str(binding)
 
@@ -2672,6 +2995,8 @@ def test_job_repository_checks_failure_never_recommends_and_closes_no_winner(
     binding = _write_binding(
         tmp_path / "binding.json",
         pull_request=_pull_request_binding(repository),
+        issue_author_login="octocat",
+        issue_author_permission="write",
     )
     environment[cli_module._GITHUB_BINDING_ENV] = str(binding)
     harness = ControllerHarness(

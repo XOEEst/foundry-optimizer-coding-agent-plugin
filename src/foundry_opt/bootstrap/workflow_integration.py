@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import Literal, cast
 
 from foundry_opt.bootstrap.contracts import BootstrapSidecar, RootRegistry
 from foundry_opt.bootstrap.errors import BootstrapConfigError
@@ -48,7 +49,43 @@ class DeploymentPlan:
     receipt_inputs: Mapping[str, str]
 
 
-AuthorPermissionResolver = Callable[[str, Sequence[str]], bool]
+KnownIssueAuthorPermission = Literal[
+    "admin",
+    "maintain",
+    "write",
+    "triage",
+    "read",
+    "none",
+]
+
+_KNOWN_ISSUE_AUTHOR_PERMISSIONS = frozenset(
+    {"admin", "maintain", "write", "triage", "read", "none"}
+)
+_OVERRIDE_ISSUE_AUTHOR_PERMISSIONS = frozenset({"admin", "maintain", "write"})
+
+
+def normalize_issue_author_permission(
+    permission: str,
+) -> KnownIssueAuthorPermission:
+    normalized = permission.strip().casefold()
+    if normalized not in _KNOWN_ISSUE_AUTHOR_PERMISSIONS:
+        raise BootstrapConfigError(
+            "trusted binding carries an unknown issue author permission"
+        )
+    return cast(KnownIssueAuthorPermission, normalized)
+
+
+def _require_issue_override_permission(
+    author_permission: str | None,
+    *,
+    missing_message: str,
+    insufficient_message: str,
+) -> None:
+    if author_permission is None:
+        raise BootstrapConfigError(missing_message)
+    normalized = normalize_issue_author_permission(author_permission)
+    if normalized not in _OVERRIDE_ISSUE_AUTHOR_PERMISSIONS:
+        raise BootstrapConfigError(insufficient_message)
 
 
 def resolve_registry_selection(
@@ -116,54 +153,60 @@ def protected_editable_patterns_for_repository(
 
 
 def verify_issue_evaluator_authority(
-    author_login: str,
+    author_permission: str | None,
     evaluators: Sequence[IssueEvaluatorEntry] | None,
-    *,
-    resolver: AuthorPermissionResolver | None,
 ) -> None:
     if not evaluators:
         return
-    if resolver is None:
-        raise BootstrapConfigError("issue-supplied evaluator IDs require an injected write-authority resolver")
-    ids = [entry.evaluator_id for entry in evaluators]
-    if not resolver(author_login, ids):
-        raise BootstrapConfigError("issue author is not authorized to request arbitrary evaluator IDs")
+    _require_issue_override_permission(
+        author_permission,
+        missing_message=(
+            "issue-supplied evaluator IDs require a trusted issue author "
+            "permission in the binding"
+        ),
+        insufficient_message=(
+            "issue author requires write, maintain, or admin repository "
+            "permission to request arbitrary evaluator IDs"
+        ),
+    )
 
 
 def verify_issue_dataset_authority(
-    author_login: str,
+    author_permission: str | None,
     dataset: VerificationDatasetInput | None,
-    *,
-    resolver: AuthorPermissionResolver | None,
 ) -> None:
     if dataset is None:
         return
-    if resolver is None:
-        raise BootstrapConfigError(
-            "issue-supplied verification dataset requires an injected write-authority resolver"
-        )
-    if not resolver(author_login, (dataset.dataset_id_or_uri,)):
-        raise BootstrapConfigError(
-            "issue author is not authorized to request arbitrary verification datasets"
-        )
+    _require_issue_override_permission(
+        author_permission,
+        missing_message=(
+            "issue-supplied verification dataset requires a trusted issue "
+            "author permission in the binding"
+        ),
+        insufficient_message=(
+            "issue author requires write, maintain, or admin repository "
+            "permission to request arbitrary verification datasets"
+        ),
+    )
 
 
 def verify_issue_check_authority(
-    author_login: str,
+    author_permission: str | None,
     checks: Sequence[VerificationCheckSpec] | None,
-    *,
-    resolver: AuthorPermissionResolver | None,
 ) -> None:
     if not checks:
         return
-    if resolver is None:
-        raise BootstrapConfigError(
-            "issue-supplied verification commands/checks require an injected write-authority resolver"
-        )
-    if not resolver(author_login, [check.render() for check in checks]):
-        raise BootstrapConfigError(
-            "issue author is not authorized to request arbitrary verification commands/checks"
-        )
+    _require_issue_override_permission(
+        author_permission,
+        missing_message=(
+            "issue-supplied verification commands/checks require a trusted "
+            "issue author permission in the binding"
+        ),
+        insufficient_message=(
+            "issue author requires write, maintain, or admin repository "
+            "permission to request arbitrary verification commands/checks"
+        ),
+    )
 
 
 def build_changed_path_matrix(

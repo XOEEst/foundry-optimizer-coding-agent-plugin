@@ -26,9 +26,9 @@ commit with `foundry-opt deploy verify-registered` before merge.
    `workflow_dispatch` input for multi-agent repositories.
 3. Keep the job `environment` aligned with the committed deployment
    environment from the selected sidecar (typically `foundry-production`).
-4. Map `FOUNDRY_OPT_DEPLOYMENT_CLIENT_ID` and `AZURE_TENANT_ID` to the
-   environment-scoped GitHub variables that match the committed registry
-   identity.
+4. Keep `FOUNDRY_OPT_DEPLOYMENT_CLIENT_ID`, `AZURE_TENANT_ID`, and `GH_TOKEN`
+   available exactly as shown. `verify-registered` needs `GH_TOKEN` whenever
+   the selected profile uses named repository checks.
 5. Leave the example on `pull_request` plus `workflow_dispatch`. The example
    checks out `github.event.pull_request.head.sha` and exports that same exact
    source to `GITHUB_SHA` before calling `verify-registered`, so the

@@ -13,6 +13,7 @@ from foundry_opt.bootstrap.contracts import (
 from foundry_opt.bootstrap.errors import BootstrapConfigError
 from foundry_opt.models import FrozenModel
 from foundry_opt.poc.config import IssueEvaluatorEntry, OptimizeIssueRequest
+from foundry_opt.poc.issue import ISSUE_NAMED_CHECK_GUIDANCE
 from foundry_opt.verification import VerificationCheckSpec, VerificationDatasetInput
 
 
@@ -270,6 +271,7 @@ class DefaultVerificationResolver:
         issue_dataset = None if issue is None else issue.verification_dataset
         issue_evaluators = None if issue is None else issue.issue_evaluators
         issue_checks = None if issue is None else issue.verification_checks
+        _reject_issue_named_checks(issue_checks)
         acknowledge_no_evidence = bool(
             issue is not None and issue.acknowledge_no_evidence
         )
@@ -402,6 +404,13 @@ def _verification_settings(profile: object) -> object:
     return verification
 
 
+def _reject_issue_named_checks(
+    checks: tuple[VerificationCheckSpec, ...] | None,
+) -> None:
+    if any(check.kind == "check" for check in checks or ()):
+        raise BootstrapConfigError(ISSUE_NAMED_CHECK_GUIDANCE)
+
+
 def _foundry_defaults(profile: object) -> FoundryEvaluationPlan | None:
     explicit = getattr(profile, "foundry_evaluation_plan", None)
     if explicit is not None:
@@ -509,11 +518,11 @@ def resolve_deployment_verification(
             unverified_deployment=False,
         )
 
-    if policy == "allow_repository_checks":
-        checks = profile.verification.repository_checks
-        if not checks:
+    checks = profile.verification.repository_checks
+    if checks:
+        if policy not in {"allow_repository_checks", "allow_no_evidence"}:
             raise BootstrapConfigError(
-                "deployment plans require trusted repository checks when no usable Foundry evaluation bundle is available"
+                "deployment plans cannot use repository checks under the current verification gate policy"
             )
         return DeploymentVerification(
             mode="repository_checks",
@@ -529,6 +538,12 @@ def resolve_deployment_verification(
             ),
             unverified_deployment=False,
         )
+
+    if policy == "allow_repository_checks":
+        if not checks:
+            raise BootstrapConfigError(
+                "deployment plans require trusted repository checks when no usable Foundry evaluation bundle is available"
+            )
 
     return DeploymentVerification(
         mode="none",

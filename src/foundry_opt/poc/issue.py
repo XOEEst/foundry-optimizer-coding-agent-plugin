@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 _HEADING = re.compile(r"^### (?P<label>[^\r\n]+)$")
 _EMPTY_RESPONSES = frozenset({"", "_No response_", "No response"})
+_NAMED_CHECK_LINE = re.compile(r"(?i)^check\s*:")
 _FIELD_LABELS = {
     "Repository agent ID or explicit Foundry target": "target",
     "Optimization goal": "goal",
@@ -21,6 +22,11 @@ _FIELD_LABELS = {
     "Optional verification commands or checks": "verification_checks",
     "Optional no-evidence acknowledgement": "acknowledge_no_evidence",
 }
+ISSUE_NAMED_CHECK_GUIDANCE = (
+    "optimize issues accept only `command: ...` verification entries; named "
+    "`check: ...` entries are reserved for trusted repository profiles used by "
+    "PR and deployment verification"
+)
 
 
 class IssueDocumentError(ValueError):
@@ -110,7 +116,7 @@ def parse_issue_body(body: str) -> ParsedIssue:
         candidate_models=_lines(values["candidate_models"]),
         issue_evaluators=_lines(values["issue_evaluators"]),
         verification_dataset=values["verification_dataset"].strip() or None,
-        verification_checks=_lines(values["verification_checks"]),
+        verification_checks=_issue_verification_checks(values["verification_checks"]),
         acknowledge_no_evidence=_acknowledgement(values["acknowledge_no_evidence"]),
     )
 
@@ -150,6 +156,13 @@ def _required(values: Mapping[str, str], field: str) -> str:
 
 def _lines(value: str) -> tuple[str, ...]:
     return tuple(line.strip() for line in value.splitlines() if line.strip())
+
+
+def _issue_verification_checks(value: str) -> tuple[str, ...]:
+    checks = _lines(value)
+    if any(_NAMED_CHECK_LINE.match(line) for line in checks):
+        raise IssueDocumentError(ISSUE_NAMED_CHECK_GUIDANCE)
+    return checks
 
 
 def _acknowledgement(value: str) -> bool:

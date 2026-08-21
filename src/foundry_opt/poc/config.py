@@ -19,6 +19,7 @@ from foundry_opt.optimize_job.safety import (
     assert_safe_persisted_document,
     assert_safe_persisted_string,
 )
+from foundry_opt.poc.issue import ISSUE_NAMED_CHECK_GUIDANCE
 from foundry_opt.verification import VerificationCheckSpec, VerificationDatasetInput
 
 
@@ -1457,6 +1458,8 @@ class OptimizeIssueRequest(FrozenModel):
                     )
             except (ValidationError, ValueError) as exc:
                 raise ValueError(str(exc)) from exc
+            if check.kind == "check":
+                raise ValueError(ISSUE_NAMED_CHECK_GUIDANCE)
             if check.casefold_key in seen:
                 raise ValueError("verification_checks must not contain duplicates")
             seen.add(check.casefold_key)

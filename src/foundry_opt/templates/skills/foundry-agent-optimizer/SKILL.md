@@ -64,8 +64,12 @@ an agent optimize job.
     evaluation link, guardrail results, tradeoffs, and the final decision.
 11. When the issue supplies verification inputs, honor them exactly: either an
     exact Foundry verification dataset with exact evaluator IDs, exact
-    repository commands/checks, or an explicit acknowledged no-evidence
-    fallback. Never widen those inputs and never invent missing evidence.
+    repository commands, or an explicit acknowledged no-evidence fallback.
+    Named `check: ...` entries are repository-owned and stay reserved for
+    trusted PR/deployment verification profiles. Never widen issue-supplied
+    inputs, never invent missing evidence, and require a trusted
+    write/maintain/admin issue-author permission binding before honoring
+    arbitrary evaluator, dataset, or command overrides.
 
 ## Bootstrap for first-time owners
 
@@ -116,8 +120,10 @@ deploys from anything other than the reviewed exact source.
   approvals for GitHub and Azure.
 - When optimize-job verification inputs are discussed with owners, use the same
   plain-language model: repository defaults, exact issue-supplied Foundry
-  evaluators plus dataset, exact issue-supplied repository commands/checks, or
-  an explicit no-evidence acknowledgement when policy allows it.
+  evaluators plus dataset, exact issue-supplied repository commands, or an
+  explicit no-evidence acknowledgement when policy allows it. Named
+  `check: ...` entries stay repository-owned and apply only to trusted
+  deployment/PR verification flows.
 - End every successful bootstrap handoff with `foundry-opt bootstrap resources
   ...` and share the final GitHub, Azure, and Foundry links for the reviewed
   registered/enabled/verified/deployable state.

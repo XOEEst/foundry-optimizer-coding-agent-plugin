@@ -43,6 +43,7 @@ def test_pr_example_uses_exact_pr_head_verify_only_and_oidc() -> None:
     assert ".foundry-opt/bootstrap.lock.json" in text
     assert "FOUNDRY_OPT_DEPLOYMENT_CLIENT_ID" in text
     assert "AZURE_TENANT_ID" in text
+    assert "GH_TOKEN: ${{ github.token }}" in text
     assert 'export GITHUB_SHA="${{ steps.inputs.outputs.exact_source }}"' in text
     assert "actions/upload-artifact@v4" in text
     assert "WARNING: Unverified deployment permitted" in text
@@ -75,3 +76,4 @@ def test_evaluation_gate_docs_reference_copy_paths_and_configuration() -> None:
     assert "do **not** activate merely by existing there" in text
     assert "foundry-opt deploy verify-registered" in text
     assert "FOUNDRY_OPT_DEPLOYMENT_CLIENT_ID" in text
+    assert "GH_TOKEN" in text

@@ -155,11 +155,15 @@ def _package() -> PackagedSource:
     )
 
 
-def _repository_check_verification(command: str) -> DeploymentVerification:
+def _repository_check_verification(
+    command: str,
+    *,
+    gate_policy: str = "allow_repository_checks",
+) -> DeploymentVerification:
     return DeploymentVerification(
         mode="repository_checks",
         status="planned",
-        evaluation_gate_policy="allow_repository_checks",
+        evaluation_gate_policy=gate_policy,  # type: ignore[arg-type]
         check_results=(
             DeploymentVerificationCheckResult(
                 kind="command",
@@ -617,6 +621,36 @@ def test_deployment_blocks_failed_repository_checks(tmp_path: Path) -> None:
             ),
         )
 
+    assert error.value.verification.status == "failed"
+    assert error.value.verification.check_results[0].status == "failed"
+    assert "publish" not in foundry.calls
+
+
+def test_deployment_blocks_failed_repository_checks_when_allow_no_evidence(
+    tmp_path: Path,
+) -> None:
+    policy, metadata = _configuration()
+    foundry = _Foundry()
+    service = DeploymentService(
+        client=foundry,
+        policy=policy,
+        metadata=metadata,
+        deadline_seconds=30,
+    )
+
+    with pytest.raises(DeploymentRepositoryChecksError) as error:
+        service.publish(
+            repository="example-org/example-agent",
+            release_commit="a" * 40,
+            packaged=foundry.package,
+            repository_root=tmp_path,
+            verification=_repository_check_verification(
+                "python -c \"raise SystemExit(1)\"",
+                gate_policy="allow_no_evidence",
+            ),
+        )
+
+    assert error.value.verification.evaluation_gate_policy == "allow_no_evidence"
     assert error.value.verification.status == "failed"
     assert error.value.verification.check_results[0].status == "failed"
     assert "publish" not in foundry.calls

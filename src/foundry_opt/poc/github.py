@@ -57,6 +57,7 @@ BRANCH_PATTERN: Final = r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$"
 COMMIT_PATTERN: Final = r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
 ERROR_TYPE_PATTERN: Final = r"^[A-Za-z][A-Za-z0-9_]{0,127}$"
 TOKEN_PATTERN: Final = r"^[A-Za-z0-9._-]{8,512}$"
+PERMISSION_PATTERN: Final = r"^[A-Za-z][A-Za-z_-]{0,31}$"
 TOKEN_SHAPE_PATTERN: Final = re.compile(
     r"(?:gh[pousr]_[A-Za-z0-9_]{8,}|ghs-[A-Za-z0-9_-]{8,}|github_pat_[A-Za-z0-9_]{20,})"
 )
@@ -139,6 +140,10 @@ TimeoutSeconds = Annotated[float, Field(gt=0.0, le=MAX_TIMEOUT_SECONDS)]
 MarkdownText = Annotated[
     str,
     Field(strict=True, min_length=1, max_length=MAX_MARKDOWN_CHARACTERS),
+]
+GitHubPermissionText = Annotated[
+    str,
+    Field(strict=True, min_length=1, max_length=32, pattern=PERMISSION_PATTERN),
 ]
 
 
@@ -407,6 +412,18 @@ class IssueBinding(FrozenModel):
     issue_number: PositiveInt
     job_id: JobId
     comment_author_login: GitHubLogin
+    issue_author_login: GitHubLogin | None = None
+    issue_author_permission: GitHubPermissionText | None = None
+
+    @model_validator(mode="after")
+    def validate_issue_author_binding(self) -> "IssueBinding":
+        if (self.issue_author_login is None) != (
+            self.issue_author_permission is None
+        ):
+            raise ValueError(
+                "issue_author_login and issue_author_permission must both be set or both be omitted"
+            )
+        return self
 
 
 class PullRequestBinding(FrozenModel):

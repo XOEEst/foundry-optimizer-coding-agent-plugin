@@ -304,10 +304,12 @@ def test_registry_selection_and_protected_paths(tmp_path: Path) -> None:
 def test_issue_evaluator_authority_fails_closed(tmp_path: Path) -> None:
     _write_repo(tmp_path)
     evaluators = (IssueEvaluatorEntry(evaluator_id="azureai://built-in/evaluators/safety", weight=1.0),)
-    with pytest.raises(BootstrapConfigError, match="write-authority resolver"):
-        verify_issue_evaluator_authority("octocat", evaluators, resolver=None)
-    with pytest.raises(BootstrapConfigError, match="not authorized"):
-        verify_issue_evaluator_authority("octocat", evaluators, resolver=lambda *_: False)
+    with pytest.raises(BootstrapConfigError, match="trusted issue author permission"):
+        verify_issue_evaluator_authority(None, evaluators)
+    with pytest.raises(BootstrapConfigError, match="write, maintain, or admin"):
+        verify_issue_evaluator_authority("read", evaluators)
+    with pytest.raises(BootstrapConfigError, match="unknown issue author permission"):
+        verify_issue_evaluator_authority("owner", evaluators)
 
 
 def test_issue_dataset_and_checks_authority_fail_closed(tmp_path: Path) -> None:
@@ -320,18 +322,18 @@ def test_issue_dataset_and_checks_authority_fail_closed(tmp_path: Path) -> None:
     )
     with pytest.raises(
         BootstrapConfigError,
-        match="verification dataset requires an injected write-authority resolver",
+        match="trusted issue author permission",
     ):
-        verify_issue_dataset_authority("octocat", dataset, resolver=None)
+        verify_issue_dataset_authority(None, dataset)
     with pytest.raises(
         BootstrapConfigError,
-        match="verification commands/checks require an injected write-authority resolver",
+        match="trusted issue author permission",
     ):
-        verify_issue_check_authority("octocat", checks, resolver=None)
-    with pytest.raises(BootstrapConfigError, match="not authorized"):
-        verify_issue_dataset_authority("octocat", dataset, resolver=lambda *_: False)
-    with pytest.raises(BootstrapConfigError, match="not authorized"):
-        verify_issue_check_authority("octocat", checks, resolver=lambda *_: False)
+        verify_issue_check_authority(None, checks)
+    with pytest.raises(BootstrapConfigError, match="write, maintain, or admin"):
+        verify_issue_dataset_authority("read", dataset)
+    with pytest.raises(BootstrapConfigError, match="write, maintain, or admin"):
+        verify_issue_check_authority("triage", checks)
 
 
 def test_changed_path_matrix_supports_shared_roots_noop_and_manual(tmp_path: Path) -> None:
@@ -418,6 +420,29 @@ def test_registered_deployment_plan_falls_back_to_repository_checks(
     assert plan.verification.check_results[0].status == "planned"
     assert plan.verification.check_results[0].value == "CI / unit-tests"
     assert plan.verification.evaluator_ids == ()
+
+
+def test_registered_deployment_plan_uses_repository_checks_when_allow_no_evidence(
+    tmp_path: Path,
+) -> None:
+    root = _write_quick_repo(
+        tmp_path,
+        evaluation_gate_policy="allow_no_evidence",
+        repository_checks=("check: CI / unit-tests",),
+    )
+    selection = resolve_registry_selection(root)
+
+    plan = build_registered_deployment_plan(
+        selection,
+        changed_root="agent",
+        exact_source="c" * 40,
+        use_repository_default_evaluators=True,
+    )
+
+    assert plan.verification.mode == "repository_checks"
+    assert plan.verification.evaluation_gate_policy == "allow_no_evidence"
+    assert plan.verification.check_results[0].kind == "check"
+    assert plan.verification.check_results[0].value == "CI / unit-tests"
 
 
 def test_registered_deployment_plan_requires_repository_checks_when_bundle_missing(
