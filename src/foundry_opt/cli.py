@@ -122,7 +122,10 @@ from foundry_opt.poc.verification import (
 
 
 app = typer.Typer(no_args_is_help=True, pretty_exceptions_enable=False)
-bootstrap_app = typer.Typer(no_args_is_help=True)
+bootstrap_app = typer.Typer(
+    no_args_is_help=True,
+    help="Advanced compatibility interface for the frozen `foundry-opt bootstrap ...` tree. Normal owners should use `/foundry-bootstrap`.",
+)
 broker_app = typer.Typer(no_args_is_help=True)
 issue_app = typer.Typer(no_args_is_help=True)
 job_app = typer.Typer(no_args_is_help=True)

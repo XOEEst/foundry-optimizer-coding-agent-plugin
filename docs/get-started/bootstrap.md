@@ -5,7 +5,9 @@ usable Foundry Optimizer setup.
 
 The default path uses standard Copilot with the managed repository
 instructions and installed skill. Bootstrap does not add or select a custom
-agent.
+agent. Normal owners should use the `/foundry-bootstrap` flow; the
+`foundry-opt bootstrap ...` commands below remain as an advanced
+compatibility interface for automation and reviewed source checkouts.
 
 ## Decide these things first
 
@@ -52,7 +54,7 @@ variables, or role assignments, but those receipts stay implementation
 detail. Owners do **not** need to approve each child change separately
 or hand-author approval JSON.
 
-## Minimal command path
+## Advanced compatibility command path
 
 - `foundry-opt bootstrap review discovery`
 - `foundry-opt bootstrap review plan`
@@ -66,6 +68,10 @@ verification:
 - `foundry-opt bootstrap evaluation plan`
 - `foundry-opt bootstrap evaluation apply`
 - `foundry-opt bootstrap evaluation activate`
+
+Compatibility policy: keep this CLI tree quiet and stable for existing
+automation. Future retirement or breaking changes should be announced in
+docs and release notes instead of adding runtime deprecation warnings.
 
 ## Example owner summaries
 

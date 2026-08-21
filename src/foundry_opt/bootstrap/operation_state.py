@@ -10,6 +10,7 @@ from foundry_opt.bootstrap.canonical import canonical_json_bytes, canonical_sha2
 from foundry_opt.bootstrap.contracts import AgentId, BindingAssessment, BindingClassification, BootstrapDocument, BootstrapPlan, FingerprintRecord, Sha256
 from foundry_opt.bootstrap.errors import BootstrapApplyError, BootstrapConfigError
 from foundry_opt.bootstrap.receipts import ApplyPhaseName, ApprovalRecord, EvaluationReplacementRecord, PhaseReceipt, merge_phase_receipts
+from foundry_opt.bootstrap.shared import default_state_root, require_safe_operation_id, resolve_state_child_directory, resolve_state_root
 
 GenerationStatus = Literal["draft", "applied", "blocked"]
 
@@ -217,8 +218,11 @@ class OperationStateEnvelope(BootstrapDocument):
     @field_validator("payload")
     @classmethod
     def _validate_segment(cls, value: OperationStatePayload) -> OperationStatePayload:
-        if not value.operation_id or any(sep in value.operation_id for sep in ("/", "\\", "..")):
-            raise BootstrapConfigError("state path segment is invalid")
+        require_safe_operation_id(
+            value.operation_id,
+            message="state path segment is invalid",
+            error_factory=BootstrapConfigError,
+        )
         return value
 
     @model_validator(mode="after")
@@ -238,24 +242,20 @@ class OperationStateEnvelope(BootstrapDocument):
         digest = canonical_sha256({"payload": payload_json})
         return cls.model_validate({"payload": payload_json, "generation_hash": digest})
 
-
-def default_state_root() -> Path:
-    appdata = os.environ.get("APPDATA")
-    if appdata:
-        return Path(appdata) / "foundry-opt" / "bootstrap"
-    home = Path.home()
-    return home / ".foundry-opt" / "bootstrap"
-
-
 def operation_directory(repository_id: str, operation_id: str, *, state_root: Path | None = None) -> Path:
-    root = (state_root or default_state_root()).resolve()
+    root = resolve_state_root(state_root)
     repo_segment = canonical_sha256({"repository_id": repository_id})
-    target = (root / repo_segment / operation_id).resolve()
-    try:
-        target.relative_to(root)
-    except ValueError as exc:
-        raise BootstrapApplyError("operation state escapes the state root") from exc
-    return target
+    operation_segment = require_safe_operation_id(
+        operation_id,
+        message="operation state path is invalid",
+        error_factory=BootstrapApplyError,
+    )
+    return resolve_state_child_directory(
+        root,
+        repo_segment,
+        operation_segment,
+        escape_message="operation state escapes the state root",
+    )
 
 
 def state_file_path(repository_id: str, operation_id: str, *, state_root: Path | None = None) -> Path:

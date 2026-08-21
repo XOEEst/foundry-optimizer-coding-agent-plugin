@@ -15,8 +15,9 @@ from foundry_opt.bootstrap.canonical import canonical_json_bytes, canonical_sha2
 from foundry_opt.bootstrap.contracts import AgentId, BootstrapDocument, ReviewedFoundryTarget
 from foundry_opt.bootstrap.discovery import DiscoveryResult, discover_repository_agents
 from foundry_opt.bootstrap.errors import BootstrapApplyError, BootstrapConfigError
-from foundry_opt.bootstrap.operation_state import DiscoveredAgentRecord, DiscoveryBlockerRecord, SelectionPlan, default_state_root
+from foundry_opt.bootstrap.operation_state import DiscoveredAgentRecord, DiscoveryBlockerRecord, SelectionPlan
 from foundry_opt.bootstrap.owner_review import ResourceLinksReview, build_discovery_review, build_resource_links
+from foundry_opt.bootstrap.shared import github_remote_identity, require_safe_operation_id, resolve_state_child_directory, resolve_state_root, runtime_commit_from_environment, runtime_repository_from_environment, scoped_state_root
 from foundry_opt.models import FrozenModel
 
 BootstrapQuestionKind = Literal[
@@ -359,9 +360,11 @@ class BootstrapRunnerStatePayload(BootstrapDocument):
     @field_validator("operation_id")
     @classmethod
     def _validate_operation_id(cls, value: str) -> str:
-        if not value or any(sep in value for sep in ("/", "\\", "..")):
-            raise BootstrapConfigError("operation_id is invalid")
-        return value
+        return require_safe_operation_id(
+            value,
+            message="operation_id is invalid",
+            error_factory=BootstrapConfigError,
+        )
 
     @field_validator("child_refs")
     @classmethod
@@ -622,11 +625,11 @@ class SubprocessGitProtocol(GitProtocol):
 
     def repository_url(self, value: Path) -> str:
         remote = self._run(value, "remote", "get-url", "origin")
-        owner, repo = _github_remote_identity(remote)
+        owner, repo = github_remote_identity(remote)
         return f"https://github.com/{owner}/{repo}.git"
 
     def repository_id(self, repository_url: str) -> str:
-        owner, repo = _github_remote_identity(repository_url)
+        owner, repo = github_remote_identity(repository_url)
         return f"{owner}/{repo}"
 
     def head_commit(self, value: Path) -> str:
@@ -662,16 +665,10 @@ class SubprocessGitProtocol(GitProtocol):
 
 class EnvironmentRuntimeBinding(RuntimeBindingProtocol):
     def runtime_repository(self) -> str:
-        value = os.environ.get("FOUNDRY_OPT_RUNTIME_REPOSITORY")
-        if not value:
-            raise BootstrapConfigError("runtime repository must come from the verified environment")
-        return value
+        return runtime_repository_from_environment()
 
     def runtime_commit(self) -> str:
-        value = os.environ.get("FOUNDRY_OPT_RUNTIME_COMMIT")
-        if value and re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", value):
-            return value
-        raise BootstrapConfigError("runtime commit must come from the verified environment")
+        return runtime_commit_from_environment()
 
 
 class UtcClock(ClockProtocol):
@@ -680,19 +677,21 @@ class UtcClock(ClockProtocol):
 
 
 def default_runner_state_root() -> Path:
-    return default_state_root() / "runner"
+    return scoped_state_root("runner")
 
 
 def operation_directory(operation_id: str, *, state_root: Path | None = None) -> Path:
-    root = (state_root or default_runner_state_root()).resolve()
-    if not operation_id or any(sep in operation_id for sep in ("/", "\\", "..")):
-        raise BootstrapApplyError("operation state path is invalid")
-    target = (root / operation_id).resolve()
-    try:
-        target.relative_to(root)
-    except ValueError as exc:
-        raise BootstrapApplyError("operation state escapes the state root") from exc
-    return target
+    root = resolve_state_root(state_root) if state_root is not None else default_runner_state_root()
+    operation_segment = require_safe_operation_id(
+        operation_id,
+        message="operation state path is invalid",
+        error_factory=BootstrapApplyError,
+    )
+    return resolve_state_child_directory(
+        root,
+        operation_segment,
+        escape_message="operation state escapes the state root",
+    )
 
 
 def state_file_path(operation_id: str, *, state_root: Path | None = None) -> Path:
@@ -1360,19 +1359,6 @@ def _approval_step_for_question(kind: BootstrapQuestionKind) -> BootstrapApprova
         return mapping[kind]
     except KeyError as exc:
         raise BootstrapApplyError("question kind does not map to an approval step") from exc
-
-
-def _github_remote_identity(value: str) -> tuple[str, str]:
-    patterns = (
-        r"^https://github\.com/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+?)(?:\.git)?/?$",
-        r"^git@github\.com:(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+?)(?:\.git)?$",
-        r"^ssh://git@github\.com/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+?)(?:\.git)?/?$",
-    )
-    for pattern in patterns:
-        match = re.fullmatch(pattern, value)
-        if match is not None:
-            return match.group("owner"), match.group("repo")
-    raise BootstrapConfigError("repository remote must target github.com/owner/repo")
 
 
 def _isoformat(value: datetime) -> str:

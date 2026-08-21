@@ -14,6 +14,20 @@ Foundry agents.
 These guides explain the owner decisions first. Use the advanced
 references once you need the detailed contracts.
 
+Normal owners should use the `/foundry-bootstrap` skill flow. The
+`foundry-opt bootstrap ...` command tree remains available as an
+advanced compatibility interface for automation, reviewed source
+checkouts, and migration tooling.
+
+## Bootstrap compatibility policy
+
+- Prefer `/foundry-bootstrap` for normal owner bootstraps.
+- Keep `foundry-opt bootstrap ...` names, arguments, exit codes, JSON
+  payloads, receipts, and workflows stable while compatibility is
+  retained.
+- Record future retirement or breaking changes in docs and release
+  notes instead of emitting runtime warning noise in CI.
+
 ## What this repository covers
 
 - repository discovery and bootstrap

@@ -173,6 +173,9 @@ def test_build_configuration_includes_plugin_skill_in_source_artifacts() -> None
     pyproject = tomllib.loads(_read(REPOSITORY_ROOT / "pyproject.toml"))
     project = pyproject["project"]
     build_backend = pyproject["tool"]["uv"]["build-backend"]
+    scripts = pyproject["project"]["scripts"]
 
     assert project["scripts"] == {"foundry-opt": "foundry_opt:main"}
     assert "plugins/**" in build_backend["source-include"]
+    assert scripts == {"foundry-opt": "foundry_opt:main"}
+    assert "foundry-bootstrap" not in scripts
