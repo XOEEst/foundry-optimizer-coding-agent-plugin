@@ -40,6 +40,15 @@ EvaluationDefinitionId = Annotated[str, StringConstraints(pattern=r"^(?:[A-Za-z0
 ApplyPhase = Literal["repository", "github", "azure", "evaluations"]
 OperationStage = Literal["planned", "applying", "verifying", "completed", "failed", "compensation_required"]
 BindingClassification = Literal["bound-aligned", "bound-diverged", "bound-unknown", "ready-unbound", "not-ready"]
+FoundryTargetState = Literal["existing_aligned", "existing_diverged", "existing_unknown", "new_target", "blocked"]
+FoundryTargetSource = Literal[
+    "existing_profile",
+    "agent_metadata",
+    "azure_yaml",
+    "azd_environment",
+    "binding_evidence",
+    "owner_answer",
+]
 EvaluatorProvenance = Literal["reused_existing", "auto_generated_unreviewed", "issue_supplied_existing"]
 IdentityKind = Literal["user_assigned_managed_identity", "entra_application", "unresolved_migration"]
 RuntimeKind = Literal["hosted"]
@@ -227,6 +236,54 @@ class FoundryProjectSettings(BootstrapDocument):
     @classmethod
     def validate_arm_id(cls, value: str) -> str:
         return _validate_resource_id(value, 'account_resource_id')
+
+
+class ReviewedFoundryTarget(BootstrapDocument):
+    state: FoundryTargetState
+    project_endpoint: str | None = None
+    project_endpoint_source: FoundryTargetSource | None = None
+    agent_name: AgentId | None = None
+    agent_name_source: FoundryTargetSource | None = None
+    account_resource_id: str | None = None
+    latest_agent_version: Annotated[str | None, StringConstraints(min_length=1, max_length=64)] = None
+    deployment_ready: bool = False
+    detail: str | None = None
+
+    @field_validator("project_endpoint")
+    @classmethod
+    def _validate_project_endpoint_field(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _validate_project_endpoint(value, field="project_endpoint")
+
+    @field_validator("account_resource_id")
+    @classmethod
+    def _validate_account_resource_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _validate_resource_id(value, "account_resource_id")
+
+    @model_validator(mode="after")
+    def _validate_target(self) -> Self:
+        if self.project_endpoint is None:
+            if self.project_endpoint_source is not None:
+                raise BootstrapConfigError("project_endpoint_source requires project_endpoint")
+        elif self.project_endpoint_source is None:
+            raise BootstrapConfigError("project_endpoint requires project_endpoint_source")
+        if self.agent_name is None:
+            if self.agent_name_source is not None:
+                raise BootstrapConfigError("agent_name_source requires agent_name")
+        elif self.agent_name_source is None:
+            raise BootstrapConfigError("agent_name requires agent_name_source")
+        if self.state == "blocked":
+            if self.deployment_ready:
+                raise BootstrapConfigError("blocked foundry targets cannot be deployment ready")
+            if not self.detail:
+                raise BootstrapConfigError("blocked foundry targets require detail")
+            return self
+        if self.project_endpoint is None or self.agent_name is None:
+            raise BootstrapConfigError("non-blocked foundry targets require project_endpoint and agent_name")
+        return self
 
 
 class DecisionPolicy(BootstrapDocument):

@@ -20,6 +20,7 @@ from foundry_opt.bootstrap.contracts import (
     EvaluationDefinitionId,
     GitHubOidcSubjectPrefix,
     IdentityKind,
+    ReviewedFoundryTarget,
     SelectedAgentProfile,
     VersionedEvaluatorUri,
 )
@@ -250,6 +251,7 @@ class SelectedAgent(BootstrapDocument):
     config_path: RepoRelativePath
     editable_paths: tuple[RepoRelativePath, ...]
     enabled: StrictBool | None = None
+    foundry_target: ReviewedFoundryTarget | None = None
     profile: SelectedAgentProfile | None = None
 
     @field_validator('root')
@@ -914,6 +916,16 @@ class BootstrapPlanInput(BootstrapDocument):
         for selected in self.repository.selected_agents:
             if selected.profile is not None and selected.profile_document is None:
                 raise BootstrapConfigError('selected agent profile could not be rendered')
+            if (
+                selected.profile is not None
+                and selected.foundry_target is not None
+                and selected.foundry_target.state != 'blocked'
+            ):
+                profile_project = selected.profile.foundry_project
+                if profile_project.project_endpoint != selected.foundry_target.project_endpoint:
+                    raise BootstrapConfigError('selected foundry_target project_endpoint must match selected profile foundry_project')
+                if profile_project.agent_name != selected.foundry_target.agent_name:
+                    raise BootstrapConfigError('selected foundry_target agent_name must match selected profile foundry_project')
         if self.azure_phase is not None and self.azure_phase.github_repository_id.casefold() != self.repository.repository_id.casefold():
             raise BootstrapConfigError('azure github_repository_id must match repository_id')
         if self.offline_plan:
@@ -973,6 +985,16 @@ class BootstrapPlanInput(BootstrapDocument):
                             raise BootstrapConfigError('selected profile must match the reviewed onboarding sidecar policy')
                 if agent.sidecar_path != selected.config_path:
                     raise BootstrapConfigError('evaluation sidecar_path must match selected agent config_path')
+                if selected.foundry_target is not None and selected.foundry_target.state != 'blocked':
+                    if selected.foundry_target.project_endpoint != agent.project_endpoint:
+                        raise BootstrapConfigError('evaluation project_endpoint must match selected foundry_target')
+                    if selected.foundry_target.agent_name != agent.agent_name:
+                        raise BootstrapConfigError('evaluation agent_name must match selected foundry_target')
+                    if (
+                        selected.foundry_target.account_resource_id is not None
+                        and selected.foundry_target.account_resource_id != agent.account_resource_id
+                    ):
+                        raise BootstrapConfigError('evaluation account_resource_id must match selected foundry_target')
                 if not _path_is_within(selected.root, agent.sidecar_path):
                     raise BootstrapConfigError('evaluation sidecar_path must stay within selected agent root')
                 for source in agent.generation_sources:

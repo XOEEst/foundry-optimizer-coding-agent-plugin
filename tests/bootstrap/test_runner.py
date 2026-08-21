@@ -154,9 +154,10 @@ def test_start_owner_markdown_uses_discovery_review_without_raw_json(tmp_path: P
     assert not turn.owner_markdown.lstrip().startswith("{")
 
 
-def test_answer_accepts_valid_selection_and_advances_to_foundry_target_resolution(tmp_path: Path) -> None:
+def test_answer_accepts_valid_selection_and_records_a_blocked_target(tmp_path: Path) -> None:
     repo = _create_repository(tmp_path)
-    runner = BootstrapRunner(state_store=FileBootstrapRunnerStateStore(state_root=tmp_path / "state"))
+    store = FileBootstrapRunnerStateStore(state_root=tmp_path / "state")
+    runner = BootstrapRunner(state_store=store)
     first = runner.start(repo)
 
     turn = runner.answer(
@@ -164,11 +165,16 @@ def test_answer_accepts_valid_selection_and_advances_to_foundry_target_resolutio
         first.next_question.question_id,
         [first.next_question.choices[0].value],
     )
+    envelope = store.load(turn.operation_id)
+    record = envelope.foundry_targets[0].reviewed_target
 
-    assert turn.state == "foundry_target_resolution"
+    assert turn.state == "register_enable"
     assert turn.next_question is not None
-    assert turn.next_question.kind == "foundry_target"
-    assert "Selected stable IDs" in turn.owner_markdown
+    assert turn.next_question.kind == "register_enable"
+    assert record.state == "blocked"
+    assert record.deployment_ready is False
+    assert "invalid project_endpoint" in (record.detail or "")
+    assert "Foundry targets" in turn.owner_markdown
 
 
 def test_answer_rejects_invalid_selection(tmp_path: Path) -> None:

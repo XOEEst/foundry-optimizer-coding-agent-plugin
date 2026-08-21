@@ -12,7 +12,7 @@ from typing import Annotated, Literal, Protocol, Self
 from pydantic import Field, StringConstraints, field_validator, model_validator
 
 from foundry_opt.bootstrap.canonical import canonical_json_bytes, canonical_sha256, safe_persisted_document
-from foundry_opt.bootstrap.contracts import BootstrapDocument
+from foundry_opt.bootstrap.contracts import AgentId, BootstrapDocument, ReviewedFoundryTarget
 from foundry_opt.bootstrap.discovery import DiscoveryResult, discover_repository_agents
 from foundry_opt.bootstrap.errors import BootstrapApplyError, BootstrapConfigError
 from foundry_opt.bootstrap.operation_state import DiscoveredAgentRecord, DiscoveryBlockerRecord, SelectionPlan, default_state_root
@@ -278,6 +278,23 @@ class BootstrapApprovalRecord(BootstrapDocument):
         return self
 
 
+class BootstrapFoundryTargetRecord(BootstrapDocument):
+    repo_agent_id: AgentId
+    root: Annotated[str, StringConstraints(min_length=1, max_length=240)]
+    reviewed_target: ReviewedFoundryTarget
+
+    @model_validator(mode="after")
+    def _validate_safe(self) -> Self:
+        safe_persisted_document(
+            {
+                "repo_agent_id": self.repo_agent_id,
+                "root": self.root,
+                "reviewed_target": self.reviewed_target.model_dump(mode="json"),
+            }
+        )
+        return self
+
+
 class BootstrapChildReference(BootstrapDocument):
     step: BootstrapApprovalStep
     kind: Annotated[str, StringConstraints(min_length=1, max_length=128)]
@@ -301,6 +318,7 @@ class BootstrapStageOutcome(FrozenModel):
     stage: BootstrapLifecycleStage
     note: str | None = None
     child_refs: tuple[BootstrapChildReference, ...] | None = None
+    foundry_targets: tuple[BootstrapFoundryTargetRecord, ...] | None = None
 
 
 class BootstrapRunnerStatePayload(BootstrapDocument):
@@ -314,6 +332,7 @@ class BootstrapRunnerStatePayload(BootstrapDocument):
     selection_plan: SelectionPlan
     answers: tuple[BootstrapAnswerRecord, ...] = ()
     approvals: tuple[BootstrapApprovalRecord, ...] = ()
+    foundry_targets: tuple[BootstrapFoundryTargetRecord, ...] = ()
     child_refs: tuple[BootstrapChildReference, ...] = ()
     note: str | None = Field(default=None, max_length=4096)
 
@@ -338,6 +357,21 @@ class BootstrapRunnerStatePayload(BootstrapDocument):
                 raise BootstrapConfigError("child_refs must not contain duplicate steps")
             seen.add(key)
         return refs
+
+    @field_validator("foundry_targets")
+    @classmethod
+    def _validate_foundry_targets(
+        cls,
+        value: Sequence[BootstrapFoundryTargetRecord],
+    ) -> tuple[BootstrapFoundryTargetRecord, ...]:
+        records = tuple(value)
+        seen: set[str] = set()
+        for item in records:
+            key = item.repo_agent_id.casefold()
+            if key in seen:
+                raise BootstrapConfigError("foundry_targets must not contain duplicate repo_agent_id values")
+            seen.add(key)
+        return tuple(sorted(records, key=lambda item: item.repo_agent_id.casefold()))
 
 
 class BootstrapRunnerStateEnvelope(BootstrapDocument):
@@ -375,6 +409,10 @@ class BootstrapRunnerStateEnvelope(BootstrapDocument):
     @property
     def approvals(self) -> tuple[BootstrapApprovalRecord, ...]:
         return self.payload.approvals
+
+    @property
+    def foundry_targets(self) -> tuple[BootstrapFoundryTargetRecord, ...]:
+        return self.payload.foundry_targets
 
     @property
     def child_refs(self) -> tuple[BootstrapChildReference, ...]:
@@ -444,6 +482,38 @@ class FoundryBridgeProtocol(Protocol):
 
 
 class FoundryTargetResolutionHandlerProtocol(Protocol):
+    def prepare(
+        self,
+        *,
+        operation: BootstrapRunnerStateEnvelope,
+    ) -> BootstrapStageOutcome: ...
+
+    def build_question(
+        self,
+        *,
+        operation: BootstrapRunnerStateEnvelope,
+        question_id: str,
+    ) -> BootstrapQuestion | None: ...
+
+    def render_owner_markdown(
+        self,
+        *,
+        operation: BootstrapRunnerStateEnvelope,
+    ) -> str | None: ...
+
+    def build_resource_links(
+        self,
+        *,
+        operation: BootstrapRunnerStateEnvelope,
+    ) -> ResourceLinksReview | None: ...
+
+    def persisted_answer_value(
+        self,
+        *,
+        operation: BootstrapRunnerStateEnvelope,
+        answer: object,
+    ) -> Mapping[str, str]: ...
+
     def handle_answer(
         self,
         *,
@@ -640,6 +710,12 @@ class BootstrapRunner:
         self._runtime = runtime or EnvironmentRuntimeBinding()
         self._clock = clock or UtcClock()
         self._state_store = state_store or FileBootstrapRunnerStateStore()
+        if target_resolution_handler is None:
+            from foundry_opt.bootstrap.foundry_targets import (
+                DefaultFoundryTargetResolutionHandler,
+            )
+
+            target_resolution_handler = DefaultFoundryTargetResolutionHandler()
         self._target_resolution_handler = target_resolution_handler
         self._approval_handlers = dict(approval_handlers or {})
         self._rollback_handler = rollback_handler
@@ -721,6 +797,11 @@ class BootstrapRunner:
                     "Foundry project endpoint and agent name."
                 ),
             )
+            if self._target_resolution_handler is not None:
+                updated = self._apply_stage_outcome(
+                    updated,
+                    outcome=self._target_resolution_handler.prepare(operation=updated),
+                )
         elif current_question.kind == "foundry_target":
             updated = self._apply_stage_outcome(
                 envelope,
@@ -845,6 +926,9 @@ class BootstrapRunner:
         approvals = envelope.approvals
         if approval is not None:
             approvals = (*approvals, approval)
+        foundry_targets = envelope.foundry_targets
+        if outcome.foundry_targets is not None:
+            foundry_targets = outcome.foundry_targets
         child_refs = outcome.child_refs if outcome.child_refs is not None else envelope.child_refs
         _validate_stage_transition(envelope.lifecycle_stage, outcome.stage)
         return next_runner_generation(
@@ -853,18 +937,24 @@ class BootstrapRunner:
             lifecycle_stage=outcome.stage,
             answers=answers,
             approvals=approvals,
+            foundry_targets=foundry_targets,
             child_refs=child_refs,
             note=outcome.note,
         )
 
     def _build_turn(self, envelope: BootstrapRunnerStateEnvelope) -> BootstrapTurn:
+        resource_links = build_resource_links(repository_id=envelope.repository_binding.repository_id)
+        if self._target_resolution_handler is not None:
+            extra_links = self._target_resolution_handler.build_resource_links(operation=envelope)
+            if extra_links is not None:
+                resource_links = _merge_resource_links(resource_links, extra_links)
         return BootstrapTurn(
             owner_markdown=self._render_owner_markdown(envelope),
             next_question=self._build_question(envelope),
             available_actions=self._available_actions(envelope),
             operation_id=envelope.operation_id,
             state=envelope.lifecycle_stage,
-            resource_links=build_resource_links(repository_id=envelope.repository_binding.repository_id),
+            resource_links=resource_links,
         )
 
     def _build_question(
@@ -897,6 +987,13 @@ class BootstrapRunner:
                 choices=choices,
             )
         if kind == "foundry_target":
+            if self._target_resolution_handler is not None:
+                question = self._target_resolution_handler.build_question(
+                    operation=envelope,
+                    question_id=question_id,
+                )
+                if question is not None:
+                    return question
             selected = ", ".join(envelope.selection_plan.selected_agent_ids) or "none"
             return BootstrapQuestion(
                 question_id=question_id,
@@ -968,6 +1065,12 @@ class BootstrapRunner:
             "",
             build_discovery_review(envelope.selection_plan).render_markdown(),
         ]
+        if self._target_resolution_handler is not None:
+            rendered_targets = self._target_resolution_handler.render_owner_markdown(
+                operation=envelope,
+            )
+            if rendered_targets:
+                lines.extend(("", rendered_targets))
         if envelope.note:
             lines.extend(("", "## Bridge state", f"- {envelope.note}"))
         if envelope.lifecycle_stage == "agent_selection":
@@ -1011,6 +1114,13 @@ class BootstrapRunner:
     ) -> str | bool | tuple[str, ...] | Mapping[str, str]:
         if kind == "agent_selection":
             return self._validate_selection_answer(answer, envelope)
+        if kind == "foundry_target" and self._target_resolution_handler is not None:
+            normalized = self._target_resolution_handler.persisted_answer_value(
+                operation=envelope,
+                answer=answer,
+            )
+            safe_persisted_document({"value": normalized})
+            return normalized
         if isinstance(answer, bool):
             return answer
         if isinstance(answer, str):
@@ -1161,11 +1271,35 @@ def _validate_stage_transition(
         raise BootstrapApplyError(f"invalid bootstrap stage transition: {current} -> {target}")
 
 
+def _merge_resource_links(
+    current: ResourceLinksReview,
+    extra: ResourceLinksReview,
+) -> ResourceLinksReview:
+    def _merge(bucket: tuple[object, ...], incoming: tuple[object, ...]) -> tuple[object, ...]:
+        merged: dict[tuple[str, str, str], object] = {}
+        for item in (*bucket, *incoming):
+            label = str(getattr(item, "label", ""))
+            target = str(getattr(item, "target", ""))
+            url = str(getattr(item, "url", "") or "")
+            merged[(label.casefold(), target.casefold(), url)] = item
+        return tuple(
+            merged[key]
+            for key in sorted(merged, key=lambda item: item)
+        )
+
+    return ResourceLinksReview(
+        github=tuple(_merge(current.github, extra.github)),
+        azure=tuple(_merge(current.azure, extra.azure)),
+        foundry=tuple(_merge(current.foundry, extra.foundry)),
+    )
+
+
 __all__ = [
     "BootstrapApprovalHandlerProtocol",
     "BootstrapApprovalRecord",
     "BootstrapApprovalStep",
     "BootstrapAvailableAction",
+    "BootstrapFoundryTargetRecord",
     "BootstrapChildReference",
     "BootstrapLifecycleStage",
     "BootstrapQuestion",
