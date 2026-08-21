@@ -273,6 +273,10 @@ non-drifted state; any other live drift between plan and apply still fails close
 `.foundry-opt/registry.yaml` records desired enabled configuration, not live status. A
 reviewed profile may therefore be committed and enabled before evaluation activation; legacy
 inputs that omit an explicit enabled state still render `enabled: false` until activation.
+Owner-facing reviews should use these terms consistently: `registered` means present in the
+registry, `enabled` means the reviewed desired state intends participation, `verified` means
+receipt-backed verification lineage is attached, and `deployable` means policy currently
+allows exact-source deployment.
 `bound-diverged` and `bound-unknown` agents may optimize drafts, but their profile keeps
 `deployment.require_aligned_binding: true` and `deployment.enabled: false`, so merge-time
 deployment stays blocked until alignment is proven. `ready-unbound` and `not-ready` agents

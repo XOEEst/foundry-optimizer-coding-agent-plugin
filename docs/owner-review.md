@@ -3,6 +3,15 @@
 `foundry_opt.bootstrap.owner_review` centralizes owner-facing summaries for
 bootstrap discovery, planning, status, and resource links.
 
+For first-time repository owners, keep bootstrap short and human-first:
+
+1. choose agents
+2. review repository setup
+3. connect GitHub to Azure
+
+Use plain-language bullet summaries by default. Reserve JSON for automation,
+implementation, or debugging detail.
+
 ## CLI entry points
 
 Owners can stay on concise text output by default:
@@ -20,6 +29,22 @@ Owners can stay on concise text output by default:
 Every owner-facing command renders plain text by default, supports `--markdown`
 for copy/paste into issues or PRs, and supports `--json` for deterministic
 review/connection model output.
+
+## Default owner decisions
+
+- **Choose agents** — `bootstrap review discovery` shows which discovered
+  `repoAgentId` values are review-ready, blocked, already registered, or
+  intended to remain out of scope.
+- **Review repository setup** — `bootstrap review plan` shows managed file
+  changes, initial registry/profile intent, verification warnings, OIDC
+  subjects, RBAC assignments, and the resulting
+  `registered` / `enabled` / `verified` / `deployable` posture.
+- **Connect GitHub to Azure** — `bootstrap connect plan` previews the one
+  combined approval covering GitHub environments, variables, branch policy,
+  Azure identity adoption/creation, exactly two federated OIDC subjects, and
+  approved RBAC assignments.
+- **Handoff** — `bootstrap resources` is the final owner handoff for GitHub,
+  Azure, and Foundry links after apply/activation.
 
 ## Review builders
 
@@ -43,3 +68,5 @@ GitHub/Azure plan in connection state, lets owners bind the exact approval with
 
 Owners never need to author approval JSON by hand. Exact plan, runtime, and
 approval hash checks still come from `GitHubAzureConnectionManager`.
+Internal child receipts remain implementation detail; the owner approves one
+combined connection decision.
