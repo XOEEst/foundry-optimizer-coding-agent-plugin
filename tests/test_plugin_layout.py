@@ -47,6 +47,8 @@ EXPECTED_PLUGIN_FILES = {
     "plugins/foundry-bootstrap/SKILL.md",
     "plugins/foundry-bootstrap/references/README.md",
     "plugins/foundry-bootstrap/scripts/README.md",
+    "plugins/foundry-bootstrap/scripts/install-runtime.ps1",
+    "plugins/foundry-bootstrap/scripts/install-runtime.sh",
     "plugins/foundry-bootstrap/skill.lock.template.json",
     "plugins/foundry-bootstrap/templates/README.md",
 }
@@ -95,7 +97,7 @@ def test_plugins_readme_and_discovery_boundary_are_explicit() -> None:
     assert not LEGACY_OPTIMIZER_ROOT.exists()
 
 
-def test_bootstrap_skill_frontmatter_and_owner_contract_are_placeholders_only() -> None:
+def test_bootstrap_skill_frontmatter_and_owner_contract_describes_canonical_launchers() -> None:
     frontmatter, body = _parse_frontmatter(BOOTSTRAP_ROOT / "SKILL.md")
     normalized = " ".join(body.split())
 
@@ -107,8 +109,9 @@ def test_bootstrap_skill_frontmatter_and_owner_contract_are_placeholders_only() 
         ),
     }
     assert "thin client over shared `foundry_opt` runtime code" in normalized
-    assert "placeholder pin contract" in normalized
-    assert "Do not assume local launchers or setup workflow entrypoints exist" in normalized
+    assert "canonical field contract for reviewed runtime pins" in normalized
+    assert "canonical runtime install and verification entrypoints" in normalized
+    assert "source-checkout compatibility wrappers" in normalized
 
 
 def test_plugin_tree_contains_only_allowed_boundary_files() -> None:
@@ -118,9 +121,10 @@ def test_plugin_tree_contains_only_allowed_boundary_files() -> None:
     assert "do not maintain a second full copy" in _read(OPTIMIZER_ROOT / "README.md")
     assert (OPTIMIZER_ROOT / "references" / "ADAPTER_MAPPING.md").is_file()
     assert (OPTIMIZER_ROOT / "references" / "TENZING_ATTRIBUTION.md").is_file()
-    assert "Nothing in this folder is executable in this task." in _read(
-        BOOTSTRAP_ROOT / "scripts" / "README.md"
-    )
+    scripts_readme = _read(BOOTSTRAP_ROOT / "scripts" / "README.md")
+    assert "canonical checked-in home for the reviewed runtime" in scripts_readme
+    assert "install-runtime.ps1" in scripts_readme
+    assert "install-runtime.sh" in scripts_readme
     assert "Store reviewed notes, migration pointers, and source references" in _read(
         BOOTSTRAP_ROOT / "references" / "README.md"
     )
@@ -129,13 +133,19 @@ def test_plugin_tree_contains_only_allowed_boundary_files() -> None:
     )
 
 
-def test_lock_template_uses_exact_placeholder_fields_and_no_runtime_executables() -> None:
+def test_lock_template_uses_exact_placeholder_fields_and_only_canonical_launchers() -> None:
     template = json.loads(_read(BOOTSTRAP_ROOT / "skill.lock.template.json"))
 
     assert template == EXPECTED_LOCK_TEMPLATE
     assert not list(PLUGINS_ROOT.rglob("*.py"))
-    assert not list(PLUGINS_ROOT.rglob("*.ps1"))
-    assert not list(PLUGINS_ROOT.rglob("*.sh"))
+    assert {
+        path.relative_to(REPOSITORY_ROOT).as_posix()
+        for path in PLUGINS_ROOT.rglob("*.ps1")
+    } == {"plugins/foundry-bootstrap/scripts/install-runtime.ps1"}
+    assert {
+        path.relative_to(REPOSITORY_ROOT).as_posix()
+        for path in PLUGINS_ROOT.rglob("*.sh")
+    } == {"plugins/foundry-bootstrap/scripts/install-runtime.sh"}
     assert not any(
         path.name in {"launch-bootstrap.ps1", "launch-bootstrap.sh"}
         for path in PLUGINS_ROOT.rglob("*")

@@ -1,8 +1,14 @@
 # Scripts
 
-This directory is reserved for small plugin-owned wrappers after the runtime
-launcher move is approved.
+This directory is the canonical checked-in home for the reviewed runtime
+install and verification launchers:
 
-Nothing in this folder is executable in this task. Continue using the shared
-`src/foundry_opt/bootstrap/` launchers until a dependent migration task moves
-them.
+- `install-runtime.ps1`
+- `install-runtime.sh`
+
+Both launchers accept an exact reviewed runtime contract either from explicit
+arguments or from a materialized `skill.lock.json` that follows the
+`skill.lock.template.json` field names.
+
+The legacy `src/foundry_opt/bootstrap/launch-bootstrap.*` files remain thin
+source-checkout compatibility wrappers that delegate here.
