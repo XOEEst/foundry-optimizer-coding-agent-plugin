@@ -126,6 +126,9 @@ def test_resolver_prefers_authorized_issue_foundry_inputs() -> None:
                 evaluator_id="azureai://built-in/evaluators/safety",
                 weight=2.0,
             ),
+            IssueEvaluatorEntry(
+                evaluator_id="azureml://registries/azureml/evaluators/builtin.task_completion/versions/19",
+            ),
         ),
         verification_dataset=VerificationDatasetInput(
             dataset_id_or_uri="azureai://accounts/a/projects/p/data/dev/versions/9"
@@ -137,8 +140,85 @@ def test_resolver_prefers_authorized_issue_foundry_inputs() -> None:
     assert resolution.mode == "foundry_evaluation"
     assert resolution.foundry_evaluation is not None
     assert resolution.foundry_evaluation.source == "issue"
+    assert resolution.foundry_evaluation.development_dataset_id.endswith(
+        "/data/dev/versions/9"
+    )
+    assert resolution.foundry_evaluation.validating_dataset_id.endswith(
+        "/data/validating/versions/1"
+    )
+    assert resolution.foundry_evaluation.development_evaluator_ids == (
+        "azureai://built-in/evaluators/safety",
+        "azureml://registries/azureml/evaluators/builtin.task_completion/versions/19",
+    )
+    assert resolution.foundry_evaluation.validating_evaluator_ids == (
+        "azureai://built-in/evaluators/safety",
+        "azureml://registries/azureml/evaluators/builtin.task_completion/versions/19",
+    )
     assert resolution.provenance == ("issue_dataset", "issue_evaluators")
     assert resolution.quantitative_decision_allowed is True
+
+
+def test_resolver_reuses_default_datasets_for_evaluator_only_issue_override() -> None:
+    profile = _profile(bundle=_bundle())
+    issue = OptimizeIssueRequest(
+        repo_agent_id="example-agent",
+        goal="Improve task completion.",
+        primary_metric="task_completion",
+        observed_failures=("Failing case.",),
+        candidate_budget=2,
+        issue_evaluators=(
+            IssueEvaluatorEntry(
+                evaluator_id="azureml://registries/azureml/evaluators/builtin.task_completion/versions/19",
+            ),
+        ),
+    )
+
+    resolution = resolve_verification(profile=profile, issue=issue)
+
+    assert resolution.mode == "foundry_evaluation"
+    assert resolution.foundry_evaluation is not None
+    assert resolution.foundry_evaluation.source == "issue"
+    assert resolution.foundry_evaluation.development_dataset_id.endswith(
+        "/data/development/versions/1"
+    )
+    assert resolution.foundry_evaluation.validating_dataset_id.endswith(
+        "/data/validating/versions/1"
+    )
+    assert resolution.foundry_evaluation.development_evaluator_ids == (
+        "azureai://built-in/evaluators/safety",
+        "azureml://registries/azureml/evaluators/builtin.task_completion/versions/19",
+    )
+    assert resolution.foundry_evaluation.validating_evaluator_ids == (
+        "azureai://built-in/evaluators/safety",
+        "azureml://registries/azureml/evaluators/builtin.task_completion/versions/19",
+    )
+    assert resolution.warnings == ()
+
+
+def test_resolver_deduplicates_issue_evaluators_against_defaults() -> None:
+    profile = _profile(bundle=_bundle())
+    issue = OptimizeIssueRequest(
+        repo_agent_id="example-agent",
+        goal="Reweight safety.",
+        observed_failures=("Failing case.",),
+        candidate_budget=2,
+        issue_evaluators=(
+            IssueEvaluatorEntry(
+                evaluator_id="azureai://built-in/evaluators/safety",
+                weight=2.0,
+            ),
+        ),
+    )
+
+    resolution = resolve_verification(profile=profile, issue=issue)
+
+    assert resolution.foundry_evaluation is not None
+    assert resolution.foundry_evaluation.development_evaluator_ids == (
+        "azureai://built-in/evaluators/safety",
+    )
+    assert resolution.foundry_evaluation.validating_evaluator_ids == (
+        "azureai://built-in/evaluators/safety",
+    )
 
 
 def test_resolver_uses_repository_default_bundle_when_no_issue_override_exists() -> None:
@@ -194,7 +274,7 @@ def test_resolver_allows_explicit_no_evidence_to_override_foundry_defaults() -> 
     )
 
 
-def test_resolver_falls_through_to_issue_checks_when_issue_foundry_inputs_are_partial() -> None:
+def test_resolver_prefers_evaluator_only_override_over_issue_checks() -> None:
     profile = _profile(bundle=_bundle())
     issue = OptimizeIssueRequest(
         repo_agent_id="example-agent",
@@ -217,14 +297,17 @@ def test_resolver_falls_through_to_issue_checks_when_issue_foundry_inputs_are_pa
 
     resolution = resolve_verification(profile=profile, issue=issue)
 
-    assert resolution.mode == "repository_checks"
-    assert resolution.repository_checks is not None
-    assert resolution.repository_checks.source == "issue"
-    assert resolution.provenance == ("issue_repository_checks",)
-    assert resolution.warnings == (
-        "issue-supplied evaluators were ignored because no exact verification dataset was provided",
+    assert resolution.mode == "foundry_evaluation"
+    assert resolution.foundry_evaluation is not None
+    assert resolution.foundry_evaluation.development_dataset_id.endswith(
+        "/data/development/versions/1"
     )
-    assert resolution.quantitative_decision_allowed is False
+    assert resolution.provenance == (
+        "issue_evaluators",
+        "repository_default_bundle",
+    )
+    assert resolution.warnings == ()
+    assert resolution.quantitative_decision_allowed is True
 
 
 def test_resolver_uses_repository_checks_when_no_foundry_evidence_exists() -> None:

@@ -148,9 +148,17 @@ def test_deploy_workflow_computes_dynamic_noop_matrix() -> None:
 def test_issue_form_uses_built_in_parser_contract() -> None:
     document = yaml.safe_load(_read(ISSUE_FORM_PATH))
     intro = document["body"][0]["attributes"]["value"]
+    serialized = _read(ISSUE_FORM_PATH)
     assert "Parser support is built into the runtime now" in intro
     assert "final post-merge repin" in intro
     assert "qualitative-only fallback" in intro
+    assert "Optional primary metric" in serialized
+    assert "task_completion" in serialized
+    assert (
+        "azureml://registries/azureml/evaluators/"
+        "builtin.task_completion/versions/19"
+    ) in serialized
+    assert "Leave blank to reuse repository defaults" in serialized
 
 
 def test_semantic_patch_fixture_targets_legacy_workflow_and_applies_cleanly() -> None:

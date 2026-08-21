@@ -312,6 +312,19 @@ def test_issue_evaluator_authority_fails_closed(tmp_path: Path) -> None:
         verify_issue_evaluator_authority("owner", evaluators)
 
 
+def test_primary_metric_override_uses_evaluator_authority_seam(tmp_path: Path) -> None:
+    _write_repo(tmp_path)
+    evaluators = (
+        IssueEvaluatorEntry(
+            evaluator_id="azureml://registries/azureml/evaluators/builtin.task_completion/versions/19",
+        ),
+    )
+
+    with pytest.raises(BootstrapConfigError, match="write, maintain, or admin"):
+        verify_issue_evaluator_authority("read", evaluators)
+    verify_issue_evaluator_authority("maintain", evaluators)
+
+
 def test_issue_dataset_and_checks_authority_fail_closed(tmp_path: Path) -> None:
     _write_repo(tmp_path)
     dataset = VerificationDatasetInput(

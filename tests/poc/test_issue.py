@@ -62,9 +62,30 @@ def test_parse_issue_body_is_backward_compatible() -> None:
         "azureai://accounts/example/projects/example/evaluators/quality/versions/1",
         "azureai://built-in/evaluators/safety weight=2",
     )
+    assert parsed.primary_metric is None
     assert parsed.verification_dataset is None
     assert parsed.verification_checks == ()
     assert parsed.acknowledge_no_evidence is False
+
+
+def test_parse_issue_body_accepts_explicit_primary_metric_without_inferring_from_goal() -> None:
+    explicit = parse_issue_body(
+        BODY
+        + """
+### Optional primary metric
+
+task_completion
+"""
+    )
+    descriptive_only = parse_issue_body(
+        BODY.replace(
+            "Improve complete policy coverage.",
+            "Improve task_completion for multi-step requests.",
+        )
+    )
+
+    assert explicit.primary_metric == "task_completion"
+    assert descriptive_only.primary_metric is None
 
 
 def test_parse_issue_body_with_optional_verification_sections() -> None:

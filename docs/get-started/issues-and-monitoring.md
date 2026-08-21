@@ -18,6 +18,18 @@ automatically.
 - What must not change?
 - How much candidate churn are you willing to review?
 
+The **Optimization goal** remains descriptive prose. It never selects an
+evaluator. To change the deciding metric for one issue, set **Optional
+primary metric** to the exact emitted metric name and supply at least one
+exact evaluator ID. For example:
+
+- primary metric: `task_completion`
+- evaluator ID: `azureml://registries/azureml/evaluators/builtin.task_completion/versions/19`
+- dataset blank = reuse repository defaults.
+
+Primary-metric, evaluator, dataset, and command overrides require the trusted
+issue-author binding to report `write`, `maintain`, or `admin` permission.
+
 Verification inputs are optional, but the choice changes how honest the
 final recommendation can be.
 
@@ -25,10 +37,13 @@ final recommendation can be.
 
 Foundry Optimizer resolves verification in this order:
 
-1. **Issue dataset plus issue evaluators**
-   - Best when an owner wants one exact Foundry dataset and one exact set
-     of evaluator IDs.
-   - This is the strongest issue-level quantitative path.
+1. **Issue evaluators, optionally with an issue development dataset**
+   - Evaluator-only overrides reuse the repository/runtime default
+     development and validating definitions and datasets.
+   - Issue evaluator IDs are merged with default evaluator IDs, preserving
+     policy and safety evaluators with deterministic de-duplication.
+   - Supplying a dataset replaces only the development dataset; validation
+     continues to use the repository default.
 2. **Repository defaults**
    - Best when the repository already has an activated default dataset and
      evaluator bundle.
@@ -44,9 +59,9 @@ Foundry Optimizer resolves verification in this order:
    - The issue explicitly accepts a no-evidence path, or the repository
      has no verification inputs to use.
 
-Important: an issue-supplied dataset without evaluators, or evaluators
-without a dataset, is not enough for a Foundry evaluation winner. Those
-partial inputs are ignored and should be corrected by the owner.
+Important: an issue-supplied dataset without evaluators is not enough for a
+Foundry evaluation winner and is ignored. Evaluators without a dataset are
+valid when repository/runtime Foundry defaults are available.
 
 ## Honest result labels
 

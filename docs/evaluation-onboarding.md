@@ -146,6 +146,18 @@ azureml://registries/azureml/evaluators/builtin.self_harm/versions/3
 azureml://registries/azureml/evaluators/builtin.indirect_attack/versions/3
 ```
 
+Optimize issues may also reference an immutable registry evaluator directly, for example:
+
+- primary metric: `task_completion`
+- evaluator ID: `azureml://registries/azureml/evaluators/builtin.task_completion/versions/19`
+- dataset blank = reuse repository defaults.
+
+The primary metric is an explicit issue field; it is never inferred from Optimization goal
+prose. An evaluator-only issue override reuses the activated development and validating
+datasets/definitions, merges its evaluator IDs with the default evaluator bundle, and preserves
+the required safety evaluators. An issue dataset, when supplied with evaluator IDs, replaces
+only the development dataset.
+
 A dev-project capability probe found 43 built-ins and **no** aggregate
 `azureai://built-in/evaluators/content_safety`, so the guardrail is a bundle resolved by
 canonical name rather than a fabricated aggregate id:
