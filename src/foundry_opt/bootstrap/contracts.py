@@ -430,7 +430,7 @@ class VerificationBundle(BootstrapDocument):
 class VerificationSettings(BootstrapDocument):
     mode: VerificationMode = 'off'
     repository_checks: tuple[VerificationCheckSpec, ...] = ()
-    evaluation_gate_policy: EvaluationGatePolicy = 'require_foundry_evaluation'
+    evaluation_gate_policy: EvaluationGatePolicy = 'allow_no_evidence'
     bundle: VerificationBundle | None = None
     lineage: EvaluationLineage | None = None
 
@@ -605,6 +605,7 @@ class BootstrapSidecar(FrozenModel):
             deployment=legacy.deployment,
             verification=VerificationSettings(
                 mode=verification_mode,
+                evaluation_gate_policy='require_foundry_evaluation',
                 bundle=VerificationBundle(
                     development_dataset=legacy.development_dataset,
                     validating_dataset=legacy.validating_dataset,

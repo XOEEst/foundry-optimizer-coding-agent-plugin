@@ -69,6 +69,6 @@ verification:
   schema_version: 1
   mode: "off"
   repository_checks: []
-  evaluation_gate_policy: "require_foundry_evaluation"
+  evaluation_gate_policy: "allow_no_evidence"
   bundle: null
   lineage: null

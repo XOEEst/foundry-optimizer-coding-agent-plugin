@@ -223,6 +223,8 @@ def test_sidecar_payload_renders_quick_profile_and_explicit_enabled_state() -> N
     assert sidecar_document["verification"] == {
         "schema_version": 1,
         "mode": "off",
+        "repository_checks": [],
+        "evaluation_gate_policy": "allow_no_evidence",
         "bundle": None,
         "lineage": None,
     }

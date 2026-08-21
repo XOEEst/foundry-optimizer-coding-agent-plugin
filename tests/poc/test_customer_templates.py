@@ -54,7 +54,7 @@ def test_registry_sidecars_and_pin_align_to_runtime_sha() -> None:
     assert registry.distribution.pin == RUNTIME_SHA
     assert sidecar.editable_paths == ("agent/main.py", "agent/prompts/**", "tests/agent/**")
     assert sidecar.verification.repository_checks == ()
-    assert sidecar.verification.evaluation_gate_policy == "require_foundry_evaluation"
+    assert sidecar.verification.evaluation_gate_policy == "allow_no_evidence"
 
 
 def test_customer_templates_do_not_ship_the_legacy_shared_pin() -> None:

@@ -715,7 +715,7 @@
           "default": null
         },
         "evaluation_gate_policy": {
-          "default": "require_foundry_evaluation",
+          "default": "allow_no_evidence",
           "enum": [
             "require_foundry_evaluation",
             "allow_repository_checks",
