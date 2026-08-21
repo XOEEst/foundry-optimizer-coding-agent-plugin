@@ -7,6 +7,7 @@ import json
 import os
 import re
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -15,7 +16,9 @@ import yaml
 from pydantic import ValidationError
 
 from foundry_opt.bootstrap.command_io import BootstrapCliError, BootstrapExitCode, emit_json, load_json_file, write_json_file
-from foundry_opt.bootstrap.contracts import BootstrapSidecar, RootRegistry
+from foundry_opt.bootstrap.connection import GitHubAzureConnectionManager, read_connection_state
+from foundry_opt.bootstrap.contracts import BindingAssessment, BootstrapPlan, BootstrapSidecar, RootRegistry
+from foundry_opt.bootstrap.discovery import discover_repository_agents
 from foundry_opt.bootstrap.drivers import AzurePhaseDriver, EvaluationPhaseDriver, GitHubPhaseDriver, RepositoryPhaseDriver
 from foundry_opt.bootstrap.errors import (
     BootstrapApplyError,
@@ -26,16 +29,18 @@ from foundry_opt.bootstrap.errors import (
 )
 from foundry_opt.bootstrap.evaluation.activation import finalize_evaluation_activation, read_finalize_journal
 from foundry_opt.bootstrap.evaluation.inventory import assess_agent_inventory
-from foundry_opt.bootstrap.operation_state import SelectionPlan, default_state_root, read_operation_state
+from foundry_opt.bootstrap.input_contracts import BindingEvidenceInput, BootstrapPlanInput, load_binding_evidence_input, load_bootstrap_plan_input
+from foundry_opt.bootstrap.operation_state import DiscoveredAgentRecord, DiscoveryBlockerRecord, SelectionPlan, default_state_root, read_operation_state
 from foundry_opt.bootstrap.orchestrator import BootstrapOrchestrator
+from foundry_opt.bootstrap.owner_cli import build_connection_plan_preview, render_connection_approval, render_connection_status
+from foundry_opt.bootstrap.owner_review import build_discovery_review, build_plan_review, build_resource_links, build_status_review
 from foundry_opt.bootstrap.plan_factory import (
     build_evaluation_actions,
     read_live_status,
     stopped_evaluation_agents,
 )
+from foundry_opt.bootstrap.providers.azure import AzureArmRestProvider
 from foundry_opt.bootstrap.receipts import ApprovalRecord, ApplyPhaseName, EvaluationReplacementRecord
-from foundry_opt.bootstrap.discovery import discover_repository_agents
-from foundry_opt.bootstrap.input_contracts import BindingEvidenceInput, BootstrapPlanInput, load_binding_evidence_input, load_bootstrap_plan_input
 from foundry_opt.distribution import load_shared_pin, verify_shared_checkout, write_bootstrap_receipt
 from foundry_opt.poc.config import SharedPin
 
@@ -329,8 +334,295 @@ def _persisted_sidecar(repo_root: Path, sidecar_path: str) -> dict[str, object] 
     }
 
 
+@dataclass(frozen=True, slots=True)
+class _ConnectionRuntime:
+    manager: GitHubAzureConnectionManager
+    github_driver: GitHubPhaseDriver
+    azure_driver: AzurePhaseDriver
+
+
+def _load_operation_state_record(
+    repository_id: str,
+    operation_id: str,
+    *,
+    state_root: Path,
+):
+    try:
+        return read_operation_state(repository_id, operation_id, state_root=state_root)
+    except FileNotFoundError as exc:
+        raise BootstrapCliError(
+            'operation-state-missing',
+            'bootstrap operation state was not found',
+            exit_code=BootstrapExitCode.MISSING,
+            details={
+                'repository_id': repository_id,
+                'operation_id': operation_id,
+                'state_root': str(state_root.resolve()),
+            },
+        ) from exc
+
+
+def _load_connection_state_record(
+    repository_id: str,
+    operation_id: str,
+    *,
+    state_root: Path,
+):
+    try:
+        return read_connection_state(repository_id, operation_id, state_root=state_root)
+    except FileNotFoundError as exc:
+        raise BootstrapCliError(
+            'connection-state-missing',
+            'connection state was not found; run bootstrap connect plan first',
+            exit_code=BootstrapExitCode.MISSING,
+            details={
+                'repository_id': repository_id,
+                'operation_id': operation_id,
+                'state_root': str(state_root.resolve()),
+            },
+        ) from exc
+
+
+def _approved_role_definitions_from_plan(plan: BootstrapPlan) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for action in plan.actions:
+        if action.phase != 'azure' or action.kind != 'role-assignment':
+            continue
+        fields = {
+            item.split('=', 1)[0]: item.split('=', 1)[1]
+            for item in action.diagnostics
+            if '=' in item
+        }
+        alias = fields.get('role')
+        role_definition_id = fields.get('role_definition_id')
+        if alias and role_definition_id:
+            mapping[alias] = role_definition_id
+    return mapping
+
+
+def _build_connection_runtime(
+    *,
+    state_root: Path,
+    plan_input: BootstrapPlanInput | None = None,
+    connection_plan: BootstrapPlan | None = None,
+) -> _ConnectionRuntime:
+    github_driver = GitHubPhaseDriver(plan_input=plan_input)
+    if plan_input is not None:
+        azure_driver = AzurePhaseDriver(plan_input=plan_input)
+    else:
+        seed_driver = AzurePhaseDriver(plan_input=None)
+        approved_roles = _approved_role_definitions_from_plan(connection_plan) if connection_plan is not None else {}
+        azure_driver = AzurePhaseDriver(
+            plan_input=None,
+            provider=AzureArmRestProvider(
+                token_provider=seed_driver._token_provider,
+                approved_role_definitions=approved_roles,
+            ),
+        )
+    return _ConnectionRuntime(
+        manager=GitHubAzureConnectionManager(
+            github_driver=github_driver,
+            azure_driver=azure_driver,
+            state_root=state_root,
+        ),
+        github_driver=github_driver,
+        azure_driver=azure_driver,
+    )
+
+
+def _load_connection_plan_input(plan_input: Path) -> BootstrapPlanInput:
+    loaded = load_bootstrap_plan_input(plan_input)
+    if loaded.github_phase is None or loaded.azure_phase is None:
+        raise BootstrapCliError(
+            'connection-phases-required',
+            'bootstrap connect requires reviewed github_phase and azure_phase inputs',
+            exit_code=BootstrapExitCode.CONFIG,
+        )
+    return loaded
+
+
+def _load_registry_review(
+    *,
+    registry_path: Path | None,
+    repo_root: Path | None,
+) -> RootRegistry | None:
+    candidate = registry_path or (repo_root / '.foundry-opt' / 'registry.yaml' if repo_root is not None else None)
+    if candidate is None:
+        return None
+    if not candidate.exists():
+        if registry_path is not None:
+            raise BootstrapCliError(
+                'registry-missing',
+                'registry could not be read',
+                exit_code=BootstrapExitCode.MISSING,
+                details={'path': str(candidate)},
+            )
+        return None
+    return RootRegistry.from_document(candidate.read_text(encoding='utf-8'))
+
+
+def _selection_plan_from_discovery_payload(payload: dict[str, object]) -> SelectionPlan:
+    selected_raw = payload.get('selected', ())
+    selected = (
+        tuple(sorted({str(item) for item in selected_raw if item}, key=str.casefold))
+        if isinstance(selected_raw, (list, tuple))
+        else ()
+    )
+    discovered_agents: list[DiscoveredAgentRecord] = []
+    blockers: set[str] = set()
+    for item in payload.get('agents', ()) if isinstance(payload.get('agents'), list) else ():
+        if not isinstance(item, dict):
+            continue
+        blocker_records = tuple(
+            DiscoveryBlockerRecord(
+                code=str(blocker.get('code', 'unknown')),
+                detail=str(blocker.get('detail', 'unknown')),
+            )
+            for blocker in item.get('blockers', ())
+            if isinstance(blocker, dict)
+        )
+        blockers.update(blocker.detail for blocker in blocker_records)
+        discovered_agents.append(
+            DiscoveredAgentRecord(
+                repo_agent_id=str(item['repoAgentId']),
+                root=str(item.get('root', '.')),
+                config_path=(
+                    str(item['configPath'])
+                    if isinstance(item.get('configPath'), str)
+                    else None
+                ),
+                source_root=str(item.get('sourceRoot', item.get('root', '.'))),
+                package_root=str(item.get('packageRoot', item.get('sourceRoot', item.get('root', '.')))),
+                source_fingerprint=str(item.get('sourceFingerprint', '0' * 64)),
+                package_fingerprint=str(item.get('packageFingerprint', '0' * 64)),
+                classification=str(item.get('classification', 'bound-unknown')),
+                detail=(str(item['detail']) if isinstance(item.get('detail'), str) else None),
+                confidence=float(item.get('confidence', 0.0)),
+                blockers=blocker_records,
+                approved_shared_source_repo_agent_ids=tuple(
+                    str(value)
+                    for value in item.get('approvedSharedSourceRepoAgentIds', ())
+                    if isinstance(value, str)
+                ),
+            )
+        )
+    candidates = payload.get('candidates', ())
+    binding_assessments = tuple(
+        BindingAssessment.model_validate(item)
+        for item in candidates
+        if isinstance(item, dict)
+    ) or tuple(
+        BindingAssessment(
+            agent_id=agent.repo_agent_id,
+            classification=agent.classification,
+            detail=agent.detail,
+        )
+        for agent in discovered_agents
+    )
+    return SelectionPlan(
+        repository_root=str(payload.get('repo_root', payload.get('repositoryRoot', '.'))),
+        selected_agent_ids=selected,
+        binding_assessments=binding_assessments,
+        discovery_fingerprints=(),
+        blockers=tuple(sorted(blockers, key=str.casefold)),
+        discovered_agents=tuple(discovered_agents),
+    )
+
+
+def _emit_owner_text(text: str) -> None:
+    typer.echo(text.replace('available after apply', 'available-after-apply'))
+
+
+def _emit_owner_renderable(
+    review: object,
+    *,
+    json_output: bool,
+    markdown: bool,
+) -> None:
+    if json_output and markdown:
+        raise BootstrapCliError(
+            'render-mode-conflict',
+            '--json cannot be combined with --markdown',
+            exit_code=BootstrapExitCode.CONFIG,
+        )
+    if json_output:
+        emit_json(review.model_dump(mode='json'))  # type: ignore[attr-defined]
+        return
+    renderer = review.render_markdown if markdown else review.render_text  # type: ignore[attr-defined]
+    _emit_owner_text(renderer())
+
+
+def _handle_owner_error(exc: Exception, *, json_output: bool) -> None:
+    if json_output:
+        _handle_error(exc)
+        return
+    if isinstance(exc, BootstrapCliError):
+        typer.echo(f'Error: {exc.message}')
+        for key, value in sorted(exc.details.items()):
+            typer.echo(f'  - {key}: {value}')
+        raise typer.Exit(code=int(exc.exit_code))
+    if isinstance(exc, BootstrapApplyError):
+        typer.echo(f'Error: {str(exc)}')
+        raise typer.Exit(code=int(BootstrapExitCode.APPLY))
+    if isinstance(exc, (BootstrapConfigError, BootstrapPlanError, ValidationError, ValueError)):
+        typer.echo(f'Error: {str(exc)}')
+        raise typer.Exit(code=int(BootstrapExitCode.CONFIG))
+    if isinstance(exc, BootstrapProviderError):
+        typer.echo(f'Error: {str(exc)}')
+        raise typer.Exit(code=int(BootstrapExitCode.RUNTIME))
+    if isinstance(exc, BootstrapContractError):
+        typer.echo(f'Error: {str(exc)}')
+        raise typer.Exit(code=int(BootstrapExitCode.RUNTIME))
+    raise exc
+
+
+def _resolve_connection_approval(
+    runtime: _ConnectionRuntime,
+    envelope,
+    *,
+    approve: bool,
+    actor: str | None,
+    summary: str | None,
+):
+    if approve:
+        if not actor or not summary:
+            raise BootstrapCliError(
+                'connection-approval-confirmation-required',
+                '--approve requires both --actor and --summary',
+                exit_code=BootstrapExitCode.CONFIG,
+            )
+        return runtime.manager.create_approval(
+            envelope.connection_plan,
+            actor=actor,
+            summary=summary,
+        )
+    if actor is not None or summary is not None:
+        raise BootstrapCliError(
+            'connection-approve-flag-required',
+            '--actor and --summary require --approve',
+            exit_code=BootstrapExitCode.CONFIG,
+        )
+    if envelope.approval is None:
+        raise BootstrapCliError(
+            'connection-approval-required',
+            'connection apply requires a recorded approval; run bootstrap connect approve or rerun with --approve --actor --summary',
+            exit_code=BootstrapExitCode.CONFLICT,
+        )
+    return envelope.approval
+
+
 def register_bootstrap_commands(app: typer.Typer) -> None:
+    review_app = typer.Typer(
+        no_args_is_help=True,
+        help='Render owner-facing bootstrap discovery, plan, and status summaries.',
+    )
+    connect_app = typer.Typer(
+        no_args_is_help=True,
+        help='Plan and apply the GitHub/Azure connection step with owner-friendly text output.',
+    )
     evaluation_app = typer.Typer(no_args_is_help=True)
+    app.add_typer(review_app, name="review")
+    app.add_typer(connect_app, name="connect")
     app.add_typer(evaluation_app, name="evaluation")
 
     @app.command("verify")
@@ -661,6 +953,453 @@ def register_bootstrap_commands(app: typer.Typer) -> None:
             emit_json({"status": "ok", "command": "rollback", "phase": phase, "receipt": receipt.model_dump(mode="json")})
         except Exception as exc:
             _handle_error(exc)
+
+    @review_app.command("discovery")
+    def review_discovery(
+        repository_id: str | None = typer.Option(None, "--repository-id"),
+        operation_id: str | None = typer.Option(None, "--operation-id"),
+        discovery_file: Path | None = typer.Option(None, "--discovery-file"),
+        repo_root: Path | None = typer.Option(None, "--repo-root"),
+        registry: Path | None = typer.Option(None, "--registry"),
+        state_root: Path = typer.Option(default_state_root(), "--state-root"),
+        json_output: bool = typer.Option(False, "--json"),
+        markdown: bool = typer.Option(False, "--markdown"),
+    ) -> None:
+        """Render an owner-facing discovery summary from persisted state or discover output."""
+
+        try:
+            if discovery_file is not None and (repository_id is not None or operation_id is not None):
+                raise BootstrapCliError(
+                    'review-source-conflict',
+                    'use either --discovery-file or --repository-id/--operation-id',
+                    exit_code=BootstrapExitCode.CONFIG,
+                )
+            if discovery_file is not None:
+                source = _selection_plan_from_discovery_payload(
+                    load_json_file(discovery_file, subject='discovery')
+                )
+            else:
+                if repository_id is None or operation_id is None:
+                    raise BootstrapCliError(
+                        'review-source-required',
+                        'review discovery requires --discovery-file or both --repository-id and --operation-id',
+                        exit_code=BootstrapExitCode.CONFIG,
+                    )
+                source = _load_operation_state_record(
+                    repository_id,
+                    operation_id,
+                    state_root=state_root,
+                )
+            review = build_discovery_review(
+                source,
+                registry=_load_registry_review(registry_path=registry, repo_root=repo_root),
+            )
+            _emit_owner_renderable(
+                review,
+                json_output=json_output,
+                markdown=markdown,
+            )
+        except Exception as exc:
+            _handle_owner_error(exc, json_output=json_output)
+
+    @review_app.command("plan")
+    def review_plan(
+        repository_id: str | None = typer.Option(None, "--repository-id"),
+        operation_id: str | None = typer.Option(None, "--operation-id"),
+        plan_file: Path | None = typer.Option(None, "--plan-file"),
+        plan_input: Path | None = typer.Option(None, "--plan-input"),
+        repo_root: Path | None = typer.Option(None, "--repo-root"),
+        state_root: Path = typer.Option(default_state_root(), "--state-root"),
+        json_output: bool = typer.Option(False, "--json"),
+        markdown: bool = typer.Option(False, "--markdown"),
+    ) -> None:
+        """Render an owner-facing plan summary from operation state or a saved plan file."""
+
+        try:
+            if plan_file is not None and (repository_id is not None or operation_id is not None):
+                raise BootstrapCliError(
+                    'review-source-conflict',
+                    'use either --plan-file or --repository-id/--operation-id',
+                    exit_code=BootstrapExitCode.CONFIG,
+                )
+            loaded = _context_plan_input(plan_input)
+            verified = (
+                _verify_binding_claims(loaded, repo_root=repo_root)
+                if loaded is not None and repo_root is not None
+                else None
+            )
+            if plan_file is not None:
+                review = build_plan_review(
+                    BootstrapPlan.model_validate(load_json_file(plan_file, subject='plan')),
+                    plan_input=loaded,
+                    verified_binding_classifications=verified,
+                )
+            else:
+                if repository_id is None or operation_id is None:
+                    raise BootstrapCliError(
+                        'review-source-required',
+                        'review plan requires --plan-file or both --repository-id and --operation-id',
+                        exit_code=BootstrapExitCode.CONFIG,
+                    )
+                review = build_plan_review(
+                    _load_operation_state_record(
+                        repository_id,
+                        operation_id,
+                        state_root=state_root,
+                    ),
+                    plan_input=loaded,
+                    verified_binding_classifications=verified,
+                )
+            _emit_owner_renderable(
+                review,
+                json_output=json_output,
+                markdown=markdown,
+            )
+        except Exception as exc:
+            _handle_owner_error(exc, json_output=json_output)
+
+    @review_app.command("status")
+    def review_status(
+        repository_id: str = typer.Option(..., "--repository-id"),
+        operation_id: str = typer.Option(..., "--operation-id"),
+        state_root: Path = typer.Option(default_state_root(), "--state-root"),
+        json_output: bool = typer.Option(False, "--json"),
+        markdown: bool = typer.Option(False, "--markdown"),
+    ) -> None:
+        """Render an owner-facing status summary from persisted bootstrap state."""
+
+        try:
+            review = build_status_review(
+                _load_operation_state_record(
+                    repository_id,
+                    operation_id,
+                    state_root=state_root,
+                )
+            )
+            _emit_owner_renderable(
+                review,
+                json_output=json_output,
+                markdown=markdown,
+            )
+        except Exception as exc:
+            _handle_owner_error(exc, json_output=json_output)
+
+    @app.command("resources")
+    def resources(
+        repository_id: str | None = typer.Option(None, "--repository-id"),
+        operation_id: str | None = typer.Option(None, "--operation-id"),
+        plan_file: Path | None = typer.Option(None, "--plan-file"),
+        plan_input: Path | None = typer.Option(None, "--plan-input"),
+        state_root: Path = typer.Option(default_state_root(), "--state-root"),
+        json_output: bool = typer.Option(False, "--json"),
+        markdown: bool = typer.Option(False, "--markdown"),
+    ) -> None:
+        """Render owner-facing resource links from state, a plan, or reviewed plan input."""
+
+        try:
+            loaded = _context_plan_input(plan_input)
+            if (repository_id is None) != (operation_id is None):
+                raise BootstrapCliError(
+                    'resource-source-required',
+                    '--repository-id and --operation-id must be provided together',
+                    exit_code=BootstrapExitCode.CONFIG,
+                )
+            if repository_id is not None and operation_id is not None:
+                review = build_resource_links(
+                    _load_operation_state_record(
+                        repository_id,
+                        operation_id,
+                        state_root=state_root,
+                    ),
+                    plan_input=loaded,
+                )
+            else:
+                plan = (
+                    BootstrapPlan.model_validate(load_json_file(plan_file, subject='plan'))
+                    if plan_file is not None
+                    else None
+                )
+                derived_repository_id = repository_id
+                if loaded is not None:
+                    if derived_repository_id is not None and derived_repository_id != loaded.repository.repository_id:
+                        raise BootstrapCliError(
+                            'repository-mismatch',
+                            'plan input repository does not match --repository-id',
+                            exit_code=BootstrapExitCode.CONFIG,
+                        )
+                    derived_repository_id = loaded.repository.repository_id
+                if plan is not None:
+                    if derived_repository_id is not None and derived_repository_id != plan.repository_identity:
+                        raise BootstrapCliError(
+                            'repository-mismatch',
+                            'plan repository does not match --repository-id',
+                            exit_code=BootstrapExitCode.CONFIG,
+                        )
+                    derived_repository_id = plan.repository_identity
+                if derived_repository_id is None:
+                    raise BootstrapCliError(
+                        'resource-source-required',
+                        'resources requires an operation id or a plan/plan input that identifies the repository',
+                        exit_code=BootstrapExitCode.CONFIG,
+                    )
+                review = build_resource_links(
+                    repository_id=derived_repository_id,
+                    bootstrap_plan=plan,
+                    plan_input=loaded,
+                )
+            _emit_owner_renderable(
+                review,
+                json_output=json_output,
+                markdown=markdown,
+            )
+        except Exception as exc:
+            _handle_owner_error(exc, json_output=json_output)
+
+    @connect_app.command("plan")
+    def connect_plan(
+        plan_input: Path = typer.Option(..., "--plan-input"),
+        operation_id: str | None = typer.Option(None, "--operation-id"),
+        repository_id: str | None = typer.Option(None, "--repository-id"),
+        state_root: Path = typer.Option(default_state_root(), "--state-root"),
+        runtime_commit: str | None = typer.Option(None, "--runtime-commit"),
+        runtime_repository: str | None = typer.Option(None, "--runtime-repository"),
+        json_output: bool = typer.Option(False, "--json"),
+        markdown: bool = typer.Option(False, "--markdown"),
+    ) -> None:
+        """Plan the owner-approved GitHub/Azure connection step."""
+
+        try:
+            loaded = _load_connection_plan_input(plan_input)
+            if repository_id is not None and repository_id != loaded.repository.repository_id:
+                raise BootstrapCliError(
+                    'repository-mismatch',
+                    'plan input repository does not match --repository-id',
+                    exit_code=BootstrapExitCode.CONFIG,
+                )
+            if runtime_repository is not None and runtime_repository != loaded.runtime_provenance.runtime_repository_url:
+                raise BootstrapCliError(
+                    'runtime-repository-mismatch',
+                    'plan input runtime repository does not match --runtime-repository',
+                    exit_code=BootstrapExitCode.CONFIG,
+                )
+            resolved_commit = loaded.runtime_provenance.runtime_commit
+            if runtime_commit is not None:
+                _require_exact_runtime(resolved_commit, runtime_commit)
+            runtime = _build_connection_runtime(
+                state_root=state_root,
+                plan_input=loaded,
+            )
+            plan = runtime.manager.build_plan(
+                repository_identity=loaded.repository.repository_id,
+                operation_id=operation_id or f'connect-{uuid.uuid4().hex[:12]}',
+                runtime_repository=loaded.runtime_provenance.runtime_repository_url,
+                runtime_commit=resolved_commit,
+            )
+            if json_output:
+                emit_json(plan.model_dump(mode='json'))
+            else:
+                preview = build_connection_plan_preview(
+                    plan,
+                    plan_input=loaded,
+                    github_driver=runtime.github_driver,
+                    azure_driver=runtime.azure_driver,
+                )
+                _emit_owner_text(
+                    preview.render_markdown() if markdown else preview.render_text()
+                )
+        except Exception as exc:
+            _handle_owner_error(exc, json_output=json_output)
+
+    @connect_app.command("approve")
+    def connect_approve(
+        repository_id: str = typer.Option(..., "--repository-id"),
+        operation_id: str = typer.Option(..., "--operation-id"),
+        actor: str = typer.Option(..., "--actor"),
+        summary: str = typer.Option(..., "--summary"),
+        state_root: Path = typer.Option(default_state_root(), "--state-root"),
+        runtime_commit: str | None = typer.Option(None, "--runtime-commit"),
+        json_output: bool = typer.Option(False, "--json"),
+        markdown: bool = typer.Option(False, "--markdown"),
+    ) -> None:
+        """Create and bind the exact connection approval from explicit owner confirmation."""
+
+        try:
+            envelope = _load_connection_state_record(
+                repository_id,
+                operation_id,
+                state_root=state_root,
+            )
+            resolved_commit = runtime_commit or envelope.runtime_commit
+            _require_exact_runtime(envelope.runtime_commit, resolved_commit)
+            runtime = _build_connection_runtime(
+                state_root=state_root,
+                connection_plan=envelope.connection_plan.phase_plan('azure').plan,
+            )
+            approval = runtime.manager.create_approval(
+                envelope.connection_plan,
+                actor=actor,
+                summary=summary,
+            )
+            bound = runtime.manager.bind_approval(envelope.connection_plan, approval)
+            status = runtime.manager.status(
+                repository_identity=repository_id,
+                operation_id=operation_id,
+                runtime_commit=resolved_commit,
+            )
+            if json_output:
+                emit_json(bound.model_dump(mode='json'))
+            else:
+                _emit_owner_text(
+                    render_connection_approval(
+                        bound,
+                        status,
+                        markdown=markdown,
+                    )
+                )
+        except Exception as exc:
+            _handle_owner_error(exc, json_output=json_output)
+
+    @connect_app.command("apply")
+    def connect_apply(
+        repository_id: str = typer.Option(..., "--repository-id"),
+        operation_id: str = typer.Option(..., "--operation-id"),
+        state_root: Path = typer.Option(default_state_root(), "--state-root"),
+        runtime_commit: str | None = typer.Option(None, "--runtime-commit"),
+        approve: bool = typer.Option(False, "--approve", help='Create and bind the exact approval from --actor and --summary before applying.'),
+        actor: str | None = typer.Option(None, "--actor"),
+        summary: str | None = typer.Option(None, "--summary"),
+        json_output: bool = typer.Option(False, "--json"),
+        markdown: bool = typer.Option(False, "--markdown"),
+    ) -> None:
+        """Apply the composite GitHub/Azure connection step using the recorded exact plan."""
+
+        try:
+            envelope = _load_connection_state_record(
+                repository_id,
+                operation_id,
+                state_root=state_root,
+            )
+            resolved_commit = runtime_commit or envelope.runtime_commit
+            _require_exact_runtime(envelope.runtime_commit, resolved_commit)
+            runtime = _build_connection_runtime(
+                state_root=state_root,
+                connection_plan=envelope.connection_plan.phase_plan('azure').plan,
+            )
+            approval = _resolve_connection_approval(
+                runtime,
+                envelope,
+                approve=approve,
+                actor=actor,
+                summary=summary,
+            )
+            receipt = runtime.manager.apply(envelope.connection_plan, approval)
+            status = runtime.manager.status(
+                repository_identity=repository_id,
+                operation_id=operation_id,
+                runtime_commit=resolved_commit,
+            )
+            if json_output:
+                emit_json(receipt.model_dump(mode='json'))
+            else:
+                _emit_owner_text(
+                    render_connection_status(
+                        status,
+                        markdown=markdown,
+                        title='Connection apply result',
+                    )
+                )
+            if receipt.overall_state != 'applied':
+                raise typer.Exit(code=int(BootstrapExitCode.APPLY))
+        except Exception as exc:
+            _handle_owner_error(exc, json_output=json_output)
+
+    @connect_app.command("status")
+    def connect_status(
+        repository_id: str = typer.Option(..., "--repository-id"),
+        operation_id: str = typer.Option(..., "--operation-id"),
+        state_root: Path = typer.Option(default_state_root(), "--state-root"),
+        runtime_commit: str | None = typer.Option(None, "--runtime-commit"),
+        json_output: bool = typer.Option(False, "--json"),
+        markdown: bool = typer.Option(False, "--markdown"),
+    ) -> None:
+        """Show owner-facing status for the composite GitHub/Azure connection step."""
+
+        try:
+            envelope = _load_connection_state_record(
+                repository_id,
+                operation_id,
+                state_root=state_root,
+            )
+            resolved_commit = runtime_commit or envelope.runtime_commit
+            _require_exact_runtime(envelope.runtime_commit, resolved_commit)
+            runtime = _build_connection_runtime(
+                state_root=state_root,
+                connection_plan=envelope.connection_plan.phase_plan('azure').plan,
+            )
+            status = runtime.manager.status(
+                repository_identity=repository_id,
+                operation_id=operation_id,
+                runtime_commit=resolved_commit,
+            )
+            if json_output:
+                emit_json(status.model_dump(mode='json'))
+            else:
+                _emit_owner_text(render_connection_status(status, markdown=markdown))
+        except Exception as exc:
+            _handle_owner_error(exc, json_output=json_output)
+
+    @connect_app.command("rollback")
+    def connect_rollback(
+        repository_id: str = typer.Option(..., "--repository-id"),
+        operation_id: str = typer.Option(..., "--operation-id"),
+        state_root: Path = typer.Option(default_state_root(), "--state-root"),
+        runtime_commit: str | None = typer.Option(None, "--runtime-commit"),
+        json_output: bool = typer.Option(False, "--json"),
+        markdown: bool = typer.Option(False, "--markdown"),
+    ) -> None:
+        """Roll back the composite GitHub/Azure connection step using the recorded approval."""
+
+        try:
+            envelope = _load_connection_state_record(
+                repository_id,
+                operation_id,
+                state_root=state_root,
+            )
+            resolved_commit = runtime_commit or envelope.runtime_commit
+            _require_exact_runtime(envelope.runtime_commit, resolved_commit)
+            if envelope.approval is None:
+                raise BootstrapCliError(
+                    'connection-approval-required',
+                    'connection rollback requires the recorded approval binding',
+                    exit_code=BootstrapExitCode.CONFLICT,
+                )
+            runtime = _build_connection_runtime(
+                state_root=state_root,
+                connection_plan=envelope.connection_plan.phase_plan('azure').plan,
+            )
+            receipt = runtime.manager.rollback(
+                envelope.connection_plan,
+                envelope.approval,
+            )
+            status = runtime.manager.status(
+                repository_identity=repository_id,
+                operation_id=operation_id,
+                runtime_commit=resolved_commit,
+            )
+            if json_output:
+                emit_json(receipt.model_dump(mode='json'))
+            else:
+                _emit_owner_text(
+                    render_connection_status(
+                        status,
+                        markdown=markdown,
+                        title='Connection rollback result',
+                    )
+                )
+            if receipt.overall_state != 'rolled_back':
+                raise typer.Exit(code=int(BootstrapExitCode.APPLY))
+        except Exception as exc:
+            _handle_owner_error(exc, json_output=json_output)
 
     @evaluation_app.command("inventory")
     def evaluation_inventory(

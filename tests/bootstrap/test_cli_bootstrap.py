@@ -4,22 +4,27 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+from types import SimpleNamespace
 
 from typer.testing import CliRunner
 import yaml
 
+import foundry_opt.bootstrap.cli as bootstrap_cli
+from foundry_opt.bootstrap import drivers
+from foundry_opt.bootstrap.connection import GitHubAzureConnectionManager
 from foundry_opt.bootstrap.contracts import (
     EvaluatorNormalization,
     EvaluatorReference,
+    FingerprintRecord,
     ResolvedEvaluator,
     ResolvedWeightedObjective,
 )
-from foundry_opt.cli import app
-from foundry_opt.bootstrap import drivers
 from foundry_opt.bootstrap.input_contracts import TrustedTemplateManifest
 from foundry_opt.bootstrap.receipts import ApprovalRecord
+from foundry_opt.cli import app
 from tests.bootstrap.fakes.evaluation_contract import build_contract, evaluation_agent_payload
 from tests.bootstrap.fakes.foundry_env import build_fake_adapter, fake_credential
+from tests.bootstrap.test_connection import _Driver, _action
 
 runner = CliRunner()
 
@@ -550,3 +555,403 @@ def test_registered_deploy_plan_command_uses_repository_defaults(tmp_path: Path)
     assert payload["status"] == "planned"
     assert payload["repo_agent_id"] == "example-agent"
     assert payload["default_evaluator_ids"]
+
+
+
+def _connection_plan_input(tmp_path: Path, sha: str) -> Path:
+    path = _offline_plan_input(tmp_path, sha)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["offline_plan"] = False
+    payload["required_phases"] = ["github", "azure"]
+    payload["github_phase"] = {
+        "schema_version": 1,
+        "optimizer_environment": "copilot",
+        "deployment_environment": "foundry-production",
+        "shared_client_id": "44444444-4444-4444-4444-444444444444",
+        "client_id_variable_name": "AZURE_OPTIMIZER_CLIENT_ID",
+        "oidc_subject_prefix": "repo:org/repo",
+        "default_branch_policy_intent": "require_main",
+    }
+    payload["azure_phase"] = {
+        "schema_version": 1,
+        "tenant_id": "22222222-2222-2222-2222-222222222222",
+        "subscription_id": "33333333-3333-3333-3333-333333333333",
+        "identity": {
+            "schema_version": 1,
+            "identity_kind": "entra_application",
+            "existing_client_id": "44444444-4444-4444-4444-444444444444",
+            "existing_object_id": "55555555-5555-5555-5555-555555555555",
+        },
+        "resource_group": "example-rg",
+        "location": "eastus2",
+        "github_repository_id": "org/repo",
+        "approved_role_assignments": [
+            {
+                "schema_version": 1,
+                "alias": "foundry-user-project",
+                "role_definition_id": "/subscriptions/33333333-3333-3333-3333-333333333333/providers/Microsoft.Authorization/roleDefinitions/53ca6127-db72-4b80-b1b0-d745d6d5456d",
+                "scope": "/subscriptions/33333333-3333-3333-3333-333333333333/resourceGroups/example-rg/providers/Microsoft.CognitiveServices/accounts/example/projects/example",
+            }
+        ],
+    }
+    connection_path = tmp_path / "plan-input-connection.json"
+    connection_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    return connection_path
+
+
+
+def _resource_plan_input(tmp_path: Path, sha: str) -> Path:
+    path = _evaluation_plan_input(tmp_path, sha)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["required_phases"] = ["github", "azure", "evaluations"]
+    payload["github_phase"] = {
+        "schema_version": 1,
+        "optimizer_environment": "copilot",
+        "deployment_environment": "foundry-production",
+        "shared_client_id": "44444444-4444-4444-4444-444444444444",
+        "client_id_variable_name": "AZURE_OPTIMIZER_CLIENT_ID",
+        "oidc_subject_prefix": "repo:org/repo",
+        "default_branch_policy_intent": "require_main",
+    }
+    payload["azure_phase"] = {
+        "schema_version": 1,
+        "tenant_id": "22222222-2222-2222-2222-222222222222",
+        "subscription_id": "33333333-3333-3333-3333-333333333333",
+        "identity": {
+            "schema_version": 1,
+            "identity_kind": "user_assigned_managed_identity",
+            "existing_resource_id": "/subscriptions/33333333-3333-3333-3333-333333333333/resourceGroups/example-rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/foundry-owner-review",
+            "existing_client_id": "44444444-4444-4444-4444-444444444444",
+            "existing_object_id": "55555555-5555-5555-5555-555555555555",
+            "create_if_missing": False,
+        },
+        "resource_group": "example-rg",
+        "location": "eastus2",
+        "github_repository_id": "org/repo",
+        "approved_role_assignments": [
+            {
+                "schema_version": 1,
+                "alias": "foundry-user-project",
+                "role_definition_id": "/subscriptions/33333333-3333-3333-3333-333333333333/providers/Microsoft.Authorization/roleDefinitions/53ca6127-db72-4b80-b1b0-d745d6d5456d",
+                "scope": "/subscriptions/33333333-3333-3333-3333-333333333333/resourceGroups/example-rg/providers/Microsoft.CognitiveServices/accounts/example/projects/example",
+            }
+        ],
+    }
+    resource_path = tmp_path / "plan-input-resources.json"
+    resource_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    return resource_path
+
+
+
+def test_bootstrap_review_commands_default_to_text_and_json(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    state_root = tmp_path / "state-review"
+    sha = "a" * 40
+    plan_input = _offline_plan_input(tmp_path, sha)
+
+    discovered = runner.invoke(
+        app,
+        [
+            "bootstrap",
+            "discover",
+            "--repo-root",
+            str(repo),
+            "--repository-id",
+            "org/repo",
+            "--operation-id",
+            "owner-review-op",
+            "--state-root",
+            str(state_root),
+            "--plan-input",
+            str(plan_input),
+        ],
+    )
+    assert discovered.exit_code == 0, discovered.stdout
+    planned = runner.invoke(
+        app,
+        [
+            "bootstrap",
+            "plan",
+            "--plan-input",
+            str(plan_input),
+            "--repository-id",
+            "org/repo",
+            "--repo-root",
+            str(repo),
+            "--operation-id",
+            "owner-review-op",
+            "--state-root",
+            str(state_root),
+        ],
+    )
+    assert planned.exit_code == 0, planned.stdout
+    plan_file = json.loads(planned.stdout)["plan_file"]
+
+    discovery_review = runner.invoke(
+        app,
+        [
+            "bootstrap",
+            "review",
+            "discovery",
+            "--repository-id",
+            "org/repo",
+            "--operation-id",
+            "owner-review-op",
+            "--state-root",
+            str(state_root),
+        ],
+    )
+    assert discovery_review.exit_code == 0, discovery_review.stdout
+    assert "Discovery review" in discovery_review.stdout
+    assert not discovery_review.stdout.lstrip().startswith("{")
+
+    discovery_json = runner.invoke(
+        app,
+        [
+            "bootstrap",
+            "review",
+            "discovery",
+            "--repository-id",
+            "org/repo",
+            "--operation-id",
+            "owner-review-op",
+            "--state-root",
+            str(state_root),
+            "--json",
+        ],
+    )
+    assert discovery_json.exit_code == 0, discovery_json.stdout
+    assert json.loads(discovery_json.stdout)["agents_found"] == 1
+
+    plan_review = runner.invoke(
+        app,
+        [
+            "bootstrap",
+            "review",
+            "plan",
+            "--plan-file",
+            plan_file,
+            "--plan-input",
+            str(plan_input),
+        ],
+    )
+    assert plan_review.exit_code == 0, plan_review.stdout
+    assert "Plan review" in plan_review.stdout
+
+    status_review = runner.invoke(
+        app,
+        [
+            "bootstrap",
+            "review",
+            "status",
+            "--repository-id",
+            "org/repo",
+            "--operation-id",
+            "owner-review-op",
+            "--state-root",
+            str(state_root),
+        ],
+    )
+    assert status_review.exit_code == 0, status_review.stdout
+    assert "Status review" in status_review.stdout
+    assert "Next action:" in status_review.stdout
+
+
+
+def test_bootstrap_resources_command_renders_links_and_placeholders(tmp_path: Path) -> None:
+    sha = "a" * 40
+    plan_input = _resource_plan_input(tmp_path, sha)
+
+    result = runner.invoke(
+        app,
+        ["bootstrap", "resources", "--plan-input", str(plan_input)],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert "Resource links" in result.stdout
+    assert "available-after-apply" in result.stdout
+    assert "https://github.com/org/repo/actions" in result.stdout
+    assert "https://example.services.ai.azure.com/api/projects/example" in result.stdout
+
+    result_json = runner.invoke(
+        app,
+        ["bootstrap", "resources", "--plan-input", str(plan_input), "--json"],
+    )
+    assert result_json.exit_code == 0, result_json.stdout
+    payload = json.loads(result_json.stdout)
+    assert any(item["label"] == "Actions" for item in payload["github"])
+    assert any(item["label"] == "app project" for item in payload["foundry"])
+    assert any(item["target"] == "available after apply" for item in payload["foundry"])
+
+
+
+def test_bootstrap_connect_approve_apply_and_stale_status(tmp_path: Path, monkeypatch) -> None:
+    sha = "a" * 40
+    plan_input = _connection_plan_input(tmp_path, sha)
+    state_root = tmp_path / "state-connect"
+
+    def fake_runtime(*, state_root: Path, plan_input=None, connection_plan=None):
+        github = _Driver(
+            "github",
+            actions=(_action("github-env", "github"), _action("github-var", "github")),
+            live=(FingerprintRecord(label="github:live", sha256="1" * 64),),
+            created_actions=("github-env",),
+            changed_actions=("github-var",),
+        )
+        azure = _Driver(
+            "azure",
+            actions=(_action("azure-fic", "azure"), _action("azure-role", "azure")),
+            live=(FingerprintRecord(label="azure:live", sha256="2" * 64),),
+            created_actions=("azure-fic",),
+            adopted_actions=("azure-role",),
+        )
+        manager = GitHubAzureConnectionManager(
+            github_driver=github,
+            azure_driver=azure,
+            state_root=state_root,
+        )
+        return SimpleNamespace(manager=manager, github_driver=github, azure_driver=azure)
+
+    class _Preview:
+        def render_text(self) -> str:
+            return "Connection plan\n- Approval target: approve this connection once\n- Create: GitHub environment copilot"
+
+        def render_markdown(self) -> str:
+            return "## Connection plan\n- Approval target: approve this connection once\n- Create: GitHub environment copilot"
+
+    monkeypatch.setattr(bootstrap_cli, "_build_connection_runtime", fake_runtime)
+    monkeypatch.setattr(
+        bootstrap_cli,
+        "build_connection_plan_preview",
+        lambda plan, plan_input, github_driver, azure_driver: _Preview(),
+    )
+
+    planned = runner.invoke(
+        app,
+        [
+            "bootstrap",
+            "connect",
+            "plan",
+            "--plan-input",
+            str(plan_input),
+            "--operation-id",
+            "connect-owner-op",
+            "--state-root",
+            str(state_root),
+        ],
+    )
+    assert planned.exit_code == 0, planned.stdout
+    assert "Connection plan" in planned.stdout
+    assert not planned.stdout.lstrip().startswith("{")
+
+    planned_json = runner.invoke(
+        app,
+        [
+            "bootstrap",
+            "connect",
+            "plan",
+            "--plan-input",
+            str(plan_input),
+            "--operation-id",
+            "connect-owner-json",
+            "--state-root",
+            str(state_root),
+            "--json",
+        ],
+    )
+    assert planned_json.exit_code == 0, planned_json.stdout
+    assert json.loads(planned_json.stdout)["step_id"] == "connect-github-to-azure"
+
+    approved = runner.invoke(
+        app,
+        [
+            "bootstrap",
+            "connect",
+            "approve",
+            "--repository-id",
+            "org/repo",
+            "--operation-id",
+            "connect-owner-op",
+            "--state-root",
+            str(state_root),
+            "--actor",
+            "owner",
+            "--summary",
+            "approve connection",
+            "--json",
+        ],
+    )
+    assert approved.exit_code == 0, approved.stdout
+    approval_payload = json.loads(approved.stdout)
+    assert approval_payload["actor"] == "owner"
+
+    applied = runner.invoke(
+        app,
+        [
+            "bootstrap",
+            "connect",
+            "apply",
+            "--repository-id",
+            "org/repo",
+            "--operation-id",
+            "connect-owner-op",
+            "--state-root",
+            str(state_root),
+            "--json",
+        ],
+    )
+    assert applied.exit_code == 0, applied.stdout
+    assert json.loads(applied.stdout)["overall_state"] == "applied"
+
+    status = runner.invoke(
+        app,
+        [
+            "bootstrap",
+            "connect",
+            "status",
+            "--repository-id",
+            "org/repo",
+            "--operation-id",
+            "connect-owner-op",
+            "--state-root",
+            str(state_root),
+            "--json",
+        ],
+    )
+    assert status.exit_code == 0, status.stdout
+    assert json.loads(status.stdout)["overall_state"] == "applied"
+
+    stale = runner.invoke(
+        app,
+        [
+            "bootstrap",
+            "connect",
+            "status",
+            "--repository-id",
+            "org/repo",
+            "--operation-id",
+            "connect-owner-op",
+            "--state-root",
+            str(state_root),
+            "--runtime-commit",
+            "b" * 40,
+        ],
+    )
+    assert stale.exit_code == 24, stale.stdout
+
+    rolled_back = runner.invoke(
+        app,
+        [
+            "bootstrap",
+            "connect",
+            "rollback",
+            "--repository-id",
+            "org/repo",
+            "--operation-id",
+            "connect-owner-op",
+            "--state-root",
+            str(state_root),
+            "--json",
+        ],
+    )
+    assert rolled_back.exit_code == 0, rolled_back.stdout
+    assert json.loads(rolled_back.stdout)["overall_state"] == "rolled_back"
