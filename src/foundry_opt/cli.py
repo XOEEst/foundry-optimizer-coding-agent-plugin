@@ -602,15 +602,7 @@ def issue_parse(
 ) -> None:
     """Parse an optimize issue and optionally prove it narrows policy."""
 
-    parsed = parse_issue_body(body_file.read_text(encoding="utf-8"))
-    request = OptimizeIssueRequest(
-        goal=parsed.goal,
-        observed_failures=(parsed.observed_failures,),
-        constraints=(parsed.constraints,),
-        candidate_budget=parsed.candidate_budget,
-        model_subset=parsed.candidate_models or None,
-        editable_scope_subset=parsed.editable_scope or None,
-    )
+    request = _issue_request_from_body(body_file.read_text(encoding="utf-8"))
     narrowed = None
     if policy_path is not None:
         policy = load_repository_policy(
@@ -1705,6 +1697,9 @@ def _issue_request_from_body(body: str) -> OptimizeIssueRequest:
         model_subset=parsed.candidate_models or None,
         editable_scope_subset=parsed.editable_scope or None,
         issue_evaluators=list(parsed.issue_evaluators) or None,
+        verification_dataset=parsed.verification_dataset,
+        verification_checks=list(parsed.verification_checks) or None,
+        acknowledge_no_evidence=parsed.acknowledge_no_evidence,
     )
 
 

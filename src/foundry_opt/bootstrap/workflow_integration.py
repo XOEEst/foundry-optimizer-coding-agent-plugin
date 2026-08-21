@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath
 from foundry_opt.bootstrap.contracts import BootstrapSidecar, RootRegistry
 from foundry_opt.bootstrap.errors import BootstrapConfigError
 from foundry_opt.poc.config import IssueEvaluatorEntry, validate_repository_relative_path
+from foundry_opt.verification import VerificationCheckSpec, VerificationDatasetInput
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +123,42 @@ def verify_issue_evaluator_authority(
     ids = [entry.evaluator_id for entry in evaluators]
     if not resolver(author_login, ids):
         raise BootstrapConfigError("issue author is not authorized to request arbitrary evaluator IDs")
+
+
+def verify_issue_dataset_authority(
+    author_login: str,
+    dataset: VerificationDatasetInput | None,
+    *,
+    resolver: AuthorPermissionResolver | None,
+) -> None:
+    if dataset is None:
+        return
+    if resolver is None:
+        raise BootstrapConfigError(
+            "issue-supplied verification dataset requires an injected write-authority resolver"
+        )
+    if not resolver(author_login, (dataset.dataset_id_or_uri,)):
+        raise BootstrapConfigError(
+            "issue author is not authorized to request arbitrary verification datasets"
+        )
+
+
+def verify_issue_check_authority(
+    author_login: str,
+    checks: Sequence[VerificationCheckSpec] | None,
+    *,
+    resolver: AuthorPermissionResolver | None,
+) -> None:
+    if not checks:
+        return
+    if resolver is None:
+        raise BootstrapConfigError(
+            "issue-supplied verification commands/checks require an injected write-authority resolver"
+        )
+    if not resolver(author_login, [check.render() for check in checks]):
+        raise BootstrapConfigError(
+            "issue author is not authorized to request arbitrary verification commands/checks"
+        )
 
 
 def build_changed_path_matrix(

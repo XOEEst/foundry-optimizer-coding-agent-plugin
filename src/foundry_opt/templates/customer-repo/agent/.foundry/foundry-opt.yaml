@@ -68,5 +68,7 @@ deployment:
 verification:
   schema_version: 1
   mode: "off"
+  repository_checks: []
+  evaluation_gate_policy: "require_foundry_evaluation"
   bundle: null
   lineage: null

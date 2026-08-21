@@ -17,9 +17,12 @@ from foundry_opt.bootstrap.workflow_integration import (
     protected_editable_patterns,
     protected_editable_patterns_for_repository,
     resolve_registry_selection,
+    verify_issue_check_authority,
+    verify_issue_dataset_authority,
     verify_issue_evaluator_authority,
 )
 from foundry_opt.poc.config import IssueEvaluatorEntry
+from foundry_opt.verification import VerificationCheckSpec, VerificationDatasetInput
 
 
 def _write_repo(tmp_path: Path, *, second_enabled: bool = False) -> Path:
@@ -290,6 +293,30 @@ def test_issue_evaluator_authority_fails_closed(tmp_path: Path) -> None:
         verify_issue_evaluator_authority("octocat", evaluators, resolver=None)
     with pytest.raises(BootstrapConfigError, match="not authorized"):
         verify_issue_evaluator_authority("octocat", evaluators, resolver=lambda *_: False)
+
+
+def test_issue_dataset_and_checks_authority_fail_closed(tmp_path: Path) -> None:
+    _write_repo(tmp_path)
+    dataset = VerificationDatasetInput(
+        dataset_id_or_uri="azureai://accounts/a/projects/p/data/dev/versions/1"
+    )
+    checks = (
+        VerificationCheckSpec(kind="command", value="python -m pytest tests/agent -q"),
+    )
+    with pytest.raises(
+        BootstrapConfigError,
+        match="verification dataset requires an injected write-authority resolver",
+    ):
+        verify_issue_dataset_authority("octocat", dataset, resolver=None)
+    with pytest.raises(
+        BootstrapConfigError,
+        match="verification commands/checks require an injected write-authority resolver",
+    ):
+        verify_issue_check_authority("octocat", checks, resolver=None)
+    with pytest.raises(BootstrapConfigError, match="not authorized"):
+        verify_issue_dataset_authority("octocat", dataset, resolver=lambda *_: False)
+    with pytest.raises(BootstrapConfigError, match="not authorized"):
+        verify_issue_check_authority("octocat", checks, resolver=lambda *_: False)
 
 
 def test_changed_path_matrix_supports_shared_roots_noop_and_manual(tmp_path: Path) -> None:

@@ -19,6 +19,7 @@ from foundry_opt.optimize_job.safety import (
     assert_safe_persisted_document,
     assert_safe_persisted_string,
 )
+from foundry_opt.verification import VerificationCheckSpec, VerificationDatasetInput
 
 
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
@@ -286,6 +287,21 @@ def _string_sequence(
     if not validated and not allow_empty:
         raise ValueError(f"{field} must not be empty")
     return tuple(validated)
+
+
+def _sequence_items(value: object, field: str) -> tuple[object, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return ()
+        if "\n" in value:
+            return tuple(line.strip() for line in value.splitlines() if line.strip())
+        return (stripped,)
+    if isinstance(value, (bytes, bytearray)) or not isinstance(value, Sequence):
+        raise ValueError(f"{field} must be a list")
+    return tuple(value)
 
 
 def _strict_int(value: object, field: str) -> int:
@@ -1253,6 +1269,9 @@ class OptimizeIssueRequest(FrozenModel):
     model_subset: tuple[str, ...] | None = None
     editable_scope_subset: tuple[str, ...] | None = None
     issue_evaluators: tuple["IssueEvaluatorEntry", ...] | None = None
+    verification_dataset: VerificationDatasetInput | None = None
+    verification_checks: tuple[VerificationCheckSpec, ...] | None = None
+    acknowledge_no_evidence: bool = False
 
     @field_validator("goal")
     @classmethod
@@ -1363,25 +1382,103 @@ class OptimizeIssueRequest(FrozenModel):
     ) -> tuple["IssueEvaluatorEntry", ...] | None:
         if value is None:
             return None
-        if isinstance(value, str) and not value.strip():
-            return None
-        items = _string_sequence(
-            value,
-            "issue_evaluators",
-            compact=False,
-            allow_empty=True,
-            limit=256,
-        )
+        items = _sequence_items(value, "issue_evaluators")
         if not items:
             return None
-        parsed = tuple(IssueEvaluatorEntry.parse_line(item) for item in items)
+        parsed: list[IssueEvaluatorEntry] = []
         seen: set[str] = set()
-        for entry in parsed:
+        for index, item in enumerate(items):
+            try:
+                if isinstance(item, IssueEvaluatorEntry):
+                    entry = item
+                elif isinstance(item, str):
+                    entry = IssueEvaluatorEntry.parse_line(item)
+                elif isinstance(item, Mapping):
+                    entry = IssueEvaluatorEntry.model_validate(item)
+                else:
+                    raise ValueError(
+                        f"issue_evaluators[{index}] must be a string or object"
+                    )
+            except (IssueEvaluatorSyntaxError, ValidationError, ValueError) as exc:
+                raise ValueError(str(exc)) from exc
             key = entry.evaluator_id.casefold()
             if key in seen:
                 raise ValueError("issue_evaluators must not contain duplicate evaluator IDs")
             seen.add(key)
-        return parsed
+            parsed.append(entry)
+        return tuple(parsed)
+
+    @field_validator("verification_dataset", mode="before")
+    @classmethod
+    def validate_verification_dataset(
+        cls,
+        value: object,
+    ) -> VerificationDatasetInput | None:
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        if isinstance(value, VerificationDatasetInput):
+            return value
+        if isinstance(value, Mapping):
+            payload = dict(value)
+            if "dataset_id_or_uri" not in payload:
+                for alias in ("dataset", "dataset_id", "value"):
+                    if alias in payload:
+                        payload["dataset_id_or_uri"] = payload.pop(alias)
+                        break
+            return VerificationDatasetInput.model_validate(payload)
+        return VerificationDatasetInput(dataset_id_or_uri=value)
+
+    @field_validator("verification_checks", mode="before")
+    @classmethod
+    def validate_verification_checks(
+        cls,
+        value: object,
+    ) -> tuple[VerificationCheckSpec, ...] | None:
+        if value is None:
+            return None
+        items = _sequence_items(value, "verification_checks")
+        if not items:
+            return None
+        parsed: list[VerificationCheckSpec] = []
+        seen: set[tuple[str, str]] = set()
+        for index, item in enumerate(items):
+            try:
+                if isinstance(item, VerificationCheckSpec):
+                    check = item
+                elif isinstance(item, str):
+                    check = VerificationCheckSpec.parse_line(item)
+                elif isinstance(item, Mapping):
+                    check = VerificationCheckSpec.model_validate(item)
+                else:
+                    raise ValueError(
+                        f"verification_checks[{index}] must be a string or object"
+                    )
+            except (ValidationError, ValueError) as exc:
+                raise ValueError(str(exc)) from exc
+            if check.casefold_key in seen:
+                raise ValueError("verification_checks must not contain duplicates")
+            seen.add(check.casefold_key)
+            parsed.append(check)
+        return tuple(parsed)
+
+    @field_validator("acknowledge_no_evidence", mode="before")
+    @classmethod
+    def validate_acknowledge_no_evidence(cls, value: object) -> bool:
+        if value is None:
+            return False
+        if type(value) is bool:
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().casefold()
+            if not normalized:
+                return False
+            if normalized in {"acknowledge", "acknowledged", "true", "yes"}:
+                return True
+        raise ValueError(
+            "acknowledge_no_evidence must be a boolean or the word acknowledge"
+        )
 
     @model_validator(mode="after")
     def validate_safe_document(self) -> Self:
@@ -1412,6 +1509,22 @@ class OptimizeIssueRequest(FrozenModel):
                     normalized.setdefault("repo_agent_id", stripped)
                 else:
                     normalized.setdefault("explicit_target", stripped)
+        if "issue_dataset" in normalized and "verification_dataset" not in normalized:
+            normalized["verification_dataset"] = normalized.pop("issue_dataset")
+        if "dataset_id" in normalized and "verification_dataset" not in normalized:
+            normalized["verification_dataset"] = normalized.pop("dataset_id")
+        if (
+            "verification_commands" in normalized
+            and "verification_checks" not in normalized
+        ):
+            normalized["verification_checks"] = normalized.pop("verification_commands")
+        if (
+            "no_evidence_acknowledged" in normalized
+            and "acknowledge_no_evidence" not in normalized
+        ):
+            normalized["acknowledge_no_evidence"] = normalized.pop(
+                "no_evidence_acknowledged"
+            )
         return _validate_model(
             cls,
             normalized,

@@ -677,6 +677,29 @@
       "title": "VerificationBundle",
       "type": "object"
     },
+    "VerificationCheckSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "command",
+            "check"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "value": {
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "value"
+      ],
+      "title": "VerificationCheckSpec",
+      "type": "object"
+    },
     "VerificationSettings": {
       "additionalProperties": false,
       "properties": {
@@ -690,6 +713,16 @@
             }
           ],
           "default": null
+        },
+        "evaluation_gate_policy": {
+          "default": "require_foundry_evaluation",
+          "enum": [
+            "require_foundry_evaluation",
+            "allow_repository_checks",
+            "allow_no_evidence"
+          ],
+          "title": "Evaluation Gate Policy",
+          "type": "string"
         },
         "lineage": {
           "anyOf": [
@@ -711,6 +744,14 @@
           ],
           "title": "Mode",
           "type": "string"
+        },
+        "repository_checks": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/VerificationCheckSpec"
+          },
+          "title": "Repository Checks",
+          "type": "array"
         },
         "schema_version": {
           "const": 1,

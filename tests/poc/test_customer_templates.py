@@ -53,6 +53,8 @@ def test_registry_sidecars_and_pin_align_to_runtime_sha() -> None:
     sidecar = BootstrapSidecar.from_document(_read(SIDECAR_PATH))
     assert registry.distribution.pin == RUNTIME_SHA
     assert sidecar.editable_paths == ("agent/main.py", "agent/prompts/**", "tests/agent/**")
+    assert sidecar.verification.repository_checks == ()
+    assert sidecar.verification.evaluation_gate_policy == "require_foundry_evaluation"
 
 
 def test_customer_templates_do_not_ship_the_legacy_shared_pin() -> None:
@@ -122,6 +124,7 @@ def test_issue_form_uses_built_in_parser_contract() -> None:
     intro = document["body"][0]["attributes"]["value"]
     assert "Parser support is built into the runtime now" in intro
     assert "final post-merge repin" in intro
+    assert "qualitative-only fallback" in intro
 
 
 def test_semantic_patch_fixture_targets_legacy_workflow_and_applies_cleanly() -> None:

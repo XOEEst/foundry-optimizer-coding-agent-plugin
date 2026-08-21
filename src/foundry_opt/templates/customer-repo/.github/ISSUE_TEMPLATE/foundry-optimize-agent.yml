@@ -9,7 +9,7 @@ body:
         Provide either a stable repoAgentId from `.foundry-opt/registry.yaml` or an
         explicit Foundry target when the repository has not applied the managed
         contract yet. Parser support is built into the runtime now, so these headings and IDs are part of the managed contract. Template pin remains on the pre-repin shared runtime until the final post-merge repin lands. Blank optional sections keep repository defaults; unclear
-        targets or invalid evaluator weights fail preflight before any job starts.
+        targets or invalid evaluator weights fail preflight before any job starts. Optional verification can use an exact Foundry dataset plus exact evaluator IDs, exact repository commands/checks, or a qualitative-only fallback when no approved evidence is available.
 
   - type: input
     id: repo_agent_id
@@ -80,3 +80,27 @@ body:
         azureai://accounts/example/projects/example/evaluators/quality/versions/1
         azureai://built-in/evaluators/safety weight=2
       render: text
+
+  - type: input
+    id: verification_dataset
+    attributes:
+      label: Optional exact verification dataset ID or URI
+      description: Supply one exact dataset identifier only when you also provide exact evaluator IDs above. Leave blank to keep repository defaults.
+      placeholder: azureai://accounts/example/projects/example/data/validation/versions/1
+
+  - type: textarea
+    id: verification_checks
+    attributes:
+      label: Optional verification commands or checks
+      description: "One exact line per item using `command: ...` or `check: ...`. Leave blank to keep repository defaults."
+      placeholder: |
+        command: python -m pytest tests/agent -q
+        check: CI / unit-tests
+      render: text
+
+  - type: input
+    id: acknowledge_no_evidence
+    attributes:
+      label: Optional no-evidence acknowledgement
+      description: Type `acknowledge` only if repository defaults and issue-supplied verification inputs are unavailable and you still want a qualitative-only run.
+      placeholder: acknowledge

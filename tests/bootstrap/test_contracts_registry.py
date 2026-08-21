@@ -16,9 +16,11 @@ from foundry_opt.bootstrap.contracts import (
     ResolvedWeightedObjective,
     RootRegistry,
     TemplatePayloadSpec,
+    VerificationSettings,
 )
 from foundry_opt.bootstrap.errors import BootstrapConfigError
 from foundry_opt.bootstrap.legacy import import_legacy_single_agent_documents
+from foundry_opt.verification import VerificationCheckSpec
 
 
 def _sidecar() -> BootstrapSidecar:
@@ -97,6 +99,23 @@ def test_root_registry_accepts_explicit_agents() -> None:
         agents=(ExplicitAgentEntry(agent_id='agent-one', root='src/one', config_path='src/one/.foundry/foundry-opt.yaml'),),
     )
     assert registry.agents[0].enabled is True
+
+
+def test_verification_settings_allow_optional_mode_without_bundle() -> None:
+    settings = VerificationSettings(
+        mode="optional",
+        repository_checks=(
+            VerificationCheckSpec(
+                kind="command",
+                value="python -m pytest tests/agent -q",
+            ),
+        ),
+        evaluation_gate_policy="allow_repository_checks",
+    )
+
+    assert settings.bundle is None
+    assert settings.repository_checks[0].kind == "command"
+    assert settings.evaluation_gate_policy == "allow_repository_checks"
 
 
 def test_root_registry_requires_complete_immutable_oidc_ids() -> None:

@@ -17,6 +17,9 @@ _FIELD_LABELS = {
     "Optional narrower editable scope": "editable_scope",
     "Optional narrower model set": "candidate_models",
     "Optional exact evaluator IDs": "issue_evaluators",
+    "Optional exact verification dataset ID or URI": "verification_dataset",
+    "Optional verification commands or checks": "verification_checks",
+    "Optional no-evidence acknowledgement": "acknowledge_no_evidence",
 }
 
 
@@ -35,6 +38,9 @@ class ParsedIssue(BaseModel):
     editable_scope: tuple[str, ...] = ()
     candidate_models: tuple[str, ...] = ()
     issue_evaluators: tuple[str, ...] = ()
+    verification_dataset: str | None = None
+    verification_checks: tuple[str, ...] = ()
+    acknowledge_no_evidence: bool = False
 
     @field_validator("target", "goal", "observed_failures", "constraints")
     @classmethod
@@ -44,7 +50,12 @@ class ParsedIssue(BaseModel):
             raise ValueError("issue text contains control characters")
         return normalized
 
-    @field_validator("editable_scope", "candidate_models", "issue_evaluators")
+    @field_validator(
+        "editable_scope",
+        "candidate_models",
+        "issue_evaluators",
+        "verification_checks",
+    )
     @classmethod
     def validate_unique_lines(cls, values: tuple[str, ...]) -> tuple[str, ...]:
         if len(values) != len(set(values)):
@@ -66,6 +77,9 @@ def parse_issue_body(body: str) -> ParsedIssue:
         "Optional narrower editable scope",
         "Optional narrower model set",
         "Optional exact evaluator IDs",
+        "Optional exact verification dataset ID or URI",
+        "Optional verification commands or checks",
+        "Optional no-evidence acknowledgement",
     }
     required_labels = set(_FIELD_LABELS) - optional_labels - {
         "Repository agent ID or explicit Foundry target"
@@ -95,6 +109,9 @@ def parse_issue_body(body: str) -> ParsedIssue:
         editable_scope=_lines(values["editable_scope"]),
         candidate_models=_lines(values["candidate_models"]),
         issue_evaluators=_lines(values["issue_evaluators"]),
+        verification_dataset=values["verification_dataset"].strip() or None,
+        verification_checks=_lines(values["verification_checks"]),
+        acknowledge_no_evidence=_acknowledgement(values["acknowledge_no_evidence"]),
     )
 
 
@@ -133,3 +150,14 @@ def _required(values: Mapping[str, str], field: str) -> str:
 
 def _lines(value: str) -> tuple[str, ...]:
     return tuple(line.strip() for line in value.splitlines() if line.strip())
+
+
+def _acknowledgement(value: str) -> bool:
+    normalized = value.strip().casefold()
+    if not normalized:
+        return False
+    if normalized in {"acknowledge", "acknowledged", "true", "yes"}:
+        return True
+    raise IssueDocumentError(
+        "no-evidence acknowledgement must be blank or use the word acknowledge"
+    )

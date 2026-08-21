@@ -47,7 +47,7 @@ azureai://built-in/evaluators/safety weight=2
 """
 
 
-def test_parse_issue_body() -> None:
+def test_parse_issue_body_is_backward_compatible() -> None:
     parsed = parse_issue_body(BODY)
 
     assert parsed.target == "example-agent"
@@ -62,6 +62,38 @@ def test_parse_issue_body() -> None:
         "azureai://accounts/example/projects/example/evaluators/quality/versions/1",
         "azureai://built-in/evaluators/safety weight=2",
     )
+    assert parsed.verification_dataset is None
+    assert parsed.verification_checks == ()
+    assert parsed.acknowledge_no_evidence is False
+
+
+def test_parse_issue_body_with_optional_verification_sections() -> None:
+    parsed = parse_issue_body(
+        BODY
+        + """
+### Optional exact verification dataset ID or URI
+
+azureai://accounts/example/projects/example/data/validation/versions/1
+
+### Optional verification commands or checks
+
+```text
+command: python -m pytest tests/agent -q
+check: CI / unit-tests
+```
+
+### Optional no-evidence acknowledgement
+
+acknowledge
+"""
+    )
+
+    assert parsed.verification_dataset == "azureai://accounts/example/projects/example/data/validation/versions/1"
+    assert parsed.verification_checks == (
+        "command: python -m pytest tests/agent -q",
+        "check: CI / unit-tests",
+    )
+    assert parsed.acknowledge_no_evidence is True
 
 
 def test_optional_no_response_is_empty() -> None:

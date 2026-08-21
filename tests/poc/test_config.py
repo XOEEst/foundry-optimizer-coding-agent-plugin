@@ -20,6 +20,7 @@ from foundry_opt.poc.config import (
     validate_repository_relative_path,
     validate_repository_relative_paths,
 )
+from foundry_opt.verification import VerificationCheckSpec, VerificationDatasetInput
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -238,6 +239,49 @@ def test_issue_request_accepts_repo_agent_and_weighted_evaluators() -> None:
     )
 
 
+def test_issue_request_accepts_dataset_checks_and_no_evidence_acknowledgement() -> None:
+    issue = OptimizeIssueRequest.from_document(
+        {
+            **_generic_issue_request(),
+            "verification_dataset": "azureai://accounts/a/projects/p/data/dev/versions/1",
+            "verification_checks": [
+                "command: python -m pytest tests/agent -q",
+                "check: CI / unit-tests",
+            ],
+            "acknowledge_no_evidence": "acknowledge",
+        }
+    )
+
+    assert issue.verification_dataset == VerificationDatasetInput(
+        dataset_id_or_uri="azureai://accounts/a/projects/p/data/dev/versions/1"
+    )
+    assert issue.verification_checks == (
+        VerificationCheckSpec(
+            kind="command",
+            value="python -m pytest tests/agent -q",
+        ),
+        VerificationCheckSpec(kind="check", value="CI / unit-tests"),
+    )
+    assert issue.acknowledge_no_evidence is True
+
+
+def test_issue_request_round_trips_persisted_override_objects() -> None:
+    request = OptimizeIssueRequest.from_document(
+        {
+            **_generic_issue_request(),
+            "issue_evaluators": [
+                "azureai://built-in/evaluators/safety weight=2",
+            ],
+            "verification_dataset": "dataset-dev",
+            "verification_checks": ["command: python -m pytest tests/agent -q"],
+        }
+    )
+
+    reloaded = OptimizeIssueRequest.from_document(request.model_dump(mode="json"))
+
+    assert reloaded == request
+
+
 def test_issue_request_rejects_duplicate_evaluator_ids_even_with_different_weights() -> None:
     with pytest.raises(POCConfigurationError, match="duplicate evaluator IDs"):
         OptimizeIssueRequest.from_document(
@@ -278,6 +322,19 @@ def test_issue_request_rejects_invalid_evaluator_lines(line: str) -> None:
             {
                 **_generic_issue_request(),
                 "issue_evaluators": [line],
+            }
+        )
+
+
+def test_issue_request_rejects_duplicate_verification_checks() -> None:
+    with pytest.raises(POCConfigurationError, match="verification_checks must not contain duplicates"):
+        OptimizeIssueRequest.from_document(
+            {
+                **_generic_issue_request(),
+                "verification_checks": [
+                    "check: CI / unit-tests",
+                    "check: CI / unit-tests",
+                ],
             }
         )
 

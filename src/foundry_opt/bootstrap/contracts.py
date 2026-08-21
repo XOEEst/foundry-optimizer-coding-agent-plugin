@@ -11,6 +11,7 @@ from foundry_opt.bootstrap.canonical import canonical_sha256, safe_persisted_doc
 from foundry_opt.bootstrap.errors import BootstrapConfigError, BootstrapPlanError
 from foundry_opt.models import FrozenModel
 from foundry_opt.poc.config import POCConfigurationError, _validate_resource_id, load_strict_yaml_mapping, validate_repository_relative_path, validate_repository_relative_paths
+from foundry_opt.verification import VerificationCheckSpec
 
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 GitCommit = Annotated[str, StringConstraints(pattern=r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")]
@@ -48,6 +49,7 @@ ActivationOutcome = Literal["succeeded", "failed", "compensation_required", "unk
 SemanticPatchOperation = Literal["replace", "insert_before", "insert_after", "delete"]
 NormalizationKind = Literal["pass_fail", "scalar"]
 VerificationMode = Literal["off", "optional", "required"]
+EvaluationGatePolicy = Literal["require_foundry_evaluation", "allow_repository_checks", "allow_no_evidence"]
 
 PROHIBITED_CONTENT_KEYS = frozenset({"prompt", "prompts", "response", "responses", "trace", "traces", "dataset_rows", "token", "tokens", "raw_prompt", "raw_response", "transcript", "content"})
 MAX_ISSUE_EVALUATORS = 8
@@ -387,6 +389,7 @@ class SelectedAgentProfile(BootstrapDocument):
     max_issue_evaluators: int = MAX_ISSUE_EVALUATORS
     hard_guardrails: tuple[HardGuardrail, ...]
     deployment: DeploymentSettings
+    verification: "VerificationSettings" = Field(default_factory=lambda: VerificationSettings())
 
     @field_validator('package_root')
     @classmethod
@@ -426,17 +429,55 @@ class VerificationBundle(BootstrapDocument):
 
 class VerificationSettings(BootstrapDocument):
     mode: VerificationMode = 'off'
+    repository_checks: tuple[VerificationCheckSpec, ...] = ()
+    evaluation_gate_policy: EvaluationGatePolicy = 'require_foundry_evaluation'
     bundle: VerificationBundle | None = None
     lineage: EvaluationLineage | None = None
+
+    @field_validator('repository_checks', mode='before')
+    @classmethod
+    def validate_repository_checks(
+        cls,
+        value: object,
+    ) -> tuple[VerificationCheckSpec, ...]:
+        if value is None:
+            return ()
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return ()
+            values: Sequence[object] = (stripped,)
+        elif isinstance(value, (bytes, bytearray)) or not isinstance(value, Sequence):
+            raise BootstrapConfigError('repository_checks must be a list')
+        else:
+            values = value
+        checks: list[VerificationCheckSpec] = []
+        seen: set[tuple[str, str]] = set()
+        for index, item in enumerate(values):
+            try:
+                if isinstance(item, VerificationCheckSpec):
+                    check = item
+                elif isinstance(item, str):
+                    check = VerificationCheckSpec.parse_line(item)
+                elif isinstance(item, Mapping):
+                    check = VerificationCheckSpec.model_validate(item)
+                else:
+                    raise ValueError(f'repository_checks[{index}] must be a string or object')
+            except (ValidationError, ValueError) as exc:
+                raise BootstrapConfigError(str(exc)) from exc
+            if check.casefold_key in seen:
+                raise BootstrapConfigError('repository_checks must not contain duplicates')
+            seen.add(check.casefold_key)
+            checks.append(check)
+        return tuple(checks)
 
     @model_validator(mode='after')
     def validate_verification(self) -> Self:
         if self.mode == 'off':
-            if self.bundle is not None or self.lineage is not None:
-                raise BootstrapConfigError('verification mode off cannot persist bundle or lineage')
-            return self
-        if self.bundle is None:
-            raise BootstrapConfigError('verification bundle is required when verification mode is optional or required')
+            if self.bundle is not None or self.lineage is not None or self.repository_checks:
+                raise BootstrapConfigError('verification mode off cannot persist bundle, lineage, or repository checks')
+        if self.bundle is None and self.lineage is not None:
+            raise BootstrapConfigError('verification lineage requires a persisted bundle')
         if (
             self.lineage is not None
             and self.lineage.bundle_objective_hash
@@ -601,6 +642,7 @@ class BootstrapSidecar(FrozenModel):
             max_issue_evaluators=profile.max_issue_evaluators,
             hard_guardrails=profile.hard_guardrails,
             deployment=profile.deployment,
+            verification=profile.verification,
         )
 
     @field_validator('source_root')
@@ -661,7 +703,12 @@ class BootstrapSidecar(FrozenModel):
         return self.verification.require_bundle(detail=detail)
 
     def static_fingerprint(self) -> str:
-        return canonical_sha256(self.model_dump(mode='json', exclude={'verification'}))
+        return canonical_sha256(
+            self.model_dump(
+                mode='json',
+                exclude={'verification': {'mode', 'bundle', 'lineage'}},
+            )
+        )
 
     def with_verification(
         self,
@@ -674,6 +721,8 @@ class BootstrapSidecar(FrozenModel):
             update={
                 'verification': VerificationSettings(
                     mode=mode,
+                    repository_checks=self.verification.repository_checks,
+                    evaluation_gate_policy=self.verification.evaluation_gate_policy,
                     bundle=bundle,
                     lineage=lineage,
                 )

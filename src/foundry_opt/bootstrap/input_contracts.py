@@ -337,6 +337,7 @@ def _profile_from_sidecar_policy(
         max_issue_evaluators=policy.max_issue_evaluators,
         hard_guardrails=policy.hard_guardrails,
         deployment=policy.deployment,
+        verification=policy.verification,
     )
 
 

@@ -186,6 +186,7 @@ def _profile_for_selected_agent(
         max_issue_evaluators=policy.max_issue_evaluators,
         hard_guardrails=policy.hard_guardrails,
         deployment=policy.deployment,
+        verification=policy.verification,
     )
 
 
