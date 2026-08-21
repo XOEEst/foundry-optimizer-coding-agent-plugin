@@ -521,7 +521,7 @@ def render_connection_status(
     lines.append(f'- Operation: {status.operation_id}')
     lines.append(f'- State: {status.overall_state}')
     for phase in status.phase_states:
-        lines.append(f'- {phase.phase}: {phase.state} — {_phase_summary(phase)}')
+        lines.append(f'- {phase.phase}: {phase.state} - {_phase_summary(phase)}')
     lines.append(f'- Approval recorded: {_yes_no(status.approval_hash is not None)}')
     lines.append(f'- Rollback ready: {_yes_no(status.rollback_ready)}')
     if status.next_action is not None:

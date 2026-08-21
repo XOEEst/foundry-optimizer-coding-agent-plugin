@@ -245,7 +245,7 @@ class PlanReview(_RenderableReview):
                 state = 'enabled' if deployment.enabled else 'blocked'
                 detail = f'{deployment.repo_agent_id} -> {env} ({state})'
                 if deployment.warning:
-                    detail = f'{detail} — {deployment.warning}'
+                    detail = f'{detail} - {deployment.warning}'
                 lines.append(f'  - {detail}')
         if self.resource_dispositions:
             grouped = _group_resource_dispositions(self.resource_dispositions)
@@ -275,7 +275,7 @@ class StatusReview(_RenderableReview):
         for phase in self.phases:
             detail = f'{phase.phase}: {phase.state}'
             if phase.summary:
-                detail = f'{detail} — {phase.summary}'
+                detail = f'{detail} - {phase.summary}'
             if phase.completed_steps is not None and phase.total_steps is not None:
                 detail = f'{detail} ({phase.completed_steps}/{phase.total_steps} steps)'
             lines.append(f'- {detail}')
@@ -611,7 +611,7 @@ def _binding_summary(classification: str, detail: str | None) -> str:
         'ready-unbound': 'ready, but no deployed binding was found',
         'not-ready': 'not ready for binding or deployment',
     }.get(classification, classification)
-    return f'{base} — {detail}' if detail else base
+    return f'{base} - {detail}' if detail else base
 
 
 def _heading(title: str, *, markdown: bool, level: int = 2) -> str:
