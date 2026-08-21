@@ -5,6 +5,8 @@
 - The skill lock identifies the exact runtime repository, commit, package path,
   and lock digest.
 - Installer scripts fetch and verify that exact revision before execution.
+- Downloaded skills ignore ambient Python packages and re-execute through the
+  verified runtime interpreter.
 - Resume refuses a different runtime revision.
 
 ## Explicit mutation approvals

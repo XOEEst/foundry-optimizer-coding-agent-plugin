@@ -254,6 +254,15 @@ def _ensure_runtime_env_from_skill_lock(skill_lock_path: Path) -> dict[str, str]
     return contract
 
 
+def _isolated_runtime_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env.pop("PYTHONHOME", None)
+    env.pop("PYTHONPATH", None)
+    env["PYTHONNOUSERSITE"] = "1"
+    env["PYTHONSAFEPATH"] = "1"
+    return env
+
+
 def _resolve_runtime_python_from_installer(
     script_path: Path,
     *,
@@ -261,7 +270,7 @@ def _resolve_runtime_python_from_installer(
     private_state_root: Path,
 ) -> str:
     script_directory = script_path.parent
-    env = dict(os.environ)
+    env = _isolated_runtime_env()
     env[_EMIT_RUNTIME_PYTHON_ENV] = "1"
     work_root = _runtime_work_root(private_state_root)
     if os.name == "nt":
@@ -321,7 +330,25 @@ def _load_production_runner_factory(
         _ensure_runtime_env_from_source_checkout(source_checkout)
     else:
         skill_lock_path = _resolve_skill_lock(script_path, skill_lock_argument)
-        _ensure_runtime_env_from_skill_lock(skill_lock_path)
+        contract = _ensure_runtime_env_from_skill_lock(skill_lock_path)
+        if os.environ.get(_RUNTIME_READY_ENV) != "1":
+            runtime_python = _resolve_runtime_python_from_installer(
+                script_path,
+                skill_lock_path=skill_lock_path,
+                private_state_root=private_state_root,
+            )
+            env = _isolated_runtime_env()
+            env[_RUNTIME_READY_ENV] = "1"
+            env[_RUNTIME_REPOSITORY_ENV] = contract["runtime_repository"]
+            env[_RUNTIME_COMMIT_ENV] = contract["runtime_commit"]
+            env[_RUNTIME_LOCK_ENV] = contract["uv_lock_sha256"]
+            env[_RUNTIME_PACKAGE_PATH_ENV] = contract["package_path"]
+            completed = subprocess.run(
+                [runtime_python, str(script_path), *argv],
+                check=False,
+                env=env,
+            )
+            raise _ReexecRequested(completed.returncode)
 
     try:
         from foundry_opt.bootstrap import (
@@ -337,29 +364,14 @@ def _load_production_runner_factory(
         )
         from foundry_opt.bootstrap.runner import FileBootstrapRunnerStateStore
     except (ImportError, ModuleNotFoundError) as exc:
-        if os.environ.get(_RUNTIME_READY_ENV) == "1":
-            raise RuntimeError(
-                "verified runtime install completed but BootstrapRunner is still unavailable"
-            ) from exc
-        skill_lock_path = _resolve_skill_lock(script_path, skill_lock_argument)
-        contract = _ensure_runtime_env_from_skill_lock(skill_lock_path)
-        runtime_python = _resolve_runtime_python_from_installer(
-            script_path,
-            skill_lock_path=skill_lock_path,
-            private_state_root=private_state_root,
+        context = (
+            "source checkout"
+            if source_checkout is not None
+            else "verified runtime install"
         )
-        env = dict(os.environ)
-        env[_RUNTIME_READY_ENV] = "1"
-        env[_RUNTIME_REPOSITORY_ENV] = contract["runtime_repository"]
-        env[_RUNTIME_COMMIT_ENV] = contract["runtime_commit"]
-        env[_RUNTIME_LOCK_ENV] = contract["uv_lock_sha256"]
-        env[_RUNTIME_PACKAGE_PATH_ENV] = contract["package_path"]
-        completed = subprocess.run(
-            [runtime_python, str(script_path), *argv],
-            check=False,
-            env=env,
-        )
-        raise _ReexecRequested(completed.returncode)
+        raise RuntimeError(
+            f"{context} is available but BootstrapRunner could not be imported"
+        ) from exc
 
     def _factory(private_root: Path) -> _RunnerProtocol:
         commit_coordinator = LocalGitCommitCoordinator(

@@ -6,7 +6,9 @@ and runtime install/verification launchers:
 - `bootstrap.py` — the only owner client over `BootstrapRunner`. It translates
   `start`, `answer`, `approve`, `status`, and `rollback` requests into direct
   runner calls, prints owner markdown separately from the machine envelope, and
-  uses the reviewed runtime contract when it must self-install the runtime.
+  always installs and re-executes through the reviewed runtime contract when
+  invoked from a downloaded skill. Source checkouts import their own source
+  tree directly.
 
 These subcommands are transport between the skill and runner. Owner
 documentation should say "Use `/foundry-bootstrap`", not teach this command

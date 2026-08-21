@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -436,3 +437,132 @@ def test_source_checkout_factory_wires_the_complete_owner_flow(
     assert runner._commit_handler is not None
     assert runner._deployment_handler is not None
     assert len(module.os.environ[module._RUNTIME_LOCK_ENV]) == 64
+
+
+def test_downloaded_skill_reexecs_before_importing_ambient_runtime(
+    tmp_path: Path,
+) -> None:
+    downloaded_root = tmp_path / "downloaded" / "foundry-bootstrap"
+    downloaded_script = downloaded_root / "scripts" / "bootstrap.py"
+    downloaded_script.parent.mkdir(parents=True)
+    shutil.copyfile(SCRIPT_PATH, downloaded_script)
+    skill_lock = downloaded_root / "skill.lock.json"
+    runtime_commit = "a" * 40
+    skill_lock.write_text(
+        json.dumps(
+            {
+                "package_path": ".",
+                "runtime_commit": runtime_commit,
+                "runtime_repository": "https://github.com/example/runtime.git",
+                "schema_version": 1,
+                "uv_lock_sha256": "b" * 64,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    ambient_root = tmp_path / "ambient"
+    ambient_bootstrap = ambient_root / "foundry_opt" / "bootstrap"
+    ambient_bootstrap.mkdir(parents=True)
+    marker = tmp_path / "ambient-imported"
+    (ambient_root / "foundry_opt" / "__init__.py").write_text("", encoding="utf-8")
+    (ambient_bootstrap / "__init__.py").write_text(
+        "\n".join(
+            (
+                "import os",
+                "from pathlib import Path",
+                'Path(os.environ["AMBIENT_MARKER"]).write_text("imported", encoding="utf-8")',
+                "class AmbientRuntime: pass",
+                "BootstrapLocalCommitHandler = AmbientRuntime",
+                "BootstrapLocalDeploymentHandler = AmbientRuntime",
+                "BootstrapConnectionSetupHandler = AmbientRuntime",
+                "BootstrapRepositorySetupHandler = AmbientRuntime",
+                "BootstrapRunner = AmbientRuntime",
+                "LocalDeploymentCoordinator = AmbientRuntime",
+                "LocalGitCommitCoordinator = AmbientRuntime",
+                "ConnectionSetupCoordinator = AmbientRuntime",
+                "RepositorySetupCoordinator = AmbientRuntime",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (ambient_bootstrap / "runner.py").write_text(
+        "class FileBootstrapRunnerStateStore: pass\n",
+        encoding="utf-8",
+    )
+
+    harness = """
+import importlib.util
+import json
+import os
+from pathlib import Path
+import sys
+from types import SimpleNamespace
+
+script_path = Path(sys.argv[1])
+skill_lock = Path(sys.argv[2])
+state_root = Path(sys.argv[3])
+marker = Path(sys.argv[4])
+spec = importlib.util.spec_from_file_location("downloaded_bootstrap", script_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+installer_calls = []
+module._resolve_runtime_python_from_installer = (
+    lambda *args, **kwargs: installer_calls.append(True) or "verified-python"
+)
+reexec = {}
+def fake_run(command, **kwargs):
+    reexec["command"] = command
+    reexec["env"] = kwargs.get("env", {})
+    return SimpleNamespace(returncode=23)
+module.subprocess.run = fake_run
+return_code = None
+try:
+    module._load_production_runner_factory(
+        ("status", "--operation-id", "op"),
+        script_path=script_path,
+        private_state_root=state_root,
+        skill_lock_argument=str(skill_lock),
+    )
+except module._ReexecRequested as exc:
+    return_code = exc.return_code
+print(json.dumps({
+    "ambient_ran": marker.exists(),
+    "installer_calls": len(installer_calls),
+    "pythonpath_forwarded": "PYTHONPATH" in reexec.get("env", {}),
+    "return_code": return_code,
+    "runtime_ready": reexec.get("env", {}).get(module._RUNTIME_READY_ENV),
+    "runtime_commit": os.environ.get(module._RUNTIME_COMMIT_ENV),
+}))
+"""
+    env = dict(os.environ)
+    env.pop("FOUNDRY_BOOTSTRAP_RUNTIME_READY", None)
+    env["AMBIENT_MARKER"] = str(marker)
+    env["PYTHONPATH"] = str(ambient_root)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            harness,
+            str(downloaded_script),
+            str(skill_lock),
+            str(tmp_path / "private-state"),
+            str(marker),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        env=env,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {
+        "ambient_ran": False,
+        "installer_calls": 1,
+        "pythonpath_forwarded": False,
+        "return_code": 23,
+        "runtime_ready": "1",
+        "runtime_commit": runtime_commit,
+    }

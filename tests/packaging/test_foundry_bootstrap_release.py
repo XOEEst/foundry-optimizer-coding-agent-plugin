@@ -168,6 +168,33 @@ def test_build_release_is_byte_deterministic_for_same_checkout(tmp_path: Path) -
     assert first.skill_lock_path.read_bytes() == second.skill_lock_path.read_bytes()
 
 
+def test_build_release_runtime_commit_override_hashes_that_commits_lock(
+    tmp_path: Path,
+) -> None:
+    repository, older_commit, older_lock_sha = _release_fixture(tmp_path)
+    lock_path = repository / "uv.lock"
+    lock_path.write_bytes(lock_path.read_bytes() + b"\n# newer lock\n")
+    subprocess.run(
+        ["git", "-C", str(repository), "add", "uv.lock"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repository), "commit", "--quiet", "-m", "newer lock"],
+        check=True,
+    )
+    assert _sha256_file(lock_path) != older_lock_sha
+
+    result = build_foundry_bootstrap_skill(
+        repository,
+        dist_root=tmp_path / "older-runtime",
+        runtime_commit=older_commit,
+    )
+
+    skill_lock = json.loads(result.skill_lock_path.read_text(encoding="utf-8"))
+    assert skill_lock["runtime_commit"] == older_commit
+    assert skill_lock["uv_lock_sha256"] == older_lock_sha
+
+
 def test_build_release_rejects_unresolved_placeholders_and_source_exact_lock(
     tmp_path: Path,
 ) -> None:

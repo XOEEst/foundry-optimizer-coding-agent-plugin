@@ -127,6 +127,22 @@ def _run_git(repository_root: Path, *arguments: str) -> str:
     return completed.stdout.strip()
 
 
+def _run_git_bytes(repository_root: Path, *arguments: str) -> bytes:
+    completed = subprocess.run(
+        ["git", "-C", str(repository_root), *arguments],
+        check=False,
+        capture_output=True,
+    )
+    if completed.returncode != 0:
+        detail = (
+            completed.stderr.decode("utf-8", errors="replace").strip()
+            or completed.stdout.decode("utf-8", errors="replace").strip()
+            or "unknown git failure"
+        )
+        raise FoundryBootstrapReleaseError(f"git {' '.join(arguments)} failed: {detail}")
+    return completed.stdout
+
+
 def _normalize_repository_url(value: str) -> str:
     raw = value.strip()
     ssh_match = re.fullmatch(
@@ -155,6 +171,15 @@ def _normalize_repository_url(value: str) -> str:
     return f"https://github.com/{owner}/{repo}.git"
 
 
+def _normalize_runtime_commit(value: str) -> str:
+    normalized = value.strip().lower()
+    if _PLACEHOLDER.fullmatch(normalized) is not None:
+        raise FoundryBootstrapReleaseError("runtime_commit placeholder was not resolved")
+    if _GIT_COMMIT.fullmatch(normalized) is None:
+        raise FoundryBootstrapReleaseError("runtime_commit must be a full 40 character SHA")
+    return normalized
+
+
 def _validate_runtime_provenance(
     *,
     runtime_repository: str,
@@ -166,17 +191,13 @@ def _validate_runtime_provenance(
     if _PLACEHOLDER.fullmatch(runtime_repository.strip()) is not None:
         raise FoundryBootstrapReleaseError("runtime_repository placeholder was not resolved")
     normalized_repository = _normalize_repository_url(runtime_repository)
-    normalized_commit = runtime_commit.strip().lower()
-    if _PLACEHOLDER.fullmatch(normalized_commit) is not None:
-        raise FoundryBootstrapReleaseError("runtime_commit placeholder was not resolved")
+    normalized_commit = _normalize_runtime_commit(runtime_commit)
     if _PLACEHOLDER.fullmatch(uv_lock_sha256.strip()) is not None:
         raise FoundryBootstrapReleaseError("uv_lock_sha256 placeholder was not resolved")
     if _PLACEHOLDER.fullmatch(package_path.strip()) is not None:
         raise FoundryBootstrapReleaseError("package_path placeholder was not resolved")
     if schema_version != 1:
         raise FoundryBootstrapReleaseError("schema_version must be 1")
-    if _GIT_COMMIT.fullmatch(normalized_commit) is None:
-        raise FoundryBootstrapReleaseError("runtime_commit must be a full 40 character SHA")
     normalized_lock = uv_lock_sha256.strip().lower()
     if _HEX_SHA256.fullmatch(normalized_lock) is None:
         raise FoundryBootstrapReleaseError("uv_lock_sha256 must be a 64 character SHA-256")
@@ -269,19 +290,45 @@ def infer_runtime_provenance(
         "--get",
         "remote.origin.url",
     )
-    resolved_commit = runtime_commit or _run_git(
+    requested_commit = _normalize_runtime_commit(
+        runtime_commit
+        or _run_git(
+            resolved_root,
+            "rev-parse",
+            "HEAD",
+        )
+    )
+    resolved_commit = _run_git(
         resolved_root,
         "rev-parse",
-        "HEAD",
+        "--verify",
+        f"{requested_commit}^{{commit}}",
+    ).lower()
+    if resolved_commit != requested_commit:
+        raise FoundryBootstrapReleaseError(
+            "runtime_commit did not resolve to the requested commit"
+        )
+    lock_repository_path = (
+        "uv.lock"
+        if resolved_package_path == "."
+        else f"{resolved_package_path}/uv.lock"
     )
-    lock_root = resolved_root if resolved_package_path == "." else resolved_root / resolved_package_path
-    lock_path = lock_root / "uv.lock"
-    if not lock_path.is_file():
-        raise FoundryBootstrapReleaseError(f"uv.lock is missing: {lock_path}")
+    try:
+        lock_bytes = _run_git_bytes(
+            resolved_root,
+            "cat-file",
+            "blob",
+            f"{resolved_commit}:{lock_repository_path}",
+        )
+    except FoundryBootstrapReleaseError as exc:
+        raise FoundryBootstrapReleaseError(
+            f"uv.lock is missing from runtime commit {resolved_commit}: "
+            f"{lock_repository_path}"
+        ) from exc
     return _validate_runtime_provenance(
         runtime_repository=resolved_repository,
         runtime_commit=resolved_commit,
-        uv_lock_sha256=_sha256_file(lock_path),
+        uv_lock_sha256=_sha256_bytes(lock_bytes),
         package_path=resolved_package_path,
         schema_version=schema_version,
     )

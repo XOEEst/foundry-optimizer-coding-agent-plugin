@@ -30,8 +30,8 @@ files, or learn the low-level bootstrap CLI.
 ## Required owner loop
 
 1. Keep the materialized `skill.lock.json` beside this skill so
-   `bootstrap.py` can reinstall the exact reviewed runtime when
-   `foundry_opt` is not already importable.
+   downloaded `bootstrap.py` can always install and re-execute through the
+   exact reviewed runtime. Ambient `foundry_opt` packages are ignored.
 2. Invoke this skill script:
    - downloaded skill: `python scripts/bootstrap.py start --repository .`
    - source checkout of this repository:
