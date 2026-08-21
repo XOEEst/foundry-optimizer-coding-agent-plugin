@@ -149,6 +149,48 @@ def test_resolver_uses_repository_default_bundle_when_no_issue_override_exists()
     assert resolution.provenance == ("repository_default_bundle",)
 
 
+def test_resolver_allows_issue_checks_to_override_foundry_defaults() -> None:
+    profile = _profile(bundle=_bundle())
+    issue = OptimizeIssueRequest(
+        repo_agent_id="example-agent",
+        goal="Improve quality.",
+        observed_failures=("Failing case.",),
+        candidate_budget=2,
+        verification_checks=(
+            VerificationCheckSpec(
+                kind="command",
+                value="python -m pytest tests/agent -q",
+            ),
+        ),
+    )
+
+    resolution = resolve_verification(profile=profile, issue=issue)
+
+    assert resolution.mode == "repository_checks"
+    assert resolution.repository_checks is not None
+    assert resolution.repository_checks.source == "issue"
+    assert resolution.provenance == ("issue_repository_checks",)
+
+
+def test_resolver_allows_explicit_no_evidence_to_override_foundry_defaults() -> None:
+    profile = _profile(bundle=_bundle())
+    issue = OptimizeIssueRequest(
+        repo_agent_id="example-agent",
+        goal="Improve quality.",
+        observed_failures=("Failing case.",),
+        candidate_budget=2,
+        acknowledge_no_evidence=True,
+    )
+
+    resolution = resolve_verification(profile=profile, issue=issue)
+
+    assert resolution.mode == "none"
+    assert resolution.provenance == ("explicit_no_evidence",)
+    assert resolution.warnings == (
+        "No approved quantitative or repository verification evidence is available; any selected proposal remains unverified.",
+    )
+
+
 def test_resolver_falls_through_to_issue_checks_when_issue_foundry_inputs_are_partial() -> None:
     profile = _profile(bundle=_bundle())
     issue = OptimizeIssueRequest(

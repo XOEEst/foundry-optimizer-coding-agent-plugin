@@ -52,6 +52,8 @@ def final_marker_id(job_id: str) -> str:
 def render_baseline_update(state: JobState) -> RenderedComment:
     if state.baseline is None:
         raise EvidenceError("baseline evidence is not available")
+    if state.verification_mode != "foundry_evaluation" or state.baseline.evaluation is None:
+        return _render_nonquantitative_start(state)
     evaluation = state.baseline.evaluation
     title = "Baseline update"
     body = _render_document(
@@ -91,6 +93,10 @@ def render_candidate_update(
     candidate = state.candidate(candidate_id)
     if candidate is None or candidate.assessment is None:
         raise EvidenceError("candidate assessment is not available")
+    if state.verification_mode == "repository_checks":
+        return _render_repository_check_candidate_update(state, candidate_id)
+    if state.verification_mode == "none":
+        return _render_unverified_candidate_update(state, candidate_id)
     finalized = candidate.finalized
     evaluation = candidate.development
     assessment = candidate.assessment
@@ -145,6 +151,8 @@ def render_final_recommendation(
     state: JobState,
     decision: Decision,
 ) -> RenderedComment:
+    if state.verification_mode != "foundry_evaluation":
+        return _render_nonquantitative_final_recommendation(state, decision)
     candidate = None
     assessment = None
     evaluation = None
@@ -201,6 +209,190 @@ def render_final_recommendation(
         title=title,
         body=body,
     )
+
+
+def _render_nonquantitative_start(state: JobState) -> RenderedComment:
+    resolution = state.verification
+    mode = state.verification_mode
+    title = "Verification plan"
+    warning_lines = _resolution_warning_lines(state)
+    body = _render_document(
+        title=title,
+        context_lines=(
+            f"- Shared commit: `{state.identity.shared_commit}`",
+            f"- Base commit: `{state.identity.base_commit}`",
+            f"- Source root: `{state.identity.source_root}`",
+            f"- Verification mode: `{mode}`",
+            f"- Verification provenance: `{_resolution_provenance_text(state)}`",
+        ),
+        metrics_table=_start_metrics_table(state),
+        guardrail_lines=warning_lines + _configured_check_lines(state),
+        improved_text=(
+            "Repository checks will be used to validate candidate source."
+            if mode == "repository_checks"
+            else "Any selected proposal will remain explicitly unverified."
+        ),
+        not_improved_text=(
+            "No quantitative baseline will be claimed."
+            if mode == "repository_checks"
+            else _warning_summary_text(state)
+        ),
+        verdict_text=mode,
+        next_step_text="Author the first candidate.",
+    )
+    return RenderedComment(
+        marker_id=baseline_marker_id(state.identity.job_id),
+        title=title,
+        body=body,
+    )
+
+
+def _render_repository_check_candidate_update(
+    state: JobState,
+    candidate_id: str,
+) -> RenderedComment:
+    candidate = state.candidate(candidate_id)
+    assert candidate is not None and candidate.assessment is not None
+    finalized = candidate.finalized
+    change_hash = "n/a" if finalized is None else finalized.hashes.patch_sha256
+    source_tree_hash = "n/a" if finalized is None else finalized.hashes.source_tree_sha256
+    source_zip_hash = "n/a" if finalized is None else finalized.hashes.source_zip_sha256
+    body = _render_document(
+        title=f"Candidate update: {candidate_id}",
+        context_lines=(
+            f"- Shared commit: `{state.identity.shared_commit}`",
+            f"- Base commit: `{state.identity.base_commit if finalized is None else finalized.base_commit}`",
+            f"- Parent candidate: `{candidate.handoff.parent_id or 'baseline'}`",
+            f"- Model: `{_safe_text(candidate.handoff.model)}`",
+            f"- Hypothesis: {_safe_text(candidate.handoff.hypothesis)}",
+            f"- Change hash: `{change_hash}`",
+            f"- Source tree hash: `{source_tree_hash}`",
+            f"- Source ZIP hash: `{source_zip_hash}`",
+            f"- Verification mode: `{state.verification_mode}`",
+        ),
+        metrics_table=_repository_check_metrics_table(candidate),
+        guardrail_lines=_candidate_repository_check_lines(candidate),
+        improved_text=(
+            "All configured repository checks passed."
+            if _checks_passed(candidate.repository_checks)
+            else "No repository-check recommendation was earned."
+        ),
+        not_improved_text=(
+            "None."
+            if _checks_passed(candidate.repository_checks)
+            else candidate.assessment.reason
+        ),
+        verdict_text=candidate.assessment.outcome,
+        next_step_text=_candidate_next_step_text(state, candidate.assessment),
+    )
+    return RenderedComment(
+        marker_id=candidate_marker_id(state.identity.job_id, candidate_id),
+        title=f"Candidate update: {candidate_id}",
+        body=body,
+    )
+
+
+def _render_unverified_candidate_update(
+    state: JobState,
+    candidate_id: str,
+) -> RenderedComment:
+    candidate = state.candidate(candidate_id)
+    assert candidate is not None and candidate.assessment is not None
+    finalized = candidate.finalized
+    change_hash = "n/a" if finalized is None else finalized.hashes.patch_sha256
+    source_tree_hash = "n/a" if finalized is None else finalized.hashes.source_tree_sha256
+    source_zip_hash = "n/a" if finalized is None else finalized.hashes.source_zip_sha256
+    body = _render_document(
+        title=f"Candidate update: {candidate_id}",
+        context_lines=(
+            f"- Shared commit: `{state.identity.shared_commit}`",
+            f"- Base commit: `{state.identity.base_commit if finalized is None else finalized.base_commit}`",
+            f"- Parent candidate: `{candidate.handoff.parent_id or 'baseline'}`",
+            f"- Model: `{_safe_text(candidate.handoff.model)}`",
+            f"- Hypothesis: {_safe_text(candidate.handoff.hypothesis)}",
+            f"- Change hash: `{change_hash}`",
+            f"- Source tree hash: `{source_tree_hash}`",
+            f"- Source ZIP hash: `{source_zip_hash}`",
+            f"- Verification mode: `{state.verification_mode}`",
+        ),
+        metrics_table=_unverified_metrics_table(candidate),
+        guardrail_lines=_resolution_warning_lines(state),
+        improved_text="Candidate prepared for human review only.",
+        not_improved_text=_warning_summary_text(state),
+        verdict_text=candidate.assessment.outcome,
+        next_step_text=_candidate_next_step_text(state, candidate.assessment),
+    )
+    return RenderedComment(
+        marker_id=candidate_marker_id(state.identity.job_id, candidate_id),
+        title=f"Candidate update: {candidate_id}",
+        body=body,
+    )
+
+
+def _render_nonquantitative_final_recommendation(
+    state: JobState,
+    decision: Decision,
+) -> RenderedComment:
+    selected_id = decision.selected_candidate_id
+    candidate = None if selected_id is None else state.candidate(selected_id)
+    finalized = None if candidate is None else candidate.finalized
+    change_hash = "n/a" if finalized is None else finalized.hashes.patch_sha256
+    source_tree_hash = "n/a" if finalized is None else finalized.hashes.source_tree_sha256
+    source_zip_hash = "n/a" if finalized is None else finalized.hashes.source_zip_sha256
+    hypothesis = "n/a" if candidate is None else _safe_text(candidate.handoff.hypothesis)
+    model = "n/a" if candidate is None else _safe_text(candidate.handoff.model)
+    title = "Final recommendation"
+    body = _render_document(
+        title=title,
+        context_lines=(
+            f"- Shared commit: `{state.identity.shared_commit}`",
+            f"- Base commit: `{state.identity.base_commit}`",
+            f"- Selected candidate: `{selected_id or 'none'}`",
+            f"- Verification mode: `{state.verification_mode}`",
+            f"- Verification provenance: `{_resolution_provenance_text(state)}`",
+            f"- Model: `{model}`",
+            f"- Hypothesis: {hypothesis}",
+            f"- Change hash: `{change_hash}`",
+            f"- Source tree hash: `{source_tree_hash}`",
+            f"- Source ZIP hash: `{source_zip_hash}`",
+        ),
+        metrics_table=(
+            _repository_check_metrics_table(candidate)
+            if state.verification_mode == "repository_checks" and candidate is not None
+            else _final_unverified_metrics_table(state, selected_id)
+        ),
+        guardrail_lines=(
+            _candidate_repository_check_lines(candidate)
+            if state.verification_mode == "repository_checks" and candidate is not None
+            else _resolution_warning_lines(state)
+        ),
+        improved_text=_nonquantitative_final_improved_text(state, decision),
+        not_improved_text=_final_not_improved_text(decision),
+        verdict_text=decision.outcome,
+        next_step_text=_final_next_step_text(decision),
+    )
+    return RenderedComment(
+        marker_id=final_marker_id(state.identity.job_id),
+        title=title,
+        body=body,
+    )
+
+
+def _nonquantitative_final_improved_text(
+    state: JobState,
+    decision: Decision,
+) -> str:
+    if decision.outcome == "recommended":
+        return (
+            f"Selected candidate {decision.selected_candidate_id} passed all configured repository checks."
+        )
+    if decision.outcome == "proposed_unverified":
+        return (
+            f"Selected candidate {decision.selected_candidate_id} is being projected only as an explicitly unverified proposal."
+        )
+    if state.verification_mode == "repository_checks":
+        return "No candidate passed the configured repository checks."
+    return "No unverified proposal was selected."
 
 
 def _render_document(
@@ -329,6 +521,102 @@ def _guardrail_lines(
     return tuple(rendered)
 
 
+def _start_metrics_table(state: JobState) -> tuple[str, ...]:
+    if state.verification_mode == "repository_checks":
+        configured = 0
+        if state.verification is not None and state.verification.repository_checks is not None:
+            configured = len(state.verification.repository_checks.checks)
+        return (
+            "| Metric | Value |",
+            "| --- | --- |",
+            f"| Verification mode | {state.verification_mode} |",
+            f"| Configured repository checks | {configured} |",
+            "| Quantitative baseline | not collected |",
+        )
+    return (
+        "| Metric | Value |",
+        "| --- | --- |",
+        f"| Verification mode | {state.verification_mode} |",
+        "| Quantitative baseline | not collected |",
+        f"| Candidate budget | {state.identity.min_candidates} |",
+    )
+
+
+def _configured_check_lines(state: JobState) -> tuple[str, ...]:
+    if state.verification is None or state.verification.repository_checks is None:
+        return ("- none configured",)
+    return tuple(
+        f"- {_safe_text(check.render())}"
+        for check in state.verification.repository_checks.checks
+    ) or ("- none configured",)
+
+
+def _resolution_warning_lines(state: JobState) -> tuple[str, ...]:
+    if state.verification is None or not state.verification.warnings:
+        return ("- none configured",)
+    return tuple(f"- {_safe_text(warning)}" for warning in state.verification.warnings)
+
+
+def _resolution_provenance_text(state: JobState) -> str:
+    if state.verification is None:
+        return "runtime_metadata_defaults"
+    return ", ".join(state.verification.provenance)
+
+
+def _warning_summary_text(state: JobState) -> str:
+    if state.verification is None or not state.verification.warnings:
+        return "No approved verification evidence is available."
+    return "; ".join(state.verification.warnings)
+
+
+def _repository_check_metrics_table(candidate) -> tuple[str, ...]:
+    return (
+        "| Check | Result |",
+        "| --- | --- |",
+        *(
+            f"| {_safe_text(result.spec.render())} | {'pass' if result.passed else 'fail'} |"
+            for result in candidate.repository_checks
+        ),
+    )
+
+
+def _candidate_repository_check_lines(candidate) -> tuple[str, ...]:
+    if not candidate.repository_checks:
+        return ("- none recorded",)
+    return tuple(
+        f"- {_safe_text(result.spec.render())}: {'pass' if result.passed else 'fail'} ({_safe_text(result.summary)})"
+        for result in candidate.repository_checks
+    )
+
+
+def _checks_passed(results) -> bool:
+    return bool(results) and all(result.passed for result in results)
+
+
+def _unverified_metrics_table(candidate) -> tuple[str, ...]:
+    changed_paths = 0 if candidate.finalized is None else len(candidate.finalized.changed_paths)
+    return (
+        "| Metric | Value |",
+        "| --- | --- |",
+        "| Verification evidence | none |",
+        f"| Changed paths | {changed_paths} |",
+        f"| Candidate ID | {candidate.handoff.candidate_id} |",
+    )
+
+
+def _final_unverified_metrics_table(
+    state: JobState,
+    selected_id: str | None,
+) -> tuple[str, ...]:
+    return (
+        "| Metric | Value |",
+        "| --- | --- |",
+        f"| Verification mode | {state.verification_mode} |",
+        f"| Selected candidate | {selected_id or 'none'} |",
+        f"| Candidate budget | {state.identity.min_candidates} |",
+    )
+
+
 def _candidate_improved_text(assessment: CandidateAssessment) -> str:
     if assessment.outcome in {"keep", "winner"}:
         return (
@@ -348,6 +636,18 @@ def _candidate_not_improved_text(assessment: CandidateAssessment) -> str:
 def _candidate_next_step_text(state: JobState, assessment: CandidateAssessment) -> str:
     if state.completed_candidate_count < state.identity.min_candidates:
         return "Author another candidate."
+    if state.verification_mode == "repository_checks":
+        return (
+            "Project the recommended candidate to the draft PR."
+            if assessment.outcome == "keep"
+            else "Review the next candidate or finish without a recommendation."
+        )
+    if state.verification_mode == "none":
+        return (
+            "Project the selected unverified proposal to the draft PR."
+            if assessment.outcome == "keep"
+            else "Review the next candidate or finish without a proposal."
+        )
     if assessment.outcome == "keep":
         return "Run the validating evaluation for the provisional winner."
     return "Review the next candidate or finish without a winner."
@@ -362,6 +662,14 @@ def _final_improved_text(
             f"Winner {decision.winner_id} achieved aggregate delta "
             f"{_format_optional_float(assessment.aggregate_delta)} with "
             f"{assessment.focused_cases_improved or 0} focused improvements."
+        )
+    if decision.outcome == "recommended":
+        return (
+            f"Selected candidate {decision.selected_candidate_id} passed all configured repository checks."
+        )
+    if decision.outcome == "proposed_unverified":
+        return (
+            f"Selected candidate {decision.selected_candidate_id} is being projected only as an explicitly unverified proposal."
         )
     if decision.outcome == "platform_failure":
         return "The provisional winner could not be confirmed because validation hit a platform failure."
@@ -382,6 +690,10 @@ def _final_not_improved_text(decision: Decision) -> str:
 def _final_next_step_text(decision: Decision) -> str:
     if decision.outcome == "winner":
         return "Review and commit the projected winner patch."
+    if decision.outcome == "recommended":
+        return "Review the projected draft PR changes and merge only after human approval."
+    if decision.outcome == "proposed_unverified":
+        return "Review the projected draft PR changes carefully; merge remains the human approval step."
     if decision.outcome == "platform_failure":
         return "Investigate the validating platform failure before retrying the job."
     return "Close the early draft PR unchanged."

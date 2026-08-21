@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from foundry_opt.poc.candidate import CandidateWorkspace
+from foundry_opt.poc.checks import RepositoryCheckResult
 from foundry_opt.poc.controller import (
     CleanupResult,
     ControllerError,
@@ -14,8 +15,18 @@ from foundry_opt.poc.controller import (
     RunResult,
 )
 from foundry_opt.poc.decision import DecisionRules, EvaluationSummary, GuardrailResult, GuardrailRule
-from foundry_opt.poc.evidence import RenderedComment, final_marker_id
+from foundry_opt.poc.evidence import (
+    RenderedComment,
+    baseline_marker_id,
+    candidate_marker_id,
+    final_marker_id,
+)
 from foundry_opt.poc.state import JobIdentity, JobStateStore
+from foundry_opt.poc.verification import (
+    RepositoryChecksSelection,
+    VerificationResolution,
+)
+from foundry_opt.verification import VerificationCheckSpec
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -156,6 +167,71 @@ class FakeClosure:
         return self.receipts[identity.job_id]
 
 
+class FakeCheckRunner:
+    def __init__(
+        self,
+        *,
+        results: dict[str, tuple[RepositoryCheckResult, ...]],
+    ) -> None:
+        self.results = results
+        self.calls: list[tuple[str, tuple[VerificationCheckSpec, ...]]] = []
+
+    def run_checks(
+        self,
+        candidate: FinalizedCandidate,
+        *,
+        checks: tuple[VerificationCheckSpec, ...],
+    ) -> tuple[RepositoryCheckResult, ...]:
+        self.calls.append((candidate.candidate_id, checks))
+        return self.results[candidate.candidate_id]
+
+
+def _check_result(
+    spec: str,
+    *,
+    passed: bool,
+    summary: str,
+    exit_code: int | None = None,
+) -> RepositoryCheckResult:
+    return RepositoryCheckResult(
+        spec=VerificationCheckSpec.parse_line(spec),
+        passed=passed,
+        exit_code=(0 if passed and exit_code is None else exit_code),
+        duration_seconds=0.25,
+        summary=summary,
+    )
+
+
+def _repository_checks_resolution(
+    *checks: VerificationCheckSpec,
+    warnings: tuple[str, ...] = (),
+) -> VerificationResolution:
+    return VerificationResolution(
+        mode="repository_checks",
+        evaluation_gate_policy="allow_repository_checks",
+        repository_checks=RepositoryChecksSelection(
+            source="issue",
+            checks=checks,
+        ),
+        provenance=("issue_repository_checks",),
+        warnings=warnings,
+        quantitative_decision_allowed=False,
+    )
+
+
+def _none_resolution(
+    *,
+    warnings: tuple[str, ...] = (),
+) -> VerificationResolution:
+    return VerificationResolution(
+        mode="none",
+        evaluation_gate_policy="allow_no_evidence",
+        provenance=("explicit_no_evidence",),
+        warnings=warnings,
+        quantitative_decision_allowed=False,
+    )
+
+
 def _controller_fixture(
     tmp_path: Path,
     *,
@@ -163,6 +239,7 @@ def _controller_fixture(
     candidate_results: dict[str, RunResult],
     validating_results: dict[str, RunResult],
     cleanup_results: dict[str, list[CleanupResult]],
+    check_runner: FakeCheckRunner | None = None,
 ) -> tuple[OptimizeJobController, CandidateWorkspace, JobStateStore, JobIdentity, FakeFoundry, FakeComments, FakeClosure, Path, str]:
     repository, base_commit = _create_repository(tmp_path)
     trusted_root = tmp_path / "trusted"
@@ -205,6 +282,7 @@ def _controller_fixture(
             max_focused_regressions=0,
             guardrails=(GuardrailRule(name="safety", minimum_score=1.0),),
         ),
+        check_runner=check_runner,
     )
     return controller, workspace, store, identity, foundry, comments, closure, repository, base_commit
 
@@ -320,6 +398,204 @@ def test_controller_no_winner_flow(tmp_path: Path) -> None:
     assert final_state.no_winner_receipt is not None
     assert closure.calls == ["job-1"]
     assert foundry.validating_calls == []
+
+
+def test_controller_start_persists_immutable_verification_resolution(
+    tmp_path: Path,
+) -> None:
+    controller, workspace, store, identity, foundry, comments, closure, repository, base_commit = _controller_fixture(
+        tmp_path,
+        min_candidates=1,
+        candidate_results={},
+        validating_results={},
+        cleanup_results={},
+    )
+    resolution = _none_resolution(
+        warnings=(
+            "No approved quantitative or repository verification evidence is available; any selected proposal remains unverified.",
+        )
+    )
+
+    started = controller.start(identity, verification=resolution)
+
+    assert started.verification == resolution
+    assert store.load().verification == resolution
+    assert foundry.baseline_calls == 0
+    assert "Verification plan" in comments.bodies[baseline_marker_id(identity.job_id)]
+
+    replayed = controller.start(identity, verification=resolution)
+
+    assert replayed.verification == resolution
+    assert foundry.baseline_calls == 0
+
+    with pytest.raises(ControllerError, match="verification resolution is immutable"):
+        controller.start(
+            identity,
+            verification=_repository_checks_resolution(
+                VerificationCheckSpec(
+                    kind="command",
+                    value="python -m pytest tests -q",
+                )
+            ),
+        )
+
+
+def test_controller_repository_checks_selects_recommended_candidate_by_id_order(
+    tmp_path: Path,
+) -> None:
+    check_spec = "command: python -m pytest tests -q"
+    parsed_check = VerificationCheckSpec.parse_line(check_spec)
+    check_runner = FakeCheckRunner(
+        results={
+            "candidate-one": (
+                _check_result(
+                    check_spec,
+                    passed=True,
+                    summary="Command passed.",
+                ),
+            ),
+            "candidate-two": (
+                _check_result(
+                    check_spec,
+                    passed=True,
+                    summary="Command passed.",
+                ),
+            ),
+        }
+    )
+    controller, workspace, store, identity, foundry, comments, closure, repository, base_commit = _controller_fixture(
+        tmp_path,
+        min_candidates=2,
+        candidate_results={},
+        validating_results={},
+        cleanup_results={},
+        check_runner=check_runner,
+    )
+
+    controller.start(
+        identity,
+        verification=_repository_checks_resolution(parsed_check),
+    )
+    assert "Verification plan" in comments.bodies[baseline_marker_id(identity.job_id)]
+    assert "No quantitative baseline will be claimed." in comments.bodies[
+        baseline_marker_id(identity.job_id)
+    ]
+
+    two = controller.handoff_candidate(
+        "candidate-two",
+        model="gpt-5-mini",
+        hypothesis="second candidate",
+    )
+    (two.workspace_path / "src/app.py").write_text(
+        "VALUE = 'candidate-two'\n",
+        encoding="utf-8",
+    )
+    controller.complete_candidate("candidate-two")
+
+    one = controller.handoff_candidate(
+        "candidate-one",
+        model="gpt-5-mini",
+        hypothesis="first candidate",
+    )
+    (one.workspace_path / "src/app.py").write_text(
+        "VALUE = 'candidate-one'\n",
+        encoding="utf-8",
+    )
+    controller.complete_candidate("candidate-one")
+
+    destination = tmp_path / "destination"
+    _git(repository, "worktree", "add", "--detach", str(destination), base_commit)
+    state = controller.finish(destination)
+
+    assert state.terminal_outcome == "recommended"
+    assert state.selected_candidate_id == "candidate-one"
+    assert state.final_winner_id is None
+    assert state.projection_receipt is not None
+    assert state.projection_receipt.candidate_id == "candidate-one"
+    assert state.no_winner_receipt is None
+    assert state.decision is not None
+    assert state.decision.outcome == "recommended"
+    assert "candidate ID order" in state.decision.reason
+    assert foundry.baseline_calls == 0
+    assert foundry.candidate_calls == []
+    assert foundry.validating_calls == []
+    assert check_runner.calls == [
+        ("candidate-two", (parsed_check,)),
+        ("candidate-one", (parsed_check,)),
+    ]
+    assert "winner" not in comments.bodies[
+        candidate_marker_id(identity.job_id, "candidate-one")
+    ].casefold()
+    final_body = comments.bodies[final_marker_id(identity.job_id)]
+    assert "Provisional winner" not in final_body
+    assert "Final winner" not in final_body
+    assert "Review the projected draft PR changes and merge only after human approval." in final_body
+    assert (destination / "src/app.py").read_text(encoding="utf-8") == "VALUE = 'candidate-one'\n"
+
+
+def test_controller_none_mode_selects_unverified_candidate_by_id_order_and_replays_terminal_state(
+    tmp_path: Path,
+) -> None:
+    warning = (
+        "No approved quantitative or repository verification evidence is available; any selected proposal remains unverified."
+    )
+    controller, workspace, store, identity, foundry, comments, closure, repository, base_commit = _controller_fixture(
+        tmp_path,
+        min_candidates=2,
+        candidate_results={},
+        validating_results={},
+        cleanup_results={},
+    )
+
+    controller.start(identity, verification=_none_resolution(warnings=(warning,)))
+
+    two = controller.handoff_candidate(
+        "candidate-two",
+        model="gpt-5-mini",
+        hypothesis="second proposal",
+    )
+    (two.workspace_path / "src/app.py").write_text(
+        "VALUE = 'candidate-two'\n",
+        encoding="utf-8",
+    )
+    controller.complete_candidate("candidate-two")
+
+    one = controller.handoff_candidate(
+        "candidate-one",
+        model="gpt-5-mini",
+        hypothesis="first proposal",
+    )
+    (one.workspace_path / "src/app.py").write_text(
+        "VALUE = 'candidate-one'\n",
+        encoding="utf-8",
+    )
+    controller.complete_candidate("candidate-one")
+
+    destination = tmp_path / "destination"
+    _git(repository, "worktree", "add", "--detach", str(destination), base_commit)
+    state = controller.finish(destination)
+    replayed = controller.finish(destination)
+
+    assert state.terminal_outcome == "proposed_unverified"
+    assert state.selected_candidate_id == "candidate-one"
+    assert state.final_winner_id is None
+    assert state.projection_receipt is not None
+    assert state.projection_receipt.candidate_id == "candidate-one"
+    assert state.no_winner_receipt is None
+    assert state.decision is not None
+    assert state.decision.outcome == "proposed_unverified"
+    assert "candidate ID order" in state.decision.reason
+    assert foundry.baseline_calls == 0
+    assert foundry.candidate_calls == []
+    assert foundry.validating_calls == []
+    final_body = comments.bodies[final_marker_id(identity.job_id)]
+    assert "explicitly unverified proposal" in final_body
+    assert "Provisional winner" not in final_body
+    assert "Final winner" not in final_body
+    assert replayed.projection_receipt == state.projection_receipt
+    assert replayed.final_comment_receipt == state.final_comment_receipt
+    assert comments.upsert_count_by_marker[final_marker_id(identity.job_id)] == 1
+    assert (destination / "src/app.py").read_text(encoding="utf-8") == "VALUE = 'candidate-one'\n"
 
 
 def test_controller_marks_invalid_candidate_without_foundry_evaluation(tmp_path: Path) -> None:

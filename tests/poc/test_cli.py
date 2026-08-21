@@ -16,8 +16,10 @@ from foundry_opt import cli as cli_module
 from foundry_opt.cli import app
 from foundry_opt.poc.bootstrap import BootstrapReceipt, write_bootstrap_receipt
 from foundry_opt.poc.candidate import CandidateWorkspace
+from foundry_opt.poc.checks import RepositoryCheckResult
 from foundry_opt.poc.controller import CleanupResult, OptimizeJobController, RunResult
 from foundry_opt.poc.decision import DecisionRules, EvaluationSummary, GuardrailResult, GuardrailRule
+from foundry_opt.poc.evidence import baseline_marker_id, final_marker_id
 from foundry_opt.poc.foundry import (
     DraftReference,
     EvaluationEvidence,
@@ -54,6 +56,7 @@ from foundry_opt.poc.runtime import (
     load_runtime_settings,
 )
 from foundry_opt.poc.state import JobIdentity, JobStateStore
+from foundry_opt.verification import VerificationCheckSpec
 
 
 runner = CliRunner()
@@ -417,6 +420,25 @@ class _FakeFoundryClient:
         return self.route
 
 
+class FakeCheckRunner:
+    def __init__(
+        self,
+        *,
+        results: dict[str, tuple[RepositoryCheckResult, ...]],
+    ) -> None:
+        self.results = results
+        self.calls: list[tuple[str, tuple[VerificationCheckSpec, ...]]] = []
+
+    def run_checks(
+        self,
+        candidate,
+        *,
+        checks: tuple[VerificationCheckSpec, ...],
+    ) -> tuple[RepositoryCheckResult, ...]:
+        self.calls.append((candidate.candidate_id, checks))
+        return self.results[candidate.candidate_id]
+
+
 class ControllerHarness:
     def __init__(
         self,
@@ -424,6 +446,7 @@ class ControllerHarness:
         candidate_results: dict[str, RunResult],
         validating_results: dict[str, RunResult],
         cleanup_results: dict[str, list[CleanupResult]],
+        check_results: dict[str, tuple[RepositoryCheckResult, ...]] | None = None,
     ) -> None:
         self.foundry = FakeFoundry(
             baseline=RunResult(status="ok", evaluation=_summary("development", 0.50)),
@@ -433,6 +456,9 @@ class ControllerHarness:
         )
         self.comments = FakeComments()
         self.closure = FakeClosure()
+        self.check_runner = (
+            None if check_results is None else FakeCheckRunner(results=check_results)
+        )
         self.settings_seen: list[RuntimeSettings] = []
 
     def builder(
@@ -466,6 +492,7 @@ class ControllerHarness:
             comments=self.comments,
             closure=self.closure,
             rules=_controller_rules(settings.policy),
+            check_runner=self.check_runner,
         )
 
 
@@ -477,11 +504,13 @@ class BrokerControllerHarness(ControllerHarness):
         candidate_results: dict[str, RunResult],
         validating_results: dict[str, RunResult],
         cleanup_results: dict[str, list[CleanupResult]],
+        check_results: dict[str, tuple[RepositoryCheckResult, ...]] | None = None,
     ) -> None:
         super().__init__(
             candidate_results=candidate_results,
             validating_results=validating_results,
             cleanup_results=cleanup_results,
+            check_results=check_results,
         )
         self.broker = broker
 
@@ -518,6 +547,7 @@ class BrokerControllerHarness(ControllerHarness):
             comments=BrokerIssueComments(client=self.broker, sidecars=sidecars),
             closure=BrokerClosure(client=self.broker, sidecars=sidecars),
             rules=_controller_rules(settings.policy),
+            check_runner=self.check_runner,
         )
 
 
@@ -537,15 +567,34 @@ def _controller_rules(policy) -> DecisionRules:
     )
 
 
+def _check_result(
+    spec: str,
+    *,
+    passed: bool,
+    summary: str,
+    exit_code: int | None = None,
+) -> RepositoryCheckResult:
+    return RepositoryCheckResult(
+        spec=VerificationCheckSpec.parse_line(spec),
+        passed=passed,
+        exit_code=(0 if passed and exit_code is None else exit_code),
+        duration_seconds=0.25,
+        summary=summary,
+    )
+
+
 def _issue_body(
     *,
     candidate_budget: int,
     model_lines: tuple[str, ...] = (),
     editable_scope_lines: tuple[str, ...] = (),
+    verification_dataset: str | None = None,
+    verification_check_lines: tuple[str, ...] = (),
+    acknowledge_no_evidence: bool = False,
 ) -> str:
     models = "_No response_" if not model_lines else "\n".join(model_lines)
     editable_scope = "_No response_" if not editable_scope_lines else "\n".join(editable_scope_lines)
-    return f"""### Optimization goal
+    body = f"""### Optimization goal
 
 Improve coverage.
 
@@ -569,6 +618,25 @@ Preserve safety.
 
 {models}
 """
+    if verification_dataset is not None:
+        body += f"""
+### Optional exact verification dataset ID or URI
+
+{verification_dataset}
+"""
+    if verification_check_lines:
+        body += """
+### Optional verification commands or checks
+
+```text
+""" + "\n".join(verification_check_lines) + "\n```\n"
+    if acknowledge_no_evidence:
+        body += """
+### Optional no-evidence acknowledgement
+
+acknowledge
+"""
+    return body
 
 
 def _write_issue_event(tmp_path: Path, *, body: str, issue_number: int = 7) -> Path:
@@ -1851,7 +1919,8 @@ def test_job_complete_blocks_on_candidate_comment_outage_and_replays_after_recov
 
     assert replay.exit_code == 0, replay.stdout
     replay_payload = json.loads(replay.stdout)
-    assert replay_payload["next_action"] == "finish"
+    assert replay_payload["next_action"] == "blocked"
+    assert replay_payload["blocker"] == "pull request binding is required for draft projection"
     state = JobStateStore(paths.job_state_path).load()
     candidate = state.candidate("candidate-one")
     assert candidate is not None
@@ -2425,6 +2494,407 @@ def test_job_replay_status_and_resume_are_idempotent(
     assert harness.foundry.candidate_calls == ["candidate-one"]
     assert harness.foundry.validating_calls == ["candidate-one"]
     assert harness.foundry.cleanup_calls == ["draft-one"]
+
+
+def test_job_repository_checks_mode_blocks_until_binding_and_projects_recommendation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repository, _, environment = _create_runtime_repository(tmp_path)
+    _checkout_branch(repository, "copilot/job-7")
+    check_spec = "command: python -m pytest tests -q"
+    event = _write_issue_event(
+        tmp_path,
+        body=_issue_body(
+            candidate_budget=1,
+            model_lines=("candidate",),
+            verification_check_lines=(check_spec,),
+        ),
+    )
+    harness = ControllerHarness(
+        candidate_results={},
+        validating_results={},
+        cleanup_results={},
+        check_results={
+            "candidate-one": (
+                _check_result(
+                    check_spec,
+                    passed=True,
+                    summary="Command passed.",
+                ),
+            ),
+        },
+    )
+
+    class StableBroker:
+        def __init__(self, *, socket_path: Path) -> None:
+            del socket_path
+
+        def ensure_pull_request_binding(
+            self,
+            *,
+            request_id: str,
+            head_branch: str,
+            timeout_seconds: float,
+        ) -> None:
+            del request_id, head_branch, timeout_seconds
+
+    monkeypatch.setattr(cli_module, "capture_route_fingerprint", lambda **_: _route())
+    monkeypatch.setattr(cli_module, "build_runtime_controller", harness.builder)
+    monkeypatch.setattr(cli_module, "UnixSocketBrokerClient", StableBroker)
+
+    start = _invoke(
+        ["job", "start", "--repository", str(repository), "--event", str(event)],
+        environment,
+    )
+    assert start.exit_code == 0, start.stdout
+    start_payload = json.loads(start.stdout)
+    assert start_payload["job"]["verification"]["mode"] == "repository_checks"
+    assert start_payload["job"]["verification"]["provenance"] == ["issue_repository_checks"]
+    assert start_payload["job"]["verification"]["repository_checks"] == [
+        {"kind": "command", "value": "python -m pytest tests -q"}
+    ]
+    assert start_payload["baseline"]["evaluation"] is None
+    baseline_body = harness.comments.bodies[baseline_marker_id("optimize-7")]
+    assert "Verification plan" in baseline_body
+    assert "No quantitative baseline will be claimed." in baseline_body
+
+    handoff = _invoke(
+        [
+            "job",
+            "handoff",
+            "--repository",
+            str(repository),
+            "--event",
+            str(event),
+            "--candidate",
+            "candidate-one",
+            "--model",
+            "candidate",
+            "--hypothesis",
+            "working improvement",
+        ],
+        environment,
+    )
+    workspace = Path(json.loads(handoff.stdout)["candidate"]["workspace"])
+    (workspace / "src" / "main.py").write_text(
+        "VALUE = 'candidate-one'\n",
+        encoding="utf-8",
+    )
+
+    complete = _invoke(
+        [
+            "job",
+            "complete",
+            "--repository",
+            str(repository),
+            "--event",
+            str(event),
+            "--candidate",
+            "candidate-one",
+        ],
+        environment,
+    )
+    assert complete.exit_code == 0, complete.stdout
+    complete_payload = json.loads(complete.stdout)
+    assert complete_payload["next_action"] == "blocked"
+    assert complete_payload["blocker"] == "pull request binding is required for draft projection"
+    assert complete_payload["decision"]["outcome"] == "recommended"
+    assert complete_payload["decision"]["selected_candidate_id"] == "candidate-one"
+    assert complete_payload["decision"]["winner_id"] is None
+    assert complete_payload["candidates"][0]["assessment"]["outcome"] == "keep"
+    assert complete_payload["candidates"][0]["repository_checks"] == [
+        {
+            "kind": "command",
+            "value": "python -m pytest tests -q",
+            "passed": True,
+            "exit_code": 0,
+            "duration_seconds": 0.25,
+            "summary": "Command passed.",
+        }
+    ]
+
+    status = _invoke(
+        ["job", "status", "--repository", str(repository), "--event", str(event)],
+        environment,
+    )
+    status_payload = json.loads(status.stdout)
+    assert status_payload["next_action"] == "blocked"
+    assert status_payload["job"]["verification"]["mode"] == "repository_checks"
+
+    resume = _invoke(
+        ["job", "resume", "--repository", str(repository), "--event", str(event)],
+        environment,
+    )
+    resume_payload = json.loads(resume.stdout)
+    assert resume_payload["next_action"] == "blocked"
+    assert resume_payload["resumed"] is True
+
+    binding = _write_binding(
+        tmp_path / "binding.json",
+        pull_request=_pull_request_binding(repository),
+    )
+    environment[cli_module._GITHUB_BINDING_ENV] = str(binding)
+
+    finish = _invoke(
+        ["job", "finish", "--repository", str(repository), "--event", str(event)],
+        environment,
+    )
+    assert finish.exit_code == 0, finish.stdout
+    finish_payload = json.loads(finish.stdout)
+    assert finish_payload["job"]["terminal_outcome"] == "recommended"
+    assert finish_payload["decision"]["outcome"] == "recommended"
+    assert finish_payload["decision"]["winner_id"] is None
+    assert finish_payload["next_action"] == "terminal"
+    assert harness.closure.calls == []
+    final_body = harness.comments.bodies[final_marker_id("optimize-7")]
+    assert "Review the projected draft PR changes and merge only after human approval." in final_body
+    assert "Provisional winner" not in final_body
+    assert "Final winner" not in final_body
+    assert (repository / "src" / "main.py").read_text(encoding="utf-8") == "VALUE = 'candidate-one'\n"
+
+
+def test_job_repository_checks_failure_never_recommends_and_closes_no_winner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repository, _, environment = _create_runtime_repository(tmp_path)
+    _checkout_branch(repository, "copilot/job-7")
+    check_spec = "command: python -m pytest tests -q"
+    event = _write_issue_event(
+        tmp_path,
+        body=_issue_body(
+            candidate_budget=1,
+            model_lines=("candidate",),
+            verification_check_lines=(check_spec,),
+        ),
+    )
+    binding = _write_binding(
+        tmp_path / "binding.json",
+        pull_request=_pull_request_binding(repository),
+    )
+    environment[cli_module._GITHUB_BINDING_ENV] = str(binding)
+    harness = ControllerHarness(
+        candidate_results={},
+        validating_results={},
+        cleanup_results={},
+        check_results={
+            "candidate-one": (
+                _check_result(
+                    check_spec,
+                    passed=False,
+                    exit_code=1,
+                    summary="Command exited with code 1.",
+                ),
+            ),
+        },
+    )
+    monkeypatch.setattr(cli_module, "capture_route_fingerprint", lambda **_: _route())
+    monkeypatch.setattr(cli_module, "build_runtime_controller", harness.builder)
+
+    start = _invoke(
+        ["job", "start", "--repository", str(repository), "--event", str(event)],
+        environment,
+    )
+    assert start.exit_code == 0, start.stdout
+    assert json.loads(start.stdout)["job"]["verification"]["mode"] == "repository_checks"
+
+    handoff = _invoke(
+        [
+            "job",
+            "handoff",
+            "--repository",
+            str(repository),
+            "--event",
+            str(event),
+            "--candidate",
+            "candidate-one",
+            "--model",
+            "candidate",
+            "--hypothesis",
+            "failing checks",
+        ],
+        environment,
+    )
+    workspace = Path(json.loads(handoff.stdout)["candidate"]["workspace"])
+    (workspace / "src" / "main.py").write_text(
+        "VALUE = 'candidate-one'\n",
+        encoding="utf-8",
+    )
+
+    complete = _invoke(
+        [
+            "job",
+            "complete",
+            "--repository",
+            str(repository),
+            "--event",
+            str(event),
+            "--candidate",
+            "candidate-one",
+        ],
+        environment,
+    )
+    assert complete.exit_code == 0, complete.stdout
+    complete_payload = json.loads(complete.stdout)
+    assert complete_payload["next_action"] == "finish"
+    assert complete_payload["decision"]["outcome"] == "no_winner"
+    assert complete_payload["decision"]["selected_candidate_id"] is None
+    assert complete_payload["decision"]["winner_id"] is None
+    assert complete_payload["baseline"]["evaluation"] is None
+
+    finish = _invoke(
+        ["job", "finish", "--repository", str(repository), "--event", str(event)],
+        environment,
+    )
+    assert finish.exit_code == 0, finish.stdout
+    finish_payload = json.loads(finish.stdout)
+    assert finish_payload["job"]["terminal_outcome"] == "no_winner"
+    assert finish_payload["decision"]["winner_id"] is None
+    assert finish_payload["next_action"] == "terminal"
+    assert harness.closure.calls == ["optimize-7"]
+    final_body = harness.comments.bodies[final_marker_id("optimize-7")]
+    assert "No candidate passed the configured repository checks." in final_body
+    assert "Final winner" not in final_body
+    assert (repository / "src" / "main.py").read_text(encoding="utf-8") == "VALUE = 'base'\n"
+
+
+def test_job_none_mode_acknowledgement_persists_warning_and_projects_unverified_proposal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repository, _, environment = _create_runtime_repository(tmp_path)
+    _checkout_branch(repository, "copilot/job-7")
+    event = _write_issue_event(
+        tmp_path,
+        body=_issue_body(
+            candidate_budget=1,
+            model_lines=("candidate",),
+            acknowledge_no_evidence=True,
+        ),
+    )
+    harness = ControllerHarness(
+        candidate_results={},
+        validating_results={},
+        cleanup_results={},
+    )
+
+    class StableBroker:
+        def __init__(self, *, socket_path: Path) -> None:
+            del socket_path
+
+        def ensure_pull_request_binding(
+            self,
+            *,
+            request_id: str,
+            head_branch: str,
+            timeout_seconds: float,
+        ) -> None:
+            del request_id, head_branch, timeout_seconds
+
+    monkeypatch.setattr(cli_module, "capture_route_fingerprint", lambda **_: _route())
+    monkeypatch.setattr(cli_module, "build_runtime_controller", harness.builder)
+    monkeypatch.setattr(cli_module, "UnixSocketBrokerClient", StableBroker)
+
+    start = _invoke(
+        ["job", "start", "--repository", str(repository), "--event", str(event)],
+        environment,
+    )
+    assert start.exit_code == 0, start.stdout
+    start_payload = json.loads(start.stdout)
+    assert start_payload["job"]["verification"]["mode"] == "none"
+    assert start_payload["job"]["verification"]["provenance"] == ["explicit_no_evidence"]
+    assert start_payload["job"]["verification"]["warnings"] == [
+        "No approved quantitative or repository verification evidence is available; any selected proposal remains unverified."
+    ]
+    assert start_payload["baseline"]["evaluation"] is None
+    state_paths = load_runtime_paths(repository, environment=environment, job_id="optimize-7")
+    persisted = JobStateStore(state_paths.job_state_path).load()
+    assert persisted.verification is not None
+    assert persisted.verification.mode == "none"
+
+    handoff = _invoke(
+        [
+            "job",
+            "handoff",
+            "--repository",
+            str(repository),
+            "--event",
+            str(event),
+            "--candidate",
+            "candidate-one",
+            "--model",
+            "candidate",
+            "--hypothesis",
+            "human-review proposal",
+        ],
+        environment,
+    )
+    workspace = Path(json.loads(handoff.stdout)["candidate"]["workspace"])
+    (workspace / "src" / "main.py").write_text(
+        "VALUE = 'candidate-one'\n",
+        encoding="utf-8",
+    )
+
+    complete = _invoke(
+        [
+            "job",
+            "complete",
+            "--repository",
+            str(repository),
+            "--event",
+            str(event),
+            "--candidate",
+            "candidate-one",
+        ],
+        environment,
+    )
+    assert complete.exit_code == 0, complete.stdout
+    complete_payload = json.loads(complete.stdout)
+    assert complete_payload["next_action"] == "blocked"
+    assert complete_payload["blocker"] == "pull request binding is required for draft projection"
+    assert complete_payload["decision"]["outcome"] == "proposed_unverified"
+    assert complete_payload["decision"]["selected_candidate_id"] == "candidate-one"
+    assert complete_payload["decision"]["winner_id"] is None
+
+    status = _invoke(
+        ["job", "status", "--repository", str(repository), "--event", str(event)],
+        environment,
+    )
+    status_payload = json.loads(status.stdout)
+    assert status_payload["next_action"] == "blocked"
+    assert status_payload["job"]["verification"]["warnings"] == start_payload["job"]["verification"]["warnings"]
+
+    resume = _invoke(
+        ["job", "resume", "--repository", str(repository), "--event", str(event)],
+        environment,
+    )
+    resume_payload = json.loads(resume.stdout)
+    assert resume_payload["next_action"] == "blocked"
+    assert resume_payload["resumed"] is True
+
+    binding = _write_binding(
+        tmp_path / "binding.json",
+        pull_request=_pull_request_binding(repository),
+    )
+    environment[cli_module._GITHUB_BINDING_ENV] = str(binding)
+
+    finish = _invoke(
+        ["job", "finish", "--repository", str(repository), "--event", str(event)],
+        environment,
+    )
+    assert finish.exit_code == 0, finish.stdout
+    finish_payload = json.loads(finish.stdout)
+    assert finish_payload["job"]["terminal_outcome"] == "proposed_unverified"
+    assert finish_payload["decision"]["winner_id"] is None
+    assert finish_payload["next_action"] == "terminal"
+    assert harness.closure.calls == []
+    final_body = harness.comments.bodies[final_marker_id("optimize-7")]
+    assert "explicitly unverified proposal" in final_body
+    assert "merge remains the human approval step" in final_body
+    assert "Provisional winner" not in final_body
+    assert "Final winner" not in final_body
+    assert (repository / "src" / "main.py").read_text(encoding="utf-8") == "VALUE = 'candidate-one'\n"
 
 
 def test_job_resume_succeeds_when_runtime_is_unchanged(

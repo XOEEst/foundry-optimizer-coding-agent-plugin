@@ -106,6 +106,12 @@ from foundry_opt.poc.state import (
     StateError,
 )
 from foundry_opt.poc.source import SourcePackagingError
+from foundry_opt.poc.verification import (
+    FoundryEvaluationPlan,
+    FoundryEvaluationSelection,
+    VerificationResolution,
+    resolve_verification,
+)
 
 
 app = typer.Typer(no_args_is_help=True, pretty_exceptions_enable=False)
@@ -195,6 +201,7 @@ class _JobRuntimeContext:
     settings: RuntimeSettings
     request: OptimizeIssueRequest
     request_digest_sha256: str
+    verification_resolution: VerificationResolution
     state: JobState | None
     controller: OptimizeJobController | None
     binding: _LoadedBinding | None
@@ -225,6 +232,19 @@ class _PullRequestBindingInputs:
 class _AcceptanceFoundryHandle:
     operations: ControllerFoundryOperations
     close: Callable[[], None]
+
+
+@dataclass(frozen=True, slots=True)
+class _SyntheticVerificationSettings:
+    evaluation_gate_policy: str
+    repository_checks: tuple[object, ...] = ()
+    bundle: object | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _SyntheticVerificationProfile:
+    verification: _SyntheticVerificationSettings
+    foundry_evaluation_plan: FoundryEvaluationPlan | None = None
 
 
 @app.command()
@@ -817,7 +837,10 @@ def job_start(
             state_root=state_root,
             deadline_seconds=deadline_seconds,
         )
-        state = runtime.controller.start(runtime.identity)
+        state = runtime.controller.start(
+            runtime.identity,
+            verification=runtime.verification_resolution,
+        )
         refreshed_binding = _ensure_runtime_pull_request_binding(
             runtime=runtime,
             identity=runtime.identity,
@@ -1338,6 +1361,11 @@ def _prepare_start_runtime(
     if not paths.job_state_path.is_file():
         _delete_file_if_present(_issue_request_path(paths.job_root))
     request_digest_sha256 = _request_digest(start.request)
+    verification_resolution = _resolve_runtime_verification(
+        repository_root=repository_root,
+        settings=narrowed,
+        request=start.request,
+    )
     route = capture_route_fingerprint(
         repository=repository_root,
         environment=os.environ,
@@ -1358,18 +1386,20 @@ def _prepare_start_runtime(
         paths=paths,
         settings=narrowed,
         captured_route=route,
+        verification_resolution=verification_resolution,
         deadline_seconds=deadline_seconds,
     )
     return _JobRuntimeContext(
-        repository_root=repository_root,
+    repository_root=repository_root,
         paths=paths,
         settings=narrowed,
         request=start.request,
         request_digest_sha256=request_digest_sha256,
-        state=None,
-        controller=controller,
-        binding=start.binding,
-        identity=identity,
+    verification_resolution=verification_resolution,
+    state=None,
+    controller=controller,
+    binding=start.binding,
+    identity=identity,
     )
 
 
@@ -1429,9 +1459,18 @@ def _load_existing_runtime(
             "persisted optimize-job issue request does not match the current issue body"
         )
     narrowed = _narrow_runtime_settings(settings, request)
+    verification_resolution = _resolve_runtime_verification(
+        repository_root=repository_root,
+        settings=narrowed,
+        request=request,
+    )
     if state.identity.min_candidates != narrowed.policy.min_candidates:
         raise RuntimeIntegrationError(
             "persisted optimize-job issue request does not match the trusted optimize-job identity"
+        )
+    if state.verification is not None and state.verification != verification_resolution:
+        raise RuntimeIntegrationError(
+            "persisted optimize-job verification resolution does not match current runtime inputs"
         )
     _assert_persisted_runtime_identity(
         state=state,
@@ -1453,6 +1492,7 @@ def _load_existing_runtime(
             paths=paths,
             settings=narrowed,
             captured_route=state.identity.route_fingerprint,
+            verification_resolution=verification_resolution,
             deadline_seconds=deadline_seconds,
         )
     return _JobRuntimeContext(
@@ -1461,6 +1501,7 @@ def _load_existing_runtime(
         settings=narrowed,
         request=request,
         request_digest_sha256=request_digest_sha256,
+        verification_resolution=verification_resolution,
         state=state,
         controller=controller,
         binding=loaded_binding,
@@ -1688,23 +1729,82 @@ def _load_issue_event(path: Path) -> tuple[IssueBinding, str]:
 
 def _issue_request_from_body(body: str) -> OptimizeIssueRequest:
     parsed = parse_issue_body(body)
-    return OptimizeIssueRequest(
-        repo_agent_id=None if parsed.target == "default" else parsed.target,
-        goal=parsed.goal,
-        observed_failures=(parsed.observed_failures,),
-        constraints=(parsed.constraints,),
-        candidate_budget=parsed.candidate_budget,
-        model_subset=parsed.candidate_models or None,
-        editable_scope_subset=parsed.editable_scope or None,
-        issue_evaluators=list(parsed.issue_evaluators) or None,
-        verification_dataset=parsed.verification_dataset,
-        verification_checks=list(parsed.verification_checks) or None,
-        acknowledge_no_evidence=parsed.acknowledge_no_evidence,
+    return OptimizeIssueRequest.from_document(
+        {
+            "target": parsed.target,
+            "goal": parsed.goal,
+            "observed_failures": [parsed.observed_failures],
+            "constraints": [parsed.constraints],
+            "candidate_budget": parsed.candidate_budget,
+            "model_subset": list(parsed.candidate_models) or None,
+            "editable_scope_subset": list(parsed.editable_scope) or None,
+            "issue_evaluators": list(parsed.issue_evaluators) or None,
+            "verification_dataset": parsed.verification_dataset,
+            "verification_checks": list(parsed.verification_checks) or None,
+            "acknowledge_no_evidence": parsed.acknowledge_no_evidence,
+        }
     )
 
 
 def _issue_request_path(job_root: Path) -> Path:
     return (job_root / _ISSUE_REQUEST_FILENAME).resolve(strict=False)
+
+
+def _runtime_foundry_plan(settings: RuntimeSettings) -> FoundryEvaluationPlan:
+    return FoundryEvaluationPlan(
+        development_definition_id=settings.metadata.development_evaluation.resolved_evaluation_id,
+        development_dataset_id=settings.metadata.development_evaluation.dataset_id,
+        development_evaluator_ids=settings.metadata.development_evaluation.custom_evaluator_ids,
+        validating_definition_id=settings.metadata.validating_evaluation.resolved_evaluation_id,
+        validating_dataset_id=settings.metadata.validating_evaluation.dataset_id,
+        validating_evaluator_ids=settings.metadata.validating_evaluation.custom_evaluator_ids,
+    )
+
+
+def _legacy_foundry_resolution(settings: RuntimeSettings) -> VerificationResolution:
+    return VerificationResolution(
+        mode="foundry_evaluation",
+        evaluation_gate_policy="require_foundry_evaluation",
+        foundry_evaluation=FoundryEvaluationSelection(
+            source="runtime_metadata",
+            defaults=_runtime_foundry_plan(settings),
+        ),
+        provenance=("runtime_metadata_defaults",),
+        quantitative_decision_allowed=True,
+    )
+
+
+def _resolve_runtime_verification(
+    *,
+    repository_root: Path,
+    settings: RuntimeSettings,
+    request: OptimizeIssueRequest,
+) -> VerificationResolution:
+    if request.explicit_target is None and (repository_root / ".foundry-opt" / "registry.yaml").is_file():
+        selection = resolve_registry_selection(
+            repository_root,
+            repo_agent_id=(
+                None if request.repo_agent_id == "default" else request.repo_agent_id
+            ),
+            explicit_target=request.explicit_target,
+        )
+        return resolve_verification(profile=selection.sidecar, issue=request)
+    synthetic = _SyntheticVerificationProfile(
+        verification=_SyntheticVerificationSettings(
+            evaluation_gate_policy="allow_no_evidence",
+        ),
+        foundry_evaluation_plan=_runtime_foundry_plan(settings),
+    )
+    resolution = resolve_verification(profile=synthetic, issue=request)
+    if (
+        resolution.mode == "none"
+        and request.issue_evaluators is None
+        and request.verification_dataset is None
+        and request.verification_checks is None
+        and not request.acknowledge_no_evidence
+    ):
+        return _legacy_foundry_resolution(settings)
+    return resolution
 
 
 def _persist_issue_request(path: Path, request: OptimizeIssueRequest) -> str:
@@ -1907,15 +2007,17 @@ def _job_payload(
     policy: RepositoryPolicy | None = None,
     pull_request_binding_present: bool = False,
 ) -> dict[str, Any]:
+    baseline_payload = None
+    if state.baseline is not None:
+        baseline_payload = {
+            "comment_recorded": state.baseline.comment_receipt is not None,
+            "evaluation": _evaluation_payload(state.baseline.evaluation),
+        }
+        evaluation_payload = _evaluation_payload(state.baseline.evaluation)
+        if evaluation_payload is not None:
+            baseline_payload.update(evaluation_payload)
     payload: dict[str, Any] = {
-        "baseline": (
-            None
-            if state.baseline is None
-            else {
-                **_evaluation_payload(state.baseline.evaluation),
-                "comment_recorded": state.baseline.comment_receipt is not None,
-            }
-        ),
+        "baseline": baseline_payload,
         "candidates": [_candidate_payload(state, candidate) for candidate in state.candidates],
         "decision": _decision_payload(state.decision),
         "job": {
@@ -1934,6 +2036,7 @@ def _job_payload(
             "source_root": state.identity.source_root,
             "state_digest_sha256": state.digest_sha256,
             "terminal_outcome": state.terminal_outcome,
+            "verification": _verification_payload(state),
         },
         "next_action": next_action,
         "pending_candidates": _pending_candidate_ids(state),
@@ -2000,6 +2103,17 @@ def _candidate_payload(state: JobState, candidate: object) -> dict[str, Any]:
         "model": candidate.handoff.model,
         "parent_id": candidate.handoff.parent_id,
         "phase": _candidate_phase(state, candidate),
+        "repository_checks": [
+            {
+                "kind": result.spec.kind,
+                "value": result.spec.value,
+                "passed": result.passed,
+                "exit_code": result.exit_code,
+                "duration_seconds": result.duration_seconds,
+                "summary": result.summary,
+            }
+            for result in candidate.repository_checks
+        ],
         "validating": _evaluation_payload(candidate.validating),
         "workspace": str(candidate.handoff.workspace_path),
     }
@@ -2010,6 +2124,11 @@ def _candidate_phase(state: JobState, candidate: object) -> str:
         return "handoff"
     if state.final_winner_id == candidate.handoff.candidate_id:
         return "winner"
+    if (
+        state.selected_candidate_id == candidate.handoff.candidate_id
+        and state.terminal_outcome in {"recommended", "proposed_unverified"}
+    ):
+        return state.terminal_outcome
     return candidate.assessment.outcome
 
 
@@ -2037,6 +2156,7 @@ def _decision_payload(decision: object | None) -> dict[str, Any] | None:
         "outcome": decision.outcome,
         "provisional_winner_id": decision.provisional_winner_id,
         "reason": _redact_text(decision.reason),
+        "selected_candidate_id": decision.selected_candidate_id,
         "validating_candidate_id": decision.validating_candidate_id,
         "validating_passed": decision.validating_passed,
         "winner_id": decision.winner_id,
@@ -2051,14 +2171,14 @@ def _next_action(state: JobState, *, binding: _LoadedBinding | None) -> str:
     if state.terminal_outcome is not None:
         if _terminal_side_effects_complete(state):
             return "terminal"
-        if _closure_required(state) and not _has_pull_request_binding(binding):
+        if _binding_required(state) and not _has_pull_request_binding(binding):
             return "blocked"
         return "finish"
     if state.completed_candidate_count < state.identity.min_candidates:
         if len(state.candidates) < state.identity.min_candidates:
             return "handoff-candidate"
         return "blocked"
-    if _closure_required(state) and not _has_pull_request_binding(binding):
+    if _binding_required(state) and not _has_pull_request_binding(binding):
         return "blocked"
     return "finish"
 
@@ -2068,8 +2188,8 @@ def _blocked_reason(state: JobState, *, binding_present: bool) -> str | None:
         return "baseline is unavailable"
     if state.completed_candidate_count < state.identity.min_candidates and len(state.candidates) >= state.identity.min_candidates and not _pending_candidate_ids(state):
         return "candidate budget is exhausted before the minimum completed candidate count was reached"
-    if _closure_required(state) and not binding_present:
-        return "pull request binding is required for no-winner closure"
+    if _binding_required(state) and not binding_present:
+        return _binding_required_reason(state)
     return None
 
 
@@ -2092,7 +2212,7 @@ def _pending_cleanup_candidates(state: JobState) -> list[str]:
 def _terminal_side_effects_complete(state: JobState) -> bool:
     if state.final_comment_receipt is None:
         return False
-    if state.terminal_outcome == "winner" and state.projection_receipt is None:
+    if state.terminal_outcome in {"winner", "recommended", "proposed_unverified"} and state.projection_receipt is None:
         return False
     if state.terminal_outcome == "no_winner" and state.no_winner_receipt is None:
         return False
@@ -2106,12 +2226,71 @@ def _closure_required(state: JobState) -> bool:
         return True
     if state.decision is None:
         return False
+    if state.verification_mode != "foundry_evaluation":
+        return state.decision.selected_candidate_id is None
     if state.decision.provisional_winner_id is None:
         return True
     candidate = state.candidate(state.decision.provisional_winner_id)
     if candidate is None or candidate.validating is None:
         return False
     return state.decision.outcome == "no_winner" and state.final_winner_id is None
+
+
+def _binding_required(state: JobState) -> bool:
+    if state.terminal_outcome == "platform_failure":
+        return False
+    if state.terminal_outcome in {"winner", "recommended", "proposed_unverified"}:
+        return state.projection_receipt is None
+    if _closure_required(state):
+        return True
+    if state.decision is None:
+        return False
+    if state.decision.outcome == "platform_failure":
+        return False
+    if state.completed_candidate_count < state.identity.min_candidates:
+        return False
+    if state.verification_mode == "foundry_evaluation":
+        return True
+    return state.decision.selected_candidate_id is not None
+
+
+def _binding_required_reason(state: JobState) -> str:
+    if state.terminal_outcome == "no_winner" or (
+        state.decision is not None
+        and state.verification_mode == "foundry_evaluation"
+        and state.decision.provisional_winner_id is None
+    ) or (
+        state.decision is not None
+        and state.verification_mode != "foundry_evaluation"
+        and state.decision.selected_candidate_id is None
+    ):
+        return "pull request binding is required for no-winner closure"
+    return "pull request binding is required for draft projection"
+
+
+def _verification_payload(state: JobState) -> dict[str, Any]:
+    if state.verification is None:
+        return {
+            "mode": state.verification_mode,
+            "provenance": ["runtime_metadata_defaults"],
+            "quantitative_decision_allowed": True,
+            "warnings": [],
+        }
+    payload: dict[str, Any] = {
+        "mode": state.verification.mode,
+        "provenance": list(state.verification.provenance),
+        "quantitative_decision_allowed": state.verification.quantitative_decision_allowed,
+        "warnings": list(state.verification.warnings),
+    }
+    if state.verification.repository_checks is not None:
+        payload["repository_checks"] = [
+            {
+                "kind": check.kind,
+                "value": check.value,
+            }
+            for check in state.verification.repository_checks.checks
+        ]
+    return payload
 
 
 def _has_pull_request_binding(binding: _LoadedBinding | None) -> bool:
@@ -2147,7 +2326,7 @@ def _finish_runtime_job(
             require_present=True,
             verify_checkout=False,
         )
-    if state.terminal_outcome == "winner" and state.projection_receipt is None:
+    if state.terminal_outcome in {"winner", "recommended", "proposed_unverified"} and state.projection_receipt is None:
         _ensure_runtime_pull_request_binding(
             runtime=runtime,
             identity=state.identity,
@@ -2158,14 +2337,24 @@ def _finish_runtime_job(
         )
     if state.terminal_outcome is not None:
         return controller.finish(destination_checkout)
-    if state.baseline is None:
-        raise ControllerError("baseline must be recorded before finish")
     if state.completed_candidate_count < state.identity.min_candidates:
         raise ControllerError("minimum candidate count has not been reached")
     state = controller._apply_development_decision(state)
     decision = state.decision
     if decision is None:
         raise ControllerError("decision state is unavailable")
+    if state.verification_mode != "foundry_evaluation":
+        _ensure_runtime_pull_request_binding(
+            runtime=runtime,
+            identity=state.identity,
+            checkout=destination_checkout,
+            pull_request=pull_request,
+            require_present=True,
+            verify_checkout=decision.selected_candidate_id is not None,
+        )
+        return controller.finish(destination_checkout)
+    if state.baseline is None or state.baseline.evaluation is None:
+        raise ControllerError("baseline must be recorded before finish")
     if decision.provisional_winner_id is None:
         state = controller._ensure_final_comment(state)
         _ensure_runtime_pull_request_binding(
