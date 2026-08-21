@@ -152,6 +152,8 @@ def test_issue_form_uses_built_in_parser_contract() -> None:
     assert "Parser support is built into the runtime now" in intro
     assert "final post-merge repin" in intro
     assert "qualitative-only fallback" in intro
+    assert "Optional narrower model set" not in serialized
+    assert "id: candidate_models" not in serialized
     assert "Optional primary metric" in serialized
     assert "task_completion" in serialized
     assert (

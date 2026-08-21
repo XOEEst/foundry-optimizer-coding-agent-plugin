@@ -69,13 +69,6 @@ body:
       description: One repository-relative policy-approved path pattern per line. Leave blank to use the policy default.
       render: text
 
-  - type: textarea
-    id: candidate_models
-    attributes:
-      label: Optional narrower model set
-      description: One policy-approved deployment name per line. Leave blank to use the policy default.
-      render: text
-
   - type: input
     id: primary_metric
     attributes:
