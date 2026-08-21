@@ -1147,3 +1147,78 @@ def test_azure_projects_evaluation_backend_matches_exact_evaluator_resources_wit
     assert evidence.metrics[0].failed_cases == 1
     assert evidence.metrics[1].passed is True
     assert evidence.report_url == "https://ai.azure.com/reports/run-456"
+
+
+def test_azure_projects_evaluation_backend_matches_registry_evaluator_resources() -> None:
+    task_completion_evaluator_id = (
+        "azureml://registries/azureml/evaluators/builtin.task_completion/versions/19"
+    )
+
+    class _Runs:
+        def __init__(self) -> None:
+            self.retrieve_count = 0
+
+        def create(self, eval_id: str, **kwargs: object) -> object:
+            return {"id": "run-task-completion"}
+
+        def retrieve(self, run_id: str, *, eval_id: str) -> object:
+            self.retrieve_count += 1
+            if self.retrieve_count == 1:
+                return {"id": run_id, "eval_id": eval_id, "status": "in_progress"}
+            return {
+                "id": run_id,
+                "eval_id": eval_id,
+                "status": "completed",
+                "report_url": "https://ai.azure.com/reports/run-task-completion",
+                "result_counts": {
+                    "total": 5,
+                    "passed": 4,
+                    "failed": 1,
+                    "errored": 0,
+                },
+                "per_testing_criteria_results": [
+                    {
+                        "testing_criteria": "task_completion",
+                        "passed": 4,
+                        "failed": 1,
+                    },
+                ],
+            }
+
+    class _Evals:
+        def __init__(self) -> None:
+            self.runs = _Runs()
+
+        def retrieve(self, evaluation_id: str) -> object:
+            return {
+                "id": evaluation_id,
+                "testing_criteria": [
+                    {
+                        "name": "task_completion",
+                        "evaluator_name": "builtin.task_completion",
+                        "evaluator_version": "19",
+                    },
+                ],
+            }
+
+    class _OpenAIClient:
+        def __init__(self) -> None:
+            self.evals = _Evals()
+
+    backend = AzureProjectsEvaluationBackend(openai_client=_OpenAIClient())
+
+    evidence = backend.run(
+        _draft_reference(),
+        EvaluationContract(
+            evaluation_id="eval-task-completion",
+            dataset_id="dataset-1",
+            evaluator_ids=(task_completion_evaluator_id,),
+        ),
+        deadline_monotonic=10.0,
+        monotonic=lambda: 0.0,
+        sleep=lambda seconds: None,
+    )
+
+    assert evidence.reference.evaluator_ids == (task_completion_evaluator_id,)
+    assert [metric.name for metric in evidence.metrics] == ["task_completion"]
+    assert evidence.metrics[0].failed_cases == 1

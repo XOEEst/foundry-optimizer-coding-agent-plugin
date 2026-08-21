@@ -1657,8 +1657,11 @@ def _criterion_aliases(value: object) -> tuple[str, ...]:
     return tuple(dict.fromkeys(aliases))
 
 
-_EVALUATOR_RESOURCE_ID_RE = re.compile(
+_PROJECT_EVALUATOR_RESOURCE_ID_RE = re.compile(
     r"^azureai://accounts/[^/]+/projects/[^/]+/evaluators/(?P<name>[^/]+)/versions/(?P<version>[^/]+)$"
+)
+_REGISTRY_EVALUATOR_RESOURCE_ID_RE = re.compile(
+    r"^azureml://registries/[^/]+/evaluators/(?P<name>[^/]+)/versions/(?P<version>[^/]+)$"
 )
 
 
@@ -1676,10 +1679,14 @@ def _criterion_resource_identity(value: object) -> tuple[str, str] | None:
 
 
 def _contract_evaluator_identity(value: str) -> tuple[str, str] | None:
-    match = _EVALUATOR_RESOURCE_ID_RE.fullmatch(value)
-    if match is None:
-        return None
-    return (match.group("name"), match.group("version"))
+    for pattern in (
+        _PROJECT_EVALUATOR_RESOURCE_ID_RE,
+        _REGISTRY_EVALUATOR_RESOURCE_ID_RE,
+    ):
+        match = pattern.fullmatch(value)
+        if match is not None:
+            return (match.group("name"), match.group("version"))
+    return None
 
 
 def _criterion_matches_contract(value: object, contract_id: str) -> bool:
