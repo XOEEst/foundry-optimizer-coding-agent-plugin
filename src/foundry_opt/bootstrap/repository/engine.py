@@ -341,7 +341,9 @@ def _rollback_managed_lock(
     touched_paths = {
         path
         for path in preimages
-        if not path.startswith(".foundry-opt/")
+        if path != LOCK_PATH
+        and not path.startswith(f"{JOURNAL_DIR}/")
+        and not path.startswith(f"{RECEIPT_DIR}/")
         and not path.endswith(".foundry-proposed")
     }
     current_entries = (

@@ -1185,8 +1185,14 @@ class BootstrapRunner:
         ):
             self._commit_handler.validate_resume(operation=envelope)
         if self._deployment_handler is not None and (
-            envelope.lifecycle_stage == "deployment_approval"
-            or any(item.step == "deployment" for item in envelope.child_refs)
+            envelope.lifecycle_stage != "rolled_back"
+            and (
+                envelope.lifecycle_stage == "deployment_approval"
+                or any(
+                    item.step == "deployment"
+                    for item in envelope.child_refs
+                )
+            )
         ):
             self._deployment_handler.validate_resume(operation=envelope)
         return envelope
@@ -1234,8 +1240,14 @@ class BootstrapRunner:
             if extra_links is not None:
                 resource_links = _merge_resource_links(resource_links, extra_links)
         if self._deployment_handler is not None and (
-            envelope.lifecycle_stage == "deployment_approval"
-            or any(item.step == "deployment" for item in envelope.child_refs)
+            envelope.lifecycle_stage != "rolled_back"
+            and (
+                envelope.lifecycle_stage == "deployment_approval"
+                or any(
+                    item.step == "deployment"
+                    for item in envelope.child_refs
+                )
+            )
         ):
             resource_links = _merge_resource_links(
                 resource_links,
@@ -1523,8 +1535,14 @@ class BootstrapRunner:
         ):
             lines.extend(("", self._commit_handler.review(operation=envelope).render_markdown()))
         if self._deployment_handler is not None and (
-            envelope.lifecycle_stage == "deployment_approval"
-            or any(item.step == "deployment" for item in envelope.child_refs)
+            envelope.lifecycle_stage != "rolled_back"
+            and (
+                envelope.lifecycle_stage == "deployment_approval"
+                or any(
+                    item.step == "deployment"
+                    for item in envelope.child_refs
+                )
+            )
         ):
             lines.extend(
                 (

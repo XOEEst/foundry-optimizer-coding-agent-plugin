@@ -37,5 +37,8 @@ Use rollback only when the skill offers it:
 - `deployment` is not offered because immutable regular versions are retained
   as audit history.
 
+When several steps exist, the skill offers rollback in dependency order:
+`commit`, then `connection`, then `repository`.
+
 If runtime, repository identity, commit, profile, target, or provider
 fingerprints drift, bootstrap fails closed and requires a fresh review.

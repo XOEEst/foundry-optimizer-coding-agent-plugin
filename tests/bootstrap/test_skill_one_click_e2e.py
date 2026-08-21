@@ -181,6 +181,32 @@ def test_skill_runner_completes_one_click_bootstrap_with_approved_seams(
         "44444444-4444-4444-4444-444444444444"
     )
 
+    turn = runner.rollback(turn.operation_id, "commit")
+    assert any(
+        action.name == "rollback" and action.step == "connection"
+        for action in turn.available_actions
+    )
+    turn = runner.rollback(turn.operation_id, "connection")
+    assert any(
+        action.name == "rollback" and action.step == "repository"
+        for action in turn.available_actions
+    )
+    turn = runner.rollback(turn.operation_id, "repository")
+    assert not any(
+        action.name == "rollback" for action in turn.available_actions
+    )
+    assert (
+        __import__("subprocess")
+        .run(
+            ["git", "-C", str(repository), "status", "--porcelain"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        .stdout.strip()
+        == ""
+    )
+
 
 def test_registered_disabled_agent_needs_no_target_connection_or_deployment(
     tmp_path: Path,
