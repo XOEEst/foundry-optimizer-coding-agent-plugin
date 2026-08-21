@@ -35,6 +35,61 @@ def test_first_apply_second_noop_creates_no_journal(tmp_path: Path) -> None:
     assert lock2.sidecar_paths == lock1.sidecar_paths
 
 
+def test_retired_custom_agent_relinquishes_ownership_and_preserves_file(
+    tmp_path: Path,
+) -> None:
+    active = _payload(".foundry/app.yaml", "name: active\n", template_id="active")
+    custom_agent = _payload(
+        ".github/agents/foundry-optimizer.agent.md",
+        "# Optional custom agent\n",
+        template_id="custom-agent",
+    )
+    initial = plan_repository(
+        tmp_path,
+        operation_id="initial",
+        runtime_repository="https://github.com/example/runtime.git",
+        runtime_commit="a" * 40,
+        repository_identity="org/repo",
+        payloads=(active, custom_agent),
+    )
+    apply_repository(tmp_path, initial)
+    custom_path = (
+        tmp_path / ".github" / "agents" / "foundry-optimizer.agent.md"
+    )
+    original = custom_path.read_bytes()
+
+    retirement = plan_repository(
+        tmp_path,
+        operation_id="retire",
+        runtime_repository="https://github.com/example/runtime.git",
+        runtime_commit="b" * 40,
+        repository_identity="org/repo",
+        payloads=(active,),
+    )
+    retire_action = next(
+        action
+        for action in retirement.actions
+        if action.kind == "repository-retire-ownership"
+    )
+    receipt, lock = apply_repository(tmp_path, retirement)
+
+    assert custom_path.read_bytes() == original
+    assert not any(
+        entry.template_id == "custom-agent" for entry in lock.managed_files
+    )
+    assert retire_action.action_id in receipt.changed_actions
+
+    rollback_repository(tmp_path, receipt)
+    restored = BootstrapLock.from_document(
+        (tmp_path / LOCK_PATH).read_text(encoding="utf-8")
+    )
+    assert custom_path.read_bytes() == original
+    assert any(
+        entry.template_id == "custom-agent"
+        for entry in restored.managed_files
+    )
+
+
 def test_plan_binds_target_lock_sibling_and_mode(tmp_path: Path) -> None:
     payload = _payload(".foundry/app.yaml", "name: one\n")
     plan = plan_repository(tmp_path, operation_id="op1", runtime_repository="https://github.com/example/runtime.git", runtime_commit="a" * 40, repository_identity="org/repo", payloads=(payload,))

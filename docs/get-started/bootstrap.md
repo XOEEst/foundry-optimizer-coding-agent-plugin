@@ -3,6 +3,10 @@
 This is the shortest owner path from an unprepared repository to a
 usable Foundry Optimizer setup.
 
+The default path uses standard Copilot with the managed repository
+instructions and installed skill. Bootstrap does not add or select a custom
+agent.
+
 ## Decide these things first
 
 - Which repository folders are real agents?

@@ -17,10 +17,14 @@ the manifest is refused if the set differs.
 | `sidecar` | `<agent-root>/.foundry/foundry-opt.yaml` | owned, lightweight v2 profile during repository apply; receipt-bound verification enrichment during evaluation activation |
 | `optimizer-instruction` | `.github/instructions/foundry-opt.instructions.md` | owned |
 | `optimizer-issue-form` | `.github/ISSUE_TEMPLATE/foundry-optimize-agent.yml` | owned |
-| `custom-agent` | `.github/agents/foundry-optimizer.agent.md` | owned |
 | `setup-semantic-patch` | `.github/workflows/copilot-setup-steps.yml` | shared template, semantic patch only |
 | `validation-workflow` | `.github/workflows/foundry-opt-validation.yml` | owned |
 | `deploy-workflow` | `.github/workflows/foundry-opt-deploy.yml` | owned |
+
+Bootstrap uses the default Copilot cloud agent plus the managed repository
+instructions and installed skill. A specialized custom agent is optional; an
+example profile is available at
+`examples/custom-agents/foundry-optimizer.agent.md`.
 
 ## The committed lock is generated, not rendered
 

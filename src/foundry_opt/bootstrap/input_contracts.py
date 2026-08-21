@@ -132,7 +132,6 @@ _REQUIRED_MANAGED_PAYLOADS = (
     ('sidecar', '{selected.root}/.foundry/foundry-opt.yaml'),
     ('optimizer-instruction', '.github/instructions/foundry-opt.instructions.md'),
     ('optimizer-issue-form', '.github/ISSUE_TEMPLATE/foundry-optimize-agent.yml'),
-    ('custom-agent', '.github/agents/foundry-optimizer.agent.md'),
     ('setup-semantic-patch', '.github/workflows/copilot-setup-steps.yml'),
     ('validation-workflow', '.github/workflows/foundry-opt-validation.yml'),
     ('deploy-workflow', '.github/workflows/foundry-opt-deploy.yml'),

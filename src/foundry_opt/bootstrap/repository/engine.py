@@ -35,6 +35,7 @@ JOURNAL_DIR = ".foundry-opt/journal"
 RECEIPT_DIR = ".foundry-opt/receipts"
 SUPPORTED_YAML_PATH = ".github/workflows/copilot-setup-steps.yml"
 SUPPORTED_YAML_STEP_IDS = frozenset({"foundry-opt-checkout", "foundry-opt-bootstrap"})
+RETIRED_MANAGED_TEMPLATE_IDS = frozenset({"custom-agent"})
 SUPPORTED_YAML_LEGACY_STEP_NAMES = {
     "foundry-opt-checkout": frozenset(
         {
@@ -151,6 +152,27 @@ def plan_repository(
                 diagnostics=diagnostics,
             )
         )
+    if inventory.lock is not None:
+        for entry in inventory.lock.managed_files:
+            if entry.template_id not in RETIRED_MANAGED_TEMPLATE_IDS:
+                continue
+            actions.append(
+                BootstrapAction(
+                    action_id=(
+                        f"repository:retire:{entry.template_id}:{entry.path}"
+                    ),
+                    phase="repository",
+                    stage="planned",
+                    kind="repository-retire-ownership",
+                    diagnostics=(
+                        f"path:{entry.path}",
+                        f"template_id:{entry.template_id}",
+                        f"entry:{canonical_sha256(entry.model_dump(mode='json'))}",
+                        f"lock:{lock_hash}",
+                        "preserve_file:true",
+                    ),
+                )
+            )
     return BootstrapPlan.create(
         operation_id=operation_id,
         runtime_repository=runtime_repository,
@@ -170,10 +192,14 @@ def apply_repository(root: Path, plan: BootstrapPlan) -> tuple[BootstrapReceipt,
     changed: list[str] = []
     created: list[str] = []
     skipped: list[str] = []
+    retired: list[BootstrapAction] = []
     managed_entries = {} if lock_before is None else {entry.path: entry for entry in lock_before.managed_files}
     for action in plan.actions:
         payload = action.template_payload
         if payload is None:
+            if action.kind == "repository-retire-ownership":
+                retired.append(action)
+                continue
             skipped.append(action.action_id)
             continue
         current_bytes = _read_bytes(_target(root, payload.destination_path))
@@ -185,6 +211,27 @@ def apply_repository(root: Path, plan: BootstrapPlan) -> tuple[BootstrapReceipt,
             adopted.append(action.action_id)
         planned.append((action, payload, disposition, current_bytes))
     resulting_entries = dict(managed_entries)
+    for action in retired:
+        binding = _binding_map(action.diagnostics)
+        path = validate_repository_relative_path(
+            binding.get("path", ""),
+            field="retired managed path",
+        )
+        entry = resulting_entries.get(path)
+        if entry is None:
+            raise BootstrapApplyError(
+                f"retired managed entry disappeared since plan: {path}"
+            )
+        if (
+            entry.template_id != binding.get("template_id")
+            or canonical_sha256(entry.model_dump(mode="json"))
+            != binding.get("entry")
+        ):
+            raise BootstrapApplyError(
+                f"retired managed entry changed since plan: {path}"
+            )
+        resulting_entries.pop(path)
+        changed.append(action.action_id)
     for action, payload, disposition, current_bytes in planned:
         if disposition.mode in {"write", "adopt-identical"}:
             resulting_entries[payload.destination_path] = ManagedFileEntry(
@@ -682,6 +729,37 @@ def _enforce_plan_bindings(root: Path, plan: BootstrapPlan) -> None:
     for action in plan.actions:
         payload = action.template_payload
         if payload is None:
+            if action.kind == "repository-retire-ownership":
+                binding = _binding_map(action.diagnostics)
+                if binding.get("lock") != lock_hash:
+                    raise BootstrapApplyError(
+                        "bootstrap lock changed since plan"
+                    )
+                path = validate_repository_relative_path(
+                    binding.get("path", ""),
+                    field="retired managed path",
+                )
+                entry = (
+                    None
+                    if lock is None
+                    else next(
+                        (
+                            item
+                            for item in lock.managed_files
+                            if item.path == path
+                        ),
+                        None,
+                    )
+                )
+                if (
+                    entry is None
+                    or entry.template_id != binding.get("template_id")
+                    or canonical_sha256(entry.model_dump(mode="json"))
+                    != binding.get("entry")
+                ):
+                    raise BootstrapApplyError(
+                        f"retired managed entry drift detected: {path}"
+                    )
             continue
         current_bytes = _read_bytes(_target(root, payload.destination_path))
         disposition = _planned_disposition(root, payload, current_bytes, lock)
@@ -702,7 +780,16 @@ def _binding_map(diagnostics: Sequence[str]) -> dict[str, str]:
         if ":" not in item:
             continue
         key, value = item.split(":", 1)
-        if key in {"target", "lock", "sibling", "mode"}:
+        if key in {
+            "target",
+            "lock",
+            "sibling",
+            "mode",
+            "path",
+            "template_id",
+            "entry",
+            "preserve_file",
+        }:
             result[key] = value
     return result
 
@@ -772,6 +859,14 @@ def _prepare_journal_entries(
         entries[payload.destination_path] = _JournalEntry(payload.destination_path, current_bytes)
         if disposition.conflict_sibling_path is not None:
             entries[disposition.conflict_sibling_path] = _JournalEntry(disposition.conflict_sibling_path, _read_bytes(_target(root, disposition.conflict_sibling_path)))
+    for action in plan.actions:
+        if action.kind != "repository-retire-ownership":
+            continue
+        path = validate_repository_relative_path(
+            _binding_map(action.diagnostics).get("path", ""),
+            field="retired managed path",
+        )
+        entries[path] = _JournalEntry(path, _read_bytes(_target(root, path)))
     return tuple(entries.values())
 
 
@@ -890,6 +985,17 @@ def _fingerprints(root: Path, plan: BootstrapPlan, *, include_system: bool) -> t
     for action in plan.actions:
         payload = action.template_payload
         if payload is None:
+            if action.kind == "repository-retire-ownership":
+                path = validate_repository_relative_path(
+                    _binding_map(action.diagnostics).get("path", ""),
+                    field="retired managed path",
+                )
+                items.append(
+                    FingerprintRecord(
+                        label=path,
+                        sha256=_hash_if_exists(root, path) or _missing_hash(),
+                    )
+                )
             continue
         items.append(FingerprintRecord(label=payload.destination_path, sha256=_hash_if_exists(root, payload.destination_path) or _missing_hash()))
         sibling_path = f"{payload.destination_path}.foundry-proposed"

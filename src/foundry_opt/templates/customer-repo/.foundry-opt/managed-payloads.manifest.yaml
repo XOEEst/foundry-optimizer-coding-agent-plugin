@@ -39,15 +39,6 @@ managed_payloads:
   scope: repository
   required: true
 - schema_version: 1
-  template_id: custom-agent
-  template_version: 1.0.0
-  source_template_path: src/foundry_opt/templates/customer-repo/.github/agents/foundry-optimizer.agent.md
-  destination_path: .github/agents/foundry-optimizer.agent.md
-  ownership_mode: owned
-  semantic_patch_mode: none
-  scope: repository
-  required: true
-- schema_version: 1
   template_id: setup-semantic-patch
   template_version: 1.0.0
   source_template_path: src/foundry_opt/templates/customer-repo/.github/workflows/copilot-setup-steps.yml
