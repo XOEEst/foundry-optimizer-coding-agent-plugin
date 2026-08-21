@@ -102,6 +102,7 @@ _ALLOWED_NEXT_STAGES: dict[BootstrapLifecycleStage, frozenset[BootstrapLifecycle
             "commit_approval",
             "final_handoff",
             "blocked",
+            "rolled_back",
         }
     ),
     "connection_approval": frozenset(
@@ -111,6 +112,7 @@ _ALLOWED_NEXT_STAGES: dict[BootstrapLifecycleStage, frozenset[BootstrapLifecycle
             "deployment_approval",
             "final_handoff",
             "blocked",
+            "rolled_back",
         }
     ),
     "commit_approval": frozenset(
@@ -119,6 +121,7 @@ _ALLOWED_NEXT_STAGES: dict[BootstrapLifecycleStage, frozenset[BootstrapLifecycle
             "deployment_approval",
             "final_handoff",
             "blocked",
+            "rolled_back",
         }
     ),
     "deployment_approval": frozenset(
@@ -126,6 +129,7 @@ _ALLOWED_NEXT_STAGES: dict[BootstrapLifecycleStage, frozenset[BootstrapLifecycle
             "deployment_approval",
             "final_handoff",
             "blocked",
+            "rolled_back",
         }
     ),
     "final_handoff": frozenset({"final_handoff", "rolled_back"}),
@@ -168,6 +172,7 @@ class RepositoryBinding(BootstrapDocument):
     repository_id: str
     repository_url: str
     head_commit: str
+    branch_name: str | None = None
 
     @field_validator("repository_root")
     @classmethod
@@ -196,6 +201,18 @@ class RepositoryBinding(BootstrapDocument):
         if re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", value) is None:
             raise BootstrapConfigError("head_commit must be a git commit SHA")
         return value
+
+    @field_validator("branch_name")
+    @classmethod
+    def _validate_branch_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise BootstrapConfigError("branch_name must not be empty")
+        if any(ord(ch) < 32 for ch in normalized) or "\x7f" in normalized:
+            raise BootstrapConfigError("branch_name contains control characters")
+        return normalized
 
 
 class RuntimeBinding(BootstrapDocument):
@@ -319,6 +336,8 @@ class BootstrapStageOutcome(FrozenModel):
     note: str | None = None
     child_refs: tuple[BootstrapChildReference, ...] | None = None
     foundry_targets: tuple[BootstrapFoundryTargetRecord, ...] | None = None
+    repository_binding: RepositoryBinding | None = None
+    handler_context: Mapping[str, object] | None = None
 
 
 class BootstrapRunnerStatePayload(BootstrapDocument):
@@ -335,6 +354,7 @@ class BootstrapRunnerStatePayload(BootstrapDocument):
     foundry_targets: tuple[BootstrapFoundryTargetRecord, ...] = ()
     child_refs: tuple[BootstrapChildReference, ...] = ()
     note: str | None = Field(default=None, max_length=4096)
+    handler_context: Mapping[str, object] = Field(default_factory=dict)
 
     @field_validator("operation_id")
     @classmethod
@@ -372,6 +392,13 @@ class BootstrapRunnerStatePayload(BootstrapDocument):
                 raise BootstrapConfigError("foundry_targets must not contain duplicate repo_agent_id values")
             seen.add(key)
         return tuple(sorted(records, key=lambda item: item.repo_agent_id.casefold()))
+
+    @field_validator("handler_context")
+    @classmethod
+    def _validate_handler_context(cls, value: Mapping[str, object]) -> Mapping[str, object]:
+        normalized = dict(value)
+        safe_persisted_document(normalized)
+        return normalized
 
 
 class BootstrapRunnerStateEnvelope(BootstrapDocument):
@@ -422,6 +449,10 @@ class BootstrapRunnerStateEnvelope(BootstrapDocument):
     def note(self) -> str | None:
         return self.payload.note
 
+    @property
+    def handler_context(self) -> Mapping[str, object]:
+        return self.payload.handler_context
+
     @classmethod
     def create(cls, **values: object) -> "BootstrapRunnerStateEnvelope":
         payload = BootstrapRunnerStatePayload.model_validate(values)
@@ -447,6 +478,7 @@ class GitProtocol(Protocol):
     def repository_url(self, value: Path) -> str: ...
     def repository_id(self, repository_url: str) -> str: ...
     def head_commit(self, value: Path) -> str: ...
+    def current_branch(self, value: Path) -> str | None: ...
 
 
 class RuntimeBindingProtocol(Protocol):
@@ -541,6 +573,39 @@ class BootstrapRollbackHandlerProtocol(Protocol):
     ) -> BootstrapStageOutcome: ...
 
 
+class RenderableReviewProtocol(Protocol):
+    def render_markdown(self) -> str: ...
+
+
+class BootstrapCommitHandlerProtocol(Protocol):
+    def review(
+        self,
+        *,
+        operation: BootstrapRunnerStateEnvelope,
+    ) -> RenderableReviewProtocol: ...
+
+    def approve(
+        self,
+        *,
+        operation: BootstrapRunnerStateEnvelope,
+        approval: BootstrapApprovalRecord,
+    ) -> BootstrapStageOutcome: ...
+
+    def rollback(
+        self,
+        *,
+        operation: BootstrapRunnerStateEnvelope,
+        step: BootstrapApprovalStep,
+        child_ref: BootstrapChildReference,
+    ) -> BootstrapStageOutcome: ...
+
+    def validate_resume(
+        self,
+        *,
+        operation: BootstrapRunnerStateEnvelope,
+    ) -> None: ...
+
+
 class LocalFilesystem(FilesystemProtocol):
     def resolve_directory(self, value: str | Path) -> Path:
         target = Path(value).expanduser().resolve()
@@ -567,18 +632,32 @@ class SubprocessGitProtocol(GitProtocol):
     def head_commit(self, value: Path) -> str:
         return self._run(value, "rev-parse", "HEAD")
 
+    def current_branch(self, value: Path) -> str | None:
+        completed = self._run_result(value, "symbolic-ref", "--quiet", "--short", "HEAD")
+        if completed.returncode == 1:
+            return None
+        if completed.returncode != 0:
+            message = completed.stderr.strip() or completed.stdout.strip() or "git command failed"
+            raise BootstrapConfigError(message)
+        branch = completed.stdout.strip()
+        return branch or None
+
     @staticmethod
     def _run(value: Path, *args: str) -> str:
-        completed = subprocess.run(
+        completed = SubprocessGitProtocol._run_result(value, *args)
+        if completed.returncode != 0:
+            message = completed.stderr.strip() or completed.stdout.strip() or "git command failed"
+            raise BootstrapConfigError(message)
+        return completed.stdout.strip()
+
+    @staticmethod
+    def _run_result(value: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
             ["git", "-C", str(value), *args],
             check=False,
             capture_output=True,
             text=True,
         )
-        if completed.returncode != 0:
-            message = completed.stderr.strip() or completed.stdout.strip() or "git command failed"
-            raise BootstrapConfigError(message)
-        return completed.stdout.strip()
 
 
 class EnvironmentRuntimeBinding(RuntimeBindingProtocol):
@@ -700,6 +779,7 @@ class BootstrapRunner:
         state_store: BootstrapRunnerStateStoreProtocol | None = None,
         target_resolution_handler: FoundryTargetResolutionHandlerProtocol | None = None,
         approval_handlers: Mapping[BootstrapApprovalStep, BootstrapApprovalHandlerProtocol] | None = None,
+        commit_handler: BootstrapCommitHandlerProtocol | None = None,
         rollback_handler: BootstrapRollbackHandlerProtocol | None = None,
     ) -> None:
         self._filesystem = filesystem or LocalFilesystem()
@@ -718,6 +798,9 @@ class BootstrapRunner:
             target_resolution_handler = DefaultFoundryTargetResolutionHandler()
         self._target_resolution_handler = target_resolution_handler
         self._approval_handlers = dict(approval_handlers or {})
+        self._commit_handler = commit_handler
+        if self._commit_handler is not None and "commit" not in self._approval_handlers:
+            self._approval_handlers["commit"] = self._commit_handler
         self._rollback_handler = rollback_handler
 
     def start(self, repository: str | Path) -> BootstrapTurn:
@@ -726,6 +809,7 @@ class BootstrapRunner:
         repository_url = self._git.repository_url(repository_root)
         repository_id = self._git.repository_id(repository_url)
         repository_head = self._git.head_commit(repository_root)
+        repository_branch = self._git.current_branch(repository_root)
         runtime_binding = RuntimeBinding(
             runtime_repository=self._runtime.runtime_repository(),
             runtime_commit=self._runtime.runtime_commit(),
@@ -749,6 +833,7 @@ class BootstrapRunner:
                 repository_id=repository_id,
                 repository_url=repository_url,
                 head_commit=repository_head,
+                branch_name=repository_branch,
             ),
             runtime_binding=runtime_binding,
             selection_plan=selection,
@@ -869,14 +954,18 @@ class BootstrapRunner:
         step: BootstrapApprovalStep,
     ) -> BootstrapTurn:
         envelope = self._load_validated(operation_id)
-        if self._rollback_handler is None:
+        if step == "commit" and self._commit_handler is not None:
+            handler = self._commit_handler
+        elif self._rollback_handler is not None:
+            handler = self._rollback_handler
+        else:
             raise BootstrapApplyError("rollback handler is not configured")
         child_ref = next((item for item in envelope.child_refs if item.step == step), None)
         if child_ref is None:
             raise BootstrapApplyError("rollback requires a recorded child reference")
         updated = self._apply_stage_outcome(
             envelope,
-            outcome=self._rollback_handler.rollback(
+            outcome=handler.rollback(
                 operation=envelope,
                 step=step,
                 child_ref=child_ref,
@@ -901,15 +990,23 @@ class BootstrapRunner:
         current_url = self._git.repository_url(root)
         current_id = self._git.repository_id(current_url)
         current_head = self._git.head_commit(root)
+        current_branch = self._git.current_branch(root)
         expected = envelope.repository_binding
         observed = RepositoryBinding(
             repository_root=str(root),
             repository_id=current_id,
             repository_url=current_url,
             head_commit=current_head,
+            branch_name=current_branch,
         )
         if observed != expected:
             raise BootstrapApplyError("bootstrap resume requires the exact repository root, identity, and commit")
+        if self._commit_handler is not None and (
+            envelope.lifecycle_stage == "commit_approval"
+            or any(item.step == "commit" for item in envelope.child_refs)
+            or "local_commit" in envelope.handler_context
+        ):
+            self._commit_handler.validate_resume(operation=envelope)
         return envelope
 
     def _apply_stage_outcome(
@@ -930,16 +1027,22 @@ class BootstrapRunner:
         if outcome.foundry_targets is not None:
             foundry_targets = outcome.foundry_targets
         child_refs = outcome.child_refs if outcome.child_refs is not None else envelope.child_refs
+        repository_binding = outcome.repository_binding or envelope.repository_binding
+        handler_context = dict(envelope.handler_context)
+        if outcome.handler_context is not None:
+            handler_context.update(outcome.handler_context)
         _validate_stage_transition(envelope.lifecycle_stage, outcome.stage)
         return next_runner_generation(
             envelope,
             now=self._clock.now(),
             lifecycle_stage=outcome.stage,
+            repository_binding=repository_binding,
             answers=answers,
             approvals=approvals,
             foundry_targets=foundry_targets,
             child_refs=child_refs,
             note=outcome.note,
+            handler_context=handler_context,
         )
 
     def _build_turn(self, envelope: BootstrapRunnerStateEnvelope) -> BootstrapTurn:
@@ -1020,13 +1123,19 @@ class BootstrapRunner:
                 details_markdown="Bridge handlers will populate this decision in a dependent task.",
             )
         step = _approval_step_for_question(kind)
+        detail = "Bridge handlers populate the reviewed step details."
+        if step == "commit":
+            detail = (
+                "The local commit handler populates the reviewed paths, diff summary, "
+                "base commit, and proposed message."
+            )
         return BootstrapQuestion(
             question_id=question_id,
             kind=kind,
             title=f"Approve the {step} step",
             details_markdown=(
                 f"Use `approve(..., step={step!r}, ...)` to continue. "
-                "Bridge handlers populate the reviewed step details."
+                f"{detail}"
             ),
         )
 
@@ -1046,8 +1155,10 @@ class BootstrapRunner:
                 BootstrapAvailableAction(name="approve", step=step),
                 BootstrapAvailableAction(name="status"),
             ]
-            if any(item.step == step for item in envelope.child_refs):
-                actions.append(BootstrapAvailableAction(name="rollback", step=step))
+            for child_ref in envelope.child_refs:
+                rollback = BootstrapAvailableAction(name="rollback", step=child_ref.step)
+                if rollback not in actions:
+                    actions.append(rollback)
             return tuple(actions)
         if stage == "final_handoff":
             actions = [BootstrapAvailableAction(name="status")]
@@ -1060,6 +1171,7 @@ class BootstrapRunner:
         lines = [
             "## Bootstrap preflight",
             f"- Repository: {envelope.repository_binding.repository_id}",
+            f"- Repository branch: {envelope.repository_binding.branch_name or '(detached)'}",
             f"- Repository commit: {envelope.repository_binding.head_commit[:12]}",
             f"- Runtime: {envelope.runtime_binding.runtime_commit[:12]}",
             "",
@@ -1071,6 +1183,11 @@ class BootstrapRunner:
             )
             if rendered_targets:
                 lines.extend(("", rendered_targets))
+        if self._commit_handler is not None and (
+            envelope.lifecycle_stage == "commit_approval"
+            or any(item.step == "commit" for item in envelope.child_refs)
+        ):
+            lines.extend(("", self._commit_handler.review(operation=envelope).render_markdown()))
         if envelope.note:
             lines.extend(("", "## Bridge state", f"- {envelope.note}"))
         if envelope.lifecycle_stage == "agent_selection":
@@ -1300,6 +1417,7 @@ __all__ = [
     "BootstrapApprovalStep",
     "BootstrapAvailableAction",
     "BootstrapFoundryTargetRecord",
+    "BootstrapCommitHandlerProtocol",
     "BootstrapChildReference",
     "BootstrapLifecycleStage",
     "BootstrapQuestion",

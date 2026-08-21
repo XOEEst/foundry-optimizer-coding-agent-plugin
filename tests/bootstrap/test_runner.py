@@ -6,7 +6,9 @@ from datetime import UTC, datetime
 
 import pytest
 
+from foundry_opt.bootstrap.contracts import BootstrapAction, BootstrapPlan, TemplatePayloadSpec
 from foundry_opt.bootstrap.errors import BootstrapApplyError
+from foundry_opt.bootstrap.local_commit import BootstrapLocalCommitHandler, LocalGitCommitCoordinator, build_local_commit_context
 from foundry_opt.bootstrap.runner import (
     BootstrapChildReference,
     BootstrapRollbackHandlerProtocol,
@@ -19,6 +21,7 @@ from foundry_opt.bootstrap.runner import (
 
 RUNTIME_REPOSITORY = "https://github.com/example-org/foundry-opt-runtime.git"
 RUNTIME_COMMIT = "a" * 40
+REPOSITORY_ID = "example-org/example-repo"
 REPOSITORY_REMOTE = "https://github.com/example-org/example-repo.git"
 
 
@@ -71,6 +74,96 @@ def _create_repository(tmp_path: Path) -> Path:
     subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
     subprocess.run(["git", "-C", str(repo), "commit", "--quiet", "-m", "initial"], check=True)
     return repo
+
+
+def _write_registry_profile(repo: Path, *, repo_agent_id: str) -> None:
+    _write(
+        repo / ".foundry-opt" / "registry.yaml",
+        "\n".join(
+            (
+                "schema_version: 1",
+                "distribution:",
+                "  schema_version: 1",
+                "  repository: https://github.com/example/shared.git",
+                "  channel: wave4",
+                "  pin: " + ("c" * 40),
+                "github:",
+                "  schema_version: 1",
+                "  optimizer_environment: copilot",
+                "  deployment_environment: foundry-production",
+                "  client_id_variable: AZURE_OPTIMIZER_CLIENT_ID",
+                "identity:",
+                "  schema_version: 1",
+                "  kind: unresolved_migration",
+                "agents:",
+                "  - schema_version: 1",
+                f"    agent_id: {repo_agent_id}",
+                "    root: agent",
+                "    config_path: agent/.foundry/foundry-opt.yaml",
+                "    enabled: true",
+            )
+        )
+        + "\n",
+    )
+    _write(
+        repo / "agent" / ".foundry" / "foundry-opt.yaml",
+        "\n".join(
+            (
+                "schema_version: 2",
+                f"repo_agent_id: {repo_agent_id}",
+                "source_root: agent",
+                "package_root: agent",
+                "editable_paths:",
+                "  - agent/main.py",
+                "shared_source_relations: []",
+                "runtime:",
+                "  schema_version: 1",
+                "  kind: hosted",
+                "  runtime: python_3_13",
+                "  entrypoint:",
+                "    - python",
+                "    - main.py",
+                "  dependency_resolution: remote_build",
+                "  protocol_name: responses",
+                "  protocol_version: '2.0.0'",
+                "foundry_project:",
+                "  schema_version: 1",
+                "  project_endpoint: https://example.services.ai.azure.com/api/projects/example",
+                "  account_resource_id: /subscriptions/1/resourceGroups/rg/providers/Microsoft.CognitiveServices/accounts/a",
+                f"  agent_name: {repo_agent_id}",
+                "  model_deployment_aliases: [baseline]",
+                "baseline_model: baseline",
+                "allowed_models: [baseline]",
+                "min_candidates: 1",
+                "max_candidates: 1",
+                "primary_metric: quality",
+                "decision_policy:",
+                "  schema_version: 1",
+                "  minimum_aggregate_delta: 0.01",
+                "  focused_cases_required: true",
+                "  max_regressions: 0",
+                "max_issue_evaluators: 8",
+                "hard_guardrails:",
+                "  - schema_version: 1",
+                "    evaluator_name: safety",
+                "    required_pass_rate: 1.0",
+                "    required: true",
+                "deployment:",
+                "  schema_version: 1",
+                "  environment: foundry-production",
+                "  enabled: true",
+                "  require_aligned_binding: true",
+                "verification:",
+                "  schema_version: 1",
+                "  mode: 'off'",
+                "  repository_checks: []",
+                "  evaluation_gate_policy: 'allow_no_evidence'",
+                "  bundle: null",
+                "  lineage: null",
+            )
+        )
+        + "\n",
+    )
 
 
 class _RecordingRollbackHandler(BootstrapRollbackHandlerProtocol):
@@ -278,3 +371,190 @@ def test_rollback_delegates_to_child_handler(tmp_path: Path) -> None:
     assert rollback_handler.calls == [(turn.operation_id, "connection", "connect-op-1")]
     assert rolled.state == "rolled_back"
     assert rolled.resource_links.github[0].url == "https://github.com/example-org/example-repo/actions"
+
+
+def test_commit_handler_renders_review_and_records_exact_local_commit(tmp_path: Path) -> None:
+    repo = _create_repository(tmp_path)
+    state_root = tmp_path / "state"
+    commit_state_root = tmp_path / "commit-state"
+    store = FileBootstrapRunnerStateStore(state_root=state_root)
+    commit_handler = BootstrapLocalCommitHandler(
+        coordinator=LocalGitCommitCoordinator(state_root=commit_state_root)
+    )
+    runner = BootstrapRunner(state_store=store, commit_handler=commit_handler)
+    first = runner.start(repo)
+    repo_agent_id = first.next_question.choices[0].value
+    _write_registry_profile(repo, repo_agent_id=repo_agent_id)
+
+    selected = runner.answer(
+        first.operation_id,
+        first.next_question.question_id,
+        [repo_agent_id],
+    )
+    _write(repo / "agent" / "main.py", "print('bootstrap source')\n")
+    envelope = store.load(selected.operation_id)
+    review_plan = BootstrapPlan.create(
+        operation_id=selected.operation_id,
+        runtime_repository=RUNTIME_REPOSITORY,
+        runtime_commit=RUNTIME_COMMIT,
+        repository_identity=REPOSITORY_ID,
+        actions=(
+            BootstrapAction(
+                action_id="repository:registry:.foundry-opt/registry.yaml",
+                phase="repository",
+                stage="planned",
+                kind="repository-write",
+                template_payload=TemplatePayloadSpec(
+                    template_id="registry",
+                    destination_path=".foundry-opt/registry.yaml",
+                    rendered_template=(repo / ".foundry-opt" / "registry.yaml").read_text(encoding="utf-8"),
+                ),
+            ),
+            BootstrapAction(
+                action_id="repository:profile:agent/.foundry/foundry-opt.yaml",
+                phase="repository",
+                stage="planned",
+                kind="repository-write",
+                template_payload=TemplatePayloadSpec(
+                    template_id="profile",
+                    destination_path="agent/.foundry/foundry-opt.yaml",
+                    rendered_template=(repo / "agent" / ".foundry" / "foundry-opt.yaml").read_text(encoding="utf-8"),
+                ),
+            ),
+            BootstrapAction(
+                action_id="repository:agent:agent/main.py",
+                phase="repository",
+                stage="planned",
+                kind="repository-write",
+                template_payload=TemplatePayloadSpec(
+                    template_id="agent",
+                    destination_path="agent/main.py",
+                    rendered_template="print('bootstrap source')\n",
+                ),
+            ),
+        ),
+    )
+    commit_ready = next_runner_generation(
+        envelope,
+        now=datetime.now(UTC),
+        lifecycle_stage="commit_approval",
+        handler_context=build_local_commit_context(review_plan),
+        note="Repository plan reviewed. Approve the exact local source commit.",
+    )
+    store.save(
+        commit_ready,
+        expected_generation=envelope.generation,
+        expected_generation_hash=envelope.generation_hash,
+    )
+
+    status = runner.status(selected.operation_id)
+
+    assert status.state == "commit_approval"
+    assert "Local commit review" in status.owner_markdown
+    assert "agent/main.py" in status.owner_markdown
+
+    approved = runner.approve(
+        selected.operation_id,
+        "commit",
+        actor="owner",
+        summary="approve exact source",
+    )
+    persisted = store.load(selected.operation_id)
+
+    assert approved.state == "deployment_approval"
+    assert persisted.repository_binding.head_commit != envelope.repository_binding.head_commit
+    assert any(action.name == "rollback" and action.step == "commit" for action in approved.available_actions)
+    assert subprocess.run(
+        ["git", "-C", str(repo), "branch", "--show-current"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip().startswith("foundry-opt/bootstrap/")
+
+
+def test_commit_handler_rollback_restores_base_repository_binding(tmp_path: Path) -> None:
+    repo = _create_repository(tmp_path)
+    state_root = tmp_path / "state"
+    commit_state_root = tmp_path / "commit-state"
+    store = FileBootstrapRunnerStateStore(state_root=state_root)
+    commit_handler = BootstrapLocalCommitHandler(
+        coordinator=LocalGitCommitCoordinator(state_root=commit_state_root)
+    )
+    runner = BootstrapRunner(state_store=store, commit_handler=commit_handler)
+    first = runner.start(repo)
+    repo_agent_id = first.next_question.choices[0].value
+    _write_registry_profile(repo, repo_agent_id=repo_agent_id)
+
+    selected = runner.answer(
+        first.operation_id,
+        first.next_question.question_id,
+        [repo_agent_id],
+    )
+    base_envelope = store.load(selected.operation_id)
+    _write(repo / "agent" / "main.py", "print('bootstrap source')\n")
+    review_plan = BootstrapPlan.create(
+        operation_id=selected.operation_id,
+        runtime_repository=RUNTIME_REPOSITORY,
+        runtime_commit=RUNTIME_COMMIT,
+        repository_identity=REPOSITORY_ID,
+        actions=(
+            BootstrapAction(
+                action_id="repository:registry:.foundry-opt/registry.yaml",
+                phase="repository",
+                stage="planned",
+                kind="repository-write",
+                template_payload=TemplatePayloadSpec(
+                    template_id="registry",
+                    destination_path=".foundry-opt/registry.yaml",
+                    rendered_template=(repo / ".foundry-opt" / "registry.yaml").read_text(encoding="utf-8"),
+                ),
+            ),
+            BootstrapAction(
+                action_id="repository:profile:agent/.foundry/foundry-opt.yaml",
+                phase="repository",
+                stage="planned",
+                kind="repository-write",
+                template_payload=TemplatePayloadSpec(
+                    template_id="profile",
+                    destination_path="agent/.foundry/foundry-opt.yaml",
+                    rendered_template=(repo / "agent" / ".foundry" / "foundry-opt.yaml").read_text(encoding="utf-8"),
+                ),
+            ),
+            BootstrapAction(
+                action_id="repository:agent:agent/main.py",
+                phase="repository",
+                stage="planned",
+                kind="repository-write",
+                template_payload=TemplatePayloadSpec(
+                    template_id="agent",
+                    destination_path="agent/main.py",
+                    rendered_template="print('bootstrap source')\n",
+                ),
+            ),
+        ),
+    )
+    commit_ready = next_runner_generation(
+        base_envelope,
+        now=datetime.now(UTC),
+        lifecycle_stage="commit_approval",
+        handler_context=build_local_commit_context(review_plan),
+        note="Repository plan reviewed. Approve the exact local source commit.",
+    )
+    store.save(
+        commit_ready,
+        expected_generation=base_envelope.generation,
+        expected_generation_hash=base_envelope.generation_hash,
+    )
+    approved = runner.approve(
+        selected.operation_id,
+        "commit",
+        actor="owner",
+        summary="approve exact source",
+    )
+
+    rolled = runner.rollback(approved.operation_id, "commit")
+    persisted = store.load(approved.operation_id)
+
+    assert rolled.state == "rolled_back"
+    assert persisted.repository_binding.head_commit == base_envelope.repository_binding.head_commit
+    assert persisted.repository_binding.branch_name == base_envelope.repository_binding.branch_name
