@@ -104,6 +104,8 @@ def test_powershell_canonical_launcher_contains_exact_pin_and_lock_checks() -> N
     assert "uv_lock_sha256" in text
     assert "package_path" in text
     assert "Invoke-CheckedCommand uv -ArgumentList @(\"sync\", \"--frozen\"" in text
+    assert "FOUNDRY_BOOTSTRAP_EMIT_RUNTIME_PYTHON" in text
+    assert 'python -c "import sys; print(sys.executable)"' in text
     assert "uv run --no-sync" in text
     assert "floating refs like '$Ref' are not allowed for privileged use" in text
 
@@ -122,6 +124,8 @@ def test_bash_canonical_launcher_contains_exact_pin_and_lock_checks() -> None:
     assert 'git -C "$extract_root" init' in text
     assert "command -v python3 || command -v python" in text
     assert "uv sync --frozen" in text
+    assert "FOUNDRY_BOOTSTRAP_EMIT_RUNTIME_PYTHON" in text
+    assert "python -c 'import sys; print(sys.executable)'" in text
     assert "exec uv run --no-sync" in text
     assert "floating refs like '$ref' are not allowed for privileged use" in text
 

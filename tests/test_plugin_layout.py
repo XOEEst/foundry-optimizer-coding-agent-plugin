@@ -47,6 +47,7 @@ EXPECTED_PLUGIN_FILES = {
     "plugins/foundry-bootstrap/SKILL.md",
     "plugins/foundry-bootstrap/references/README.md",
     "plugins/foundry-bootstrap/scripts/README.md",
+    "plugins/foundry-bootstrap/scripts/bootstrap.py",
     "plugins/foundry-bootstrap/scripts/install-runtime.ps1",
     "plugins/foundry-bootstrap/scripts/install-runtime.sh",
     "plugins/foundry-bootstrap/skill.lock.template.json",
@@ -104,14 +105,20 @@ def test_bootstrap_skill_frontmatter_and_owner_contract_describes_canonical_laun
     assert frontmatter == {
         "name": "foundry-bootstrap",
         "description": (
-            "Establish the top-level bootstrap plugin boundary over the shared "
-            "foundry_opt runtime."
+            "Guide a first-time owner through the downloadable bootstrap "
+            "start/resume/approval loop over the shared foundry_opt runtime."
         ),
     }
-    assert "thin client over shared `foundry_opt` runtime code" in normalized
-    assert "canonical field contract for reviewed runtime pins" in normalized
-    assert "canonical runtime install and verification entrypoints" in normalized
-    assert "source-checkout compatibility wrappers" in normalized
+    assert "only owner client over `BootstrapRunner`" in normalized
+    assert "python scripts/bootstrap.py start --repository ." in normalized
+    assert "`<<<FOUNDRY_BOOTSTRAP_OWNER_MARKDOWN>>>`" in normalized
+    assert "`<<<FOUNDRY_BOOTSTRAP_TURN>>>`" in normalized
+    assert "`next_question.title` plus `next_question.details_markdown`" in normalized
+    assert "Never paste or expose its raw JSON to the owner" in normalized
+    assert "status --operation-id <id>" in normalized
+    assert "rollback --operation-id <id>" in normalized
+    assert "Do not create or switch to a custom agent." in normalized
+    assert "Do not implement Foundry target resolution" in normalized
 
 
 def test_plugin_tree_contains_only_allowed_boundary_files() -> None:
@@ -122,12 +129,18 @@ def test_plugin_tree_contains_only_allowed_boundary_files() -> None:
     assert (OPTIMIZER_ROOT / "references" / "ADAPTER_MAPPING.md").is_file()
     assert (OPTIMIZER_ROOT / "references" / "TENZING_ATTRIBUTION.md").is_file()
     scripts_readme = _read(BOOTSTRAP_ROOT / "scripts" / "README.md")
-    assert "canonical checked-in home for the reviewed runtime" in scripts_readme
+    assert "canonical checked-in home for the reviewed owner bridge" in scripts_readme
+    assert "bootstrap.py" in scripts_readme
+    assert "only owner client over `BootstrapRunner`" in scripts_readme
     assert "install-runtime.ps1" in scripts_readme
     assert "install-runtime.sh" in scripts_readme
     assert "Store reviewed notes, migration pointers, and source references" in _read(
         BOOTSTRAP_ROOT / "references" / "README.md"
     )
+    references_readme = _read(BOOTSTRAP_ROOT / "references" / "README.md")
+    assert "Bootstrap bridge quick reference" in references_readme
+    assert "status --operation-id <id>" in references_readme
+    assert "rollback --operation-id <id>" in references_readme
     assert "Do not mirror the existing `src/foundry_opt/templates/` runtime content here" in _read(
         BOOTSTRAP_ROOT / "templates" / "README.md"
     )
@@ -137,7 +150,10 @@ def test_lock_template_uses_exact_placeholder_fields_and_only_canonical_launcher
     template = json.loads(_read(BOOTSTRAP_ROOT / "skill.lock.template.json"))
 
     assert template == EXPECTED_LOCK_TEMPLATE
-    assert not list(PLUGINS_ROOT.rglob("*.py"))
+    assert {
+        path.relative_to(REPOSITORY_ROOT).as_posix()
+        for path in PLUGINS_ROOT.rglob("*.py")
+    } == {"plugins/foundry-bootstrap/scripts/bootstrap.py"}
     assert {
         path.relative_to(REPOSITORY_ROOT).as_posix()
         for path in PLUGINS_ROOT.rglob("*.ps1")
@@ -155,6 +171,8 @@ def test_lock_template_uses_exact_placeholder_fields_and_only_canonical_launcher
 
 def test_build_configuration_includes_plugin_skill_in_source_artifacts() -> None:
     pyproject = tomllib.loads(_read(REPOSITORY_ROOT / "pyproject.toml"))
+    project = pyproject["project"]
     build_backend = pyproject["tool"]["uv"]["build-backend"]
 
+    assert project["scripts"] == {"foundry-opt": "foundry_opt:main"}
     assert "plugins/**" in build_backend["source-include"]

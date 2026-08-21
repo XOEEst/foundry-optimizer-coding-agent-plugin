@@ -164,4 +164,8 @@ export FOUNDRY_OPT_RUNTIME_LOCK_SHA256="$lock_hash"
 export FOUNDRY_OPT_RUNTIME_PACKAGE_PATH="$package_path"
 
 uv sync --frozen --project "$project_root" >/dev/null
+if [[ "${FOUNDRY_BOOTSTRAP_EMIT_RUNTIME_PYTHON:-}" == "1" ]]; then
+  uv run --no-sync --project "$project_root" python -c 'import sys; print(sys.executable)'
+  exit $?
+fi
 exec uv run --no-sync --project "$project_root" foundry-opt "$@"

@@ -1,7 +1,12 @@
 # Scripts
 
-This directory is the canonical checked-in home for the reviewed runtime
-install and verification launchers:
+This directory is the canonical checked-in home for the reviewed owner bridge
+and runtime install/verification launchers:
+
+- `bootstrap.py` — the only owner client over `BootstrapRunner`. It translates
+  `start`, `answer`, `approve`, `status`, and `rollback` requests into direct
+  runner calls, prints owner markdown separately from the machine envelope, and
+  uses the reviewed runtime contract when it must self-install the runtime.
 
 - `install-runtime.ps1`
 - `install-runtime.sh`

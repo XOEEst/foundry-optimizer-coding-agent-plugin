@@ -4,8 +4,9 @@ This repository separates top-level skill distribution from the shared
 `foundry_opt` runtime package.
 
 - `foundry-bootstrap/` is the owner bootstrap skill boundary. Its canonical
-  runtime install and verification scripts live under `scripts/`; the old
-  `src/foundry_opt/bootstrap/launch-bootstrap.*` paths remain thin
+  runtime install and verification scripts live under `scripts/`, and
+  `scripts/bootstrap.py` is the reviewed owner bridge over `BootstrapRunner`;
+  the old `src/foundry_opt/bootstrap/launch-bootstrap.*` paths remain thin
   source-checkout compatibility wrappers.
 - `foundry-agent-optimizer/` is the canonical issue-time optimizer skill folder.
   Setup workflows and bootstrap defaults install from this path, while legacy

@@ -195,5 +195,9 @@ $env:FOUNDRY_OPT_RUNTIME_LOCK_SHA256 = $lockHash
 $env:FOUNDRY_OPT_RUNTIME_PACKAGE_PATH = $packagePath
 
 Invoke-CheckedCommand uv -ArgumentList @("sync", "--frozen", "--project", $projectRoot) -SuppressOutput
+if ($env:FOUNDRY_BOOTSTRAP_EMIT_RUNTIME_PYTHON -eq "1") {
+  & uv run --no-sync --project $projectRoot python -c "import sys; print(sys.executable)"
+  exit $LASTEXITCODE
+}
 & uv run --no-sync --project $projectRoot foundry-opt @ForwardedArgs
 exit $LASTEXITCODE
