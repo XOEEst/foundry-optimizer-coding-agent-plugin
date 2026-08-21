@@ -133,8 +133,17 @@ def test_build_release_creates_expected_files_checksums_and_install_shape(
     assert not any(
         marker in name
         for name in archive_names
-        for marker in (".env", "__pycache__", ".pyc", ".git", "skill.lock.template.json", "references/", "templates/")
+        for marker in (
+            ".env",
+            "__pycache__",
+            ".pyc",
+            ".git",
+            "skill.lock.template.json",
+            "templates/",
+        )
     )
+    assert f"{ARCHIVE_ROOT}/scripts/bootstrap.py" in archive_names
+    assert f"{ARCHIVE_ROOT}/references/owner-flow.md" in archive_names
 
 
 def test_build_release_is_byte_deterministic_for_same_checkout(tmp_path: Path) -> None:

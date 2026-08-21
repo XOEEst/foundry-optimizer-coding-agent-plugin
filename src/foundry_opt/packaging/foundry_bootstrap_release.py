@@ -31,6 +31,10 @@ SKILL_LOCK_TEMPLATE = {
 }
 ARCHIVE_FILES = (
     "foundry-bootstrap/SKILL.md",
+    "foundry-bootstrap/references/owner-flow.md",
+    "foundry-bootstrap/references/recovery.md",
+    "foundry-bootstrap/references/security.md",
+    "foundry-bootstrap/scripts/bootstrap.py",
     "foundry-bootstrap/scripts/install-runtime.ps1",
     "foundry-bootstrap/scripts/install-runtime.sh",
     "foundry-bootstrap/skill.lock.json",
@@ -347,6 +351,10 @@ def build_foundry_bootstrap_skill(
 
     for relative_path in (
         "SKILL.md",
+        "references/owner-flow.md",
+        "references/recovery.md",
+        "references/security.md",
+        "scripts/bootstrap.py",
         "scripts/install-runtime.ps1",
         "scripts/install-runtime.sh",
     ):
