@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from typing import Any
 
 import httpx
@@ -99,6 +99,7 @@ class _ActionSnapshot:
     rollback: tuple[tuple[str, str, object], ...]
     branch_name: str | None = None
     variable_name: str | None = None
+    mutation_stage: str = "resolved"
 
 
 @dataclass(frozen=True)
@@ -110,6 +111,7 @@ class _ApplyBinding:
 
 
 _STATE_VERSION = 1
+_CHECKPOINT_VERSION = 1
 
 
 def _bounded_text(value: object, *, field: str, max_length: int = 255, error_type: type[Exception] = GitHubProviderError) -> str:
@@ -157,10 +159,6 @@ def _redacted_transport_error(message: str) -> GitHubProviderTransportError:
 
 def _fingerprint(label: str, value: object) -> FingerprintRecord:
     return FingerprintRecord(label=label, sha256=canonical_sha256(value))
-
-
-def _is_pending_snapshot(snapshot: _ActionSnapshot) -> bool:
-    return isinstance(snapshot.expected_after, Mapping) and snapshot.expected_after.get("pending") is True
 
 
 def _rollback_variable_name(payload: object) -> str:
@@ -214,6 +212,7 @@ def _encode_snapshot(snapshot: _ActionSnapshot) -> Mapping[str, object]:
         "rollback": [_canonicalized_document([operation, environment, payload]) for operation, environment, payload in snapshot.rollback],
         "branch_name": snapshot.branch_name,
         "variable_name": snapshot.variable_name,
+        "mutation_stage": snapshot.mutation_stage,
     }
 
 
@@ -244,6 +243,19 @@ def _decode_snapshot(value: object) -> _ActionSnapshot:
         raise GitHubProviderApplyError("snapshot.rollback must be a list")
     branch_name = _decode_branch_name(mapping.get("branch_name"))
     variable_name = _decode_variable_name(mapping.get("variable_name"))
+    mutation_stage = mapping.get("mutation_stage")
+    if mutation_stage is None:
+        expected_after = mapping.get("expected_after")
+        mutation_stage = (
+            "acknowledged"
+            if isinstance(expected_after, Mapping)
+            and expected_after.get("pending") is True
+            else "resolved"
+        )
+    if mutation_stage not in ("intent", "acknowledged", "resolved"):
+        raise GitHubProviderApplyError(
+            "snapshot mutation_stage is invalid"
+        )
     snapshot = _ActionSnapshot(
         action_id=action_id,
         kind=kind,
@@ -254,12 +266,14 @@ def _decode_snapshot(value: object) -> _ActionSnapshot:
         rollback=tuple(_decode_rollback_step(item) for item in rollback_raw),
         branch_name=branch_name,
         variable_name=variable_name,
+        mutation_stage=mutation_stage,
     )
     allowed_operations = {
         "github-environment": {"delete_environment"},
         "github-variable": {"restore_variable", "delete_variable"},
         "github-branch-policy": {
             "delete_branch_policy",
+            "delete_branch_policy_by_name",
             "restore_environment_policy",
         },
     }
@@ -286,6 +300,7 @@ class GitHubBootstrapProvider:
         http_client: httpx.Client | None = None,
         timeout: float = 10.0,
         json_max_bytes: int = _JSON_LIMIT,
+        checkpoint: Callable[[Mapping[str, object]], None] | None = None,
     ) -> None:
         if http_client is not None and transport is not None:
             raise ValueError("provide either http_client or transport, not both")
@@ -300,10 +315,23 @@ class GitHubBootstrapProvider:
         )
         self._json_max_bytes = int(json_max_bytes)
         self._last_apply_binding: _ApplyBinding | None = None
+        self._checkpoint = checkpoint
+        self._last_checkpoint: tuple[
+            BootstrapReceipt,
+            Mapping[str, object],
+            bool,
+        ] | None = None
+        self._restored_checkpoint: tuple[BootstrapReceipt, bool] | None = None
 
     def close(self) -> None:
         if self._owns_client:
             self._http.close()
+
+    def set_checkpoint(
+        self,
+        checkpoint: Callable[[Mapping[str, object]], None] | None,
+    ) -> None:
+        self._checkpoint = checkpoint
 
     def read_repository_settings(self, repository: str) -> Mapping[str, object]:
         owner, repo = _canonical_repo(repository)
@@ -349,7 +377,11 @@ class GitHubBootstrapProvider:
                 continue
             result.append(action.model_copy(update={"diagnostics": action.diagnostics + (repository,)}))
         return tuple(result)
+
     def apply_changes(self, plan: BootstrapPlan) -> BootstrapReceipt:
+        resumed = self._resume_checkpoint(plan)
+        if resumed is not None:
+            return resumed
         repository_state = self.read_repository_settings(plan.repository_identity)
         repository = _bounded_text(repository_state["repository"], field="repository")
         default_branch = _bounded_text(repository_state["default_branch"], field="default_branch")
@@ -360,8 +392,32 @@ class GitHubBootstrapProvider:
         changed: list[str] = []
         final_error: GitHubProviderApplyError | None = None
         try:
+            self._publish_checkpoint(
+                plan,
+                repository,
+                snapshots,
+                created,
+                adopted,
+                changed,
+                complete=False,
+            )
             for action in self.plan_changes(plan):
-                snapshot = self._apply_action(owner, repo, default_branch, action, snapshots)
+                snapshot = self._apply_action(
+                    owner,
+                    repo,
+                    default_branch,
+                    action,
+                    snapshots,
+                    checkpoint=lambda: self._publish_checkpoint(
+                        plan,
+                        repository,
+                        snapshots,
+                        created,
+                        adopted,
+                        changed,
+                        complete=False,
+                    ),
+                )
                 if snapshot is None:
                     continue
                 snapshots.append(snapshot)
@@ -371,9 +427,22 @@ class GitHubBootstrapProvider:
                     adopted.append(snapshot.action_id)
                 else:
                     changed.append(snapshot.action_id)
+                self._publish_checkpoint(
+                    plan,
+                    repository,
+                    snapshots,
+                    created,
+                    adopted,
+                    changed,
+                    complete=False,
+                )
             self._verify_final_state(owner, repo, default_branch, snapshots)
-        except GitHubProviderError as exc:
-            message = str(exc)
+        except Exception as exc:
+            message = (
+                str(exc)
+                if isinstance(exc, GitHubProviderError)
+                else "github apply failed"
+            )
             compensation_receipt: BootstrapReceipt | None = None
             provider_state: Mapping[str, object] = {}
             if snapshots:
@@ -408,6 +477,16 @@ class GitHubBootstrapProvider:
             raise final_error from None
         receipt = self._build_receipt(plan, repository, snapshots, created, adopted, changed)
         self._last_apply_binding = _ApplyBinding(receipt.receipt_hash, receipt.operation_id, repository, tuple(snapshots))
+        self._publish_checkpoint(
+            plan,
+            repository,
+            snapshots,
+            created,
+            adopted,
+            changed,
+            complete=True,
+            receipt=receipt,
+        )
         return receipt
 
     def _build_receipt(
@@ -436,6 +515,96 @@ class GitHubBootstrapProvider:
             error_info=error_info,
         )
 
+    def _publish_checkpoint(
+        self,
+        plan: BootstrapPlan,
+        repository: str,
+        snapshots: Sequence[_ActionSnapshot],
+        created: Sequence[str],
+        adopted: Sequence[str],
+        changed: Sequence[str],
+        *,
+        complete: bool,
+        receipt: BootstrapReceipt | None = None,
+    ) -> BootstrapReceipt:
+        checkpoint_receipt = receipt or self._build_receipt(
+            plan,
+            repository,
+            snapshots,
+            created,
+            adopted,
+            changed,
+            error_info=RedactedStatusInfo(
+                code="apply-in-flight",
+                summary="github apply is in flight",
+            ),
+        )
+        self._last_apply_binding = _ApplyBinding(
+            checkpoint_receipt.receipt_hash,
+            checkpoint_receipt.operation_id,
+            repository,
+            tuple(snapshots),
+        )
+        provider_state = self.export_provider_state(checkpoint_receipt)
+        payload = _canonicalized_document(
+            {
+                "version": _CHECKPOINT_VERSION,
+                "checkpoint": True,
+                "complete": complete,
+                "receipt": checkpoint_receipt.model_dump(mode="json"),
+                "provider_state": provider_state,
+            }
+        )
+        if not isinstance(payload, Mapping):
+            raise GitHubProviderApplyError(
+                "provider checkpoint is not an object"
+            )
+        safe_persisted_document(payload)
+        self._last_checkpoint = (
+            checkpoint_receipt,
+            payload,
+            complete,
+        )
+        if self._checkpoint is not None:
+            self._checkpoint(payload)
+        return checkpoint_receipt
+
+    def _resume_checkpoint(
+        self,
+        plan: BootstrapPlan,
+    ) -> BootstrapReceipt | None:
+        restored = self._restored_checkpoint
+        if restored is None:
+            return None
+        receipt, complete = restored
+        if (
+            receipt.operation_id != plan.operation_id
+            or receipt.repository_identity.casefold()
+            != plan.repository_identity.casefold()
+            or receipt.runtime_commit != plan.runtime_commit
+            or receipt.plan_hash != plan.plan_hash
+        ):
+            raise GitHubProviderApplyError(
+                "provider checkpoint does not match the active GitHub plan"
+            )
+        self._restored_checkpoint = None
+        if complete:
+            self.verify_changes(receipt)
+            return receipt
+        try:
+            rolled_back = self.verify_rollback(receipt)
+        except GitHubProviderError:
+            rolled_back = False
+        if not rolled_back:
+            self.rollback_changes(receipt)
+            if not self.verify_rollback(receipt):
+                raise GitHubProviderApplyError(
+                    "interrupted GitHub apply compensation verification failed"
+                )
+        self._last_apply_binding = None
+        self._last_checkpoint = None
+        return None
+
     def export_provider_state(self, receipt: BootstrapReceipt) -> Mapping[str, object]:
         binding = self._validate_receipt_binding(receipt)
         payload = {
@@ -454,6 +623,36 @@ class GitHubBootstrapProvider:
         return safe if isinstance(safe, Mapping) else {}
 
     def restore_provider_state(self, mapping: Mapping[str, object]) -> None:
+        if mapping.get("checkpoint") is True:
+            if mapping.get("version") != _CHECKPOINT_VERSION:
+                raise GitHubProviderApplyError(
+                    "provider checkpoint version is invalid"
+                )
+            receipt_raw = mapping.get("receipt")
+            provider_state = mapping.get("provider_state")
+            complete = mapping.get("complete")
+            if (
+                not isinstance(receipt_raw, Mapping)
+                or not isinstance(provider_state, Mapping)
+                or not isinstance(complete, bool)
+            ):
+                raise GitHubProviderApplyError(
+                    "provider checkpoint is incomplete"
+                )
+            receipt = BootstrapReceipt.model_validate(receipt_raw)
+            self._restore_exported_state(provider_state)
+            self._validate_receipt_binding(receipt)
+            self._restored_checkpoint = (receipt, complete)
+            safe = _canonicalized_document(mapping)
+            if not isinstance(safe, Mapping):
+                raise GitHubProviderApplyError(
+                    "provider checkpoint is not an object"
+                )
+            self._last_checkpoint = (receipt, safe, complete)
+            return
+        self._restore_exported_state(mapping)
+
+    def _restore_exported_state(self, mapping: Mapping[str, object]) -> None:
         payload = _as_mapping(mapping, field="provider state")
         version = payload.get("version")
         if version != _STATE_VERSION:
@@ -532,6 +731,8 @@ class GitHubBootstrapProvider:
         default_branch: str,
         action: BootstrapAction,
         snapshots: list[_ActionSnapshot],
+        *,
+        checkpoint: Callable[[], None],
     ) -> _ActionSnapshot | None:
         if action.kind == "github-environment":
             env_name = _bounded_text(action.diagnostics[0], field="environment")
@@ -540,8 +741,21 @@ class GitHubBootstrapProvider:
             if env.exists:
                 return _ActionSnapshot(action.action_id, action.kind, env_name, before, before, "adopted", ())
             rollback = (("delete_environment", env_name, None),)
-            snapshots.append(_ActionSnapshot(action.action_id, action.kind, env_name, before, {"pending": True}, "created", rollback))
+            desired = {
+                "exists": True,
+                "deployment_branch_policy": {
+                    "protected_branches": False,
+                    "custom_branch_policies": True,
+                },
+            }
+            snapshots.append(_ActionSnapshot(action.action_id, action.kind, env_name, before, desired, "created", rollback, mutation_stage="intent"))
+            checkpoint()
             self._put(f"/repos/{owner}/{repo}/environments/{env_name}", {"deployment_branch_policy": {"protected_branches": False, "custom_branch_policies": True}})
+            snapshots[-1] = replace(
+                snapshots[-1],
+                mutation_stage="acknowledged",
+            )
+            checkpoint()
             after = self._inventory_environment(owner, repo, env_name, default_branch)
             if not after.exists:
                 raise GitHubProviderError("created environment verification failed")
@@ -589,11 +803,18 @@ class GitHubBootstrapProvider:
                 if env.variable_state.exists
                 else ("delete_variable", env_name, {"variable_name": variable_name}),
             )
-            snapshots.append(_ActionSnapshot(action.action_id, action.kind, env_name, before, {"pending": True}, "changed", rollback, variable_name=variable_name))
+            desired = {"exists": True, "value": value}
+            snapshots.append(_ActionSnapshot(action.action_id, action.kind, env_name, before, desired, "changed", rollback, variable_name=variable_name, mutation_stage="intent"))
+            checkpoint()
             if env.variable_state.exists:
                 self._patch(f"/repos/{owner}/{repo}/environments/{env_name}/variables/{variable_name}", {"name": variable_name, "value": value})
             else:
                 self._post(f"/repos/{owner}/{repo}/environments/{env_name}/variables", {"name": variable_name, "value": value})
+            snapshots[-1] = replace(
+                snapshots[-1],
+                mutation_stage="acknowledged",
+            )
+            checkpoint()
             variable = self._read_environment_variable(owner, repo, env_name, variable_name)
             if variable.value != value:
                 raise GitHubProviderError("variable verification failed")
@@ -615,24 +836,66 @@ class GitHubBootstrapProvider:
             if env.requested_branch_policy.exists:
                 return _ActionSnapshot(action.action_id, action.kind, env_name, before, before, "adopted", (), branch_name=branch_name)
             rollback: list[tuple[str, str, object]] = []
+            rollback.append(
+                (
+                    "delete_branch_policy_by_name",
+                    env_name,
+                    {"branch_name": branch_name},
+                )
+            )
             if not self._policy_enabled(env.deployment_branch_policy):
                 rollback.append(("restore_environment_policy", env_name, env.deployment_branch_policy))
-            snapshots.append(_ActionSnapshot(action.action_id, action.kind, env_name, before, {"pending": True}, "changed", tuple(rollback), branch_name=branch_name))
+            desired_policy = self._enabled_policy_payload(
+                env.deployment_branch_policy
+            )
+            pending_after = {
+                "pending": True,
+                "deployment_branch_policy": desired_policy,
+                "branch_policy": {
+                    "exists": True,
+                    "policy_id": None,
+                    "name": branch_name,
+                    "type": "branch",
+                },
+            }
+            snapshots.append(_ActionSnapshot(action.action_id, action.kind, env_name, before, pending_after, "changed", tuple(rollback), branch_name=branch_name, mutation_stage="intent"))
+            checkpoint()
             self._put(
                 f"/repos/{owner}/{repo}/environments/{env_name}",
-                {"deployment_branch_policy": self._enabled_policy_payload(env.deployment_branch_policy)},
+                {"deployment_branch_policy": desired_policy},
             )
+            snapshots[-1] = replace(
+                snapshots[-1],
+                mutation_stage="acknowledged",
+            )
+            checkpoint()
             response = self._post(
                 f"/repos/{owner}/{repo}/environments/{env_name}/deployment_branch_policies",
                 {"name": branch_name, "type": "branch"},
                 allow_statuses={200, 201, 303},
             )
+            checkpoint()
             duplicate = response is not None and response.status_code == 303
             after = self._inventory_environment(owner, repo, env_name, branch_name)
             if not after.requested_branch_policy.exists:
                 raise GitHubProviderError("branch policy verification failed")
-            if not duplicate and after.requested_branch_policy.policy_id is not None:
-                rollback.insert(0, ("delete_branch_policy", env_name, after.requested_branch_policy.policy_id))
+            rollback = [
+                item
+                for item in rollback
+                if item[0] != "delete_branch_policy_by_name"
+            ]
+            if not duplicate:
+                if after.requested_branch_policy.policy_id is not None:
+                    rollback.insert(0, ("delete_branch_policy", env_name, after.requested_branch_policy.policy_id))
+                else:
+                    rollback.insert(
+                        0,
+                        (
+                            "delete_branch_policy_by_name",
+                            env_name,
+                            {"branch_name": branch_name},
+                        ),
+                    )
             snapshots.pop()
             return _ActionSnapshot(
                 action.action_id,
@@ -762,29 +1025,68 @@ class GitHubBootstrapProvider:
         default_branch: str | None = None,
         verify_expected: bool = False,
     ) -> None:
+        already_rolled_back: set[str] = set()
         if verify_expected:
             branch = default_branch or "main"
             for snapshot in snapshots:
                 if not snapshot.rollback:
                     continue
-                if _is_pending_snapshot(snapshot):
-                    # This action's own apply failed before it could be verified, so
-                    # there is no confirmed post-state to compare against; compensate
-                    # unconditionally instead of refusing on a manufactured drift.
-                    continue
                 current = self._read_live_state(owner, repo, branch, snapshot)
-                if canonical_sha256(current) != canonical_sha256(
+                if canonical_sha256(current) == canonical_sha256(
+                    snapshot.before
+                ):
+                    if snapshot.mutation_stage == "acknowledged":
+                        continue
+                    already_rolled_back.add(snapshot.action_id)
+                    continue
+                if canonical_sha256(current) == canonical_sha256(
                     snapshot.expected_after
                 ):
-                    raise GitHubProviderError(
-                        f"rollback refused because live state drifted: {snapshot.action_id}"
-                    )
+                    continue
+                if self._is_pending_branch_operation_state(snapshot, current):
+                    continue
+                if self._is_branch_rollback_intermediate(snapshot, current):
+                    continue
+                raise GitHubProviderError(
+                    f"rollback refused because live state drifted: {snapshot.action_id}"
+                )
         operations: list[tuple[str, str, object]] = []
         for snapshot in reversed(snapshots):
+            if snapshot.action_id in already_rolled_back:
+                continue
             operations.extend(snapshot.rollback)
         for operation, environment, value in operations:
             if operation == "delete_branch_policy":
                 self._delete(f"/repos/{owner}/{repo}/environments/{environment}/deployment_branch_policies/{value}", allow_statuses={204, 404})
+            elif operation == "delete_branch_policy_by_name":
+                payload = value if isinstance(value, Mapping) else {}
+                branch_name = _bounded_text(
+                    payload.get("branch_name"),
+                    field="rollback branch_name",
+                    error_type=GitHubProviderApplyError,
+                )
+                environment_state = self._inventory_environment(
+                    owner,
+                    repo,
+                    environment,
+                    branch_name,
+                )
+                policy_id = environment_state.requested_branch_policy.policy_id
+                if (
+                    environment_state.requested_branch_policy.exists
+                    and policy_id is None
+                ):
+                    raise GitHubProviderError(
+                        "branch policy rollback requires its numeric id"
+                    )
+                if policy_id is not None:
+                    self._delete(
+                        (
+                            f"/repos/{owner}/{repo}/environments/{environment}/"
+                            f"deployment_branch_policies/{policy_id}"
+                        ),
+                        allow_statuses={204, 404},
+                    )
             elif operation == "restore_variable":
                 previous = value if isinstance(value, Mapping) else {}
                 previous_value = previous.get("value")
@@ -798,6 +1100,65 @@ class GitHubBootstrapProvider:
                 self._put(f"/repos/{owner}/{repo}/environments/{environment}", {"deployment_branch_policy": value})
             elif operation == "delete_environment":
                 self._delete(f"/repos/{owner}/{repo}/environments/{environment}", allow_statuses={204, 404})
+
+    def _is_branch_rollback_intermediate(
+        self,
+        snapshot: _ActionSnapshot,
+        current: object,
+    ) -> bool:
+        if (
+            snapshot.kind != "github-branch-policy"
+            or not isinstance(current, Mapping)
+            or not isinstance(snapshot.before, Mapping)
+            or not isinstance(snapshot.expected_after, Mapping)
+        ):
+            return False
+        current_branch = current.get("branch_policy")
+        before_branch = snapshot.before.get("branch_policy")
+        return (
+            canonical_sha256(current.get("deployment_branch_policy"))
+            == canonical_sha256(
+                snapshot.expected_after.get("deployment_branch_policy")
+            )
+            and canonical_sha256(current_branch)
+            == canonical_sha256(before_branch)
+        )
+
+    def _is_pending_branch_operation_state(
+        self,
+        snapshot: _ActionSnapshot,
+        current: object,
+    ) -> bool:
+        if (
+            snapshot.kind != "github-branch-policy"
+            or not isinstance(current, Mapping)
+            or not isinstance(snapshot.before, Mapping)
+            or not isinstance(snapshot.expected_after, Mapping)
+            or snapshot.expected_after.get("pending") is not True
+        ):
+            return False
+        if canonical_sha256(
+            current.get("deployment_branch_policy")
+        ) != canonical_sha256(
+            snapshot.expected_after.get("deployment_branch_policy")
+        ):
+            return False
+        current_branch = current.get("branch_policy")
+        before_branch = snapshot.before.get("branch_policy")
+        if canonical_sha256(current_branch) == canonical_sha256(before_branch):
+            return True
+        desired_branch = snapshot.expected_after.get("branch_policy")
+        if not isinstance(current_branch, Mapping) or not isinstance(
+            desired_branch,
+            Mapping,
+        ):
+            return False
+        return (
+            current_branch.get("exists") is True
+            and current_branch.get("name") == desired_branch.get("name")
+            and current_branch.get("type") == desired_branch.get("type")
+            and isinstance(current_branch.get("policy_id"), int)
+        )
 
     def _policy_enabled(self, payload: Mapping[str, object] | None) -> bool:
         return bool(isinstance(payload, Mapping) and payload.get("custom_branch_policies") is True and payload.get("protected_branches") is False)

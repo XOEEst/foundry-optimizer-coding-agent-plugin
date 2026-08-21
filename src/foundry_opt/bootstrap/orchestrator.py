@@ -9,6 +9,9 @@ from foundry_opt.bootstrap.contracts import BindingAssessment, BootstrapAction, 
 from foundry_opt.bootstrap.discovery import DiscoveryResult, discover_repository_agents
 from foundry_opt.bootstrap.errors import BootstrapApplyError
 from foundry_opt.bootstrap.operation_state import DiscoveredAgentRecord, DiscoveryBlockerRecord, OperationStateEnvelope, SelectionPlan, next_generation, read_operation_state, status_from_state, write_operation_state
+from foundry_opt.bootstrap.providers.azure import (
+    rollback_failure_details as azure_rollback_failure_details,
+)
 from foundry_opt.bootstrap.providers.foundry import (
     FoundryAdapterError,
     FoundryPrerequisiteError,
@@ -136,13 +139,20 @@ class BootstrapOrchestrator:
             return
 
         def _persist(snapshot: Mapping[str, object]) -> None:
+            if snapshot.get("checkpoint") is not True:
+                raise BootstrapApplyError(
+                    "phase checkpoint marker is invalid"
+                )
+            safe_persisted_document(snapshot)
             latest = read_operation_state(repository_id, operation_id, state_root=self._state_root)
             receipts = tuple(
                 item.model_copy(update={"provider_state": dict(snapshot)}) if item.phase == phase and item.state == "applying" else item
                 for item in latest.phase_receipts
             )
             if not any(item.phase == phase and item.state == "applying" for item in latest.phase_receipts):
-                return
+                raise BootstrapApplyError(
+                    "phase checkpoint has no applying parent state"
+                )
             write_operation_state(next_generation(latest, phase_receipts=receipts), expected_generation=latest.generation, state_root=self._state_root)
             self._checkpoints[phase] = dict(snapshot)
 
@@ -152,6 +162,7 @@ class BootstrapOrchestrator:
         setter = getattr(self._drivers[phase], "set_checkpoint", None)
         if callable(setter):
             setter(None)
+        self._checkpoints.pop(phase, None)
 
     @staticmethod
     def _resumable_provider_state(envelope: OperationStateEnvelope, phase: ApplyPhaseName) -> Mapping[str, object]:
@@ -164,6 +175,7 @@ class BootstrapOrchestrator:
     def _restore_in_flight(self, phase: ApplyPhaseName, state: Mapping[str, object]) -> None:
         if not state.get("checkpoint"):
             return
+        self._checkpoints[phase] = dict(state)
         restore = getattr(self._drivers[phase], "restore_provider_state", None)
         if callable(restore):
             restore(state)
@@ -197,7 +209,11 @@ class BootstrapOrchestrator:
         write_operation_state(updated, expected_generation=envelope.generation, state_root=self._state_root)
         envelope = updated
         self._install_checkpoint(phase, repository_id=repository_id, operation_id=operation_id)
-        self._restore_in_flight(phase, applying.provider_state)
+        try:
+            self._restore_in_flight(phase, applying.provider_state)
+        except BaseException:
+            self._clear_checkpoint(phase)
+            raise
         try:
             receipt = self._drivers[phase].apply(phase_plan)
             if receipt.plan_hash != phase_plan.plan_hash:
@@ -229,16 +245,38 @@ class BootstrapOrchestrator:
             rollback_receipt, rollback_state = _rollback_failure_details(exc)
             if rollback_receipt is not None:
                 original_receipt = rollback_receipt
-                compensation_actions = rollback_receipt.compensation_required_actions
+                compensation_actions = self._compensation_actions(
+                    rollback_receipt
+                )
                 provider_state = rollback_state
             if 'receipt' in locals() and isinstance(locals().get("receipt"), BootstrapReceipt):
                 original_receipt = locals()["receipt"]
-                compensation_actions = original_receipt.compensation_required_actions
+                compensation_actions = self._compensation_actions(
+                    original_receipt
+                )
+            checkpoint = self._checkpoints.get(phase)
+            if checkpoint:
+                # Preserve the in-flight generation handle so a retry resumes it.
+                if not provider_state:
+                    provider_state = dict(checkpoint)
+                if original_receipt is None:
+                    checkpoint_receipt = checkpoint.get("receipt")
+                    if isinstance(checkpoint_receipt, Mapping):
+                        candidate = BootstrapReceipt.model_validate(
+                            checkpoint_receipt
+                        )
+                        if (
+                            candidate.operation_id == envelope.operation_id
+                            and candidate.repository_identity
+                            == envelope.bootstrap_plan.repository_identity
+                            and candidate.plan_hash == phase_plan.plan_hash
+                        ):
+                            original_receipt = candidate
+                            compensation_actions = self._compensation_actions(
+                                candidate
+                            )
             failure = failure_receipt(phase=phase, provider=phase, operation_id=envelope.operation_id, runtime_repository=envelope.runtime_repository, runtime_commit=envelope.runtime_commit, repository_identity=envelope.bootstrap_plan.repository_identity, parent_plan_hash=envelope.bootstrap_plan.plan_hash, phase_plan_hash=phase_plan.plan_hash, before_fingerprints=live_fingerprints, code=code, summary=summary, compensation_required_actions=compensation_actions)
             state = "compensation_required" if compensation_actions else "failed"
-            if not provider_state and self._checkpoints.get(phase):
-                # Preserve the in-flight generation handle so a retry resumes it.
-                provider_state = dict(self._checkpoints[phase])
             failed_receipt = PhaseReceipt(phase=phase, state=state, provider=phase, receipt=original_receipt or failure.receipt, parent_plan_hash=envelope.bootstrap_plan.plan_hash, phase_plan_hash=phase_plan.plan_hash, approval_hash=approval.approval_hash, summary=failure.summary, provider_state=provider_state, recorded_fingerprints=live_fingerprints)
             latest = read_operation_state(repository_id, operation_id, state_root=self._state_root)
             envelope = next_generation(latest, phase_receipts=self._replace_phase(latest.phase_receipts, failed_receipt))
@@ -315,6 +353,20 @@ class BootstrapOrchestrator:
         safe_persisted_document(safe)
         return safe
 
+    @staticmethod
+    def _compensation_actions(
+        receipt: BootstrapReceipt,
+    ) -> tuple[str, ...]:
+        return tuple(
+            dict.fromkeys(
+                (
+                    *receipt.compensation_required_actions,
+                    *receipt.created_actions,
+                    *receipt.changed_actions,
+                )
+            )
+        )
+
     def _sanitize_error(self, exc: Exception) -> tuple[str, str]:
         if isinstance(exc, FoundryAdapterError):
             details = [type(exc).__name__, f"kind={exc.kind}"]
@@ -337,6 +389,7 @@ def _rollback_failure_details(
     exc: BaseException,
 ) -> tuple[BootstrapReceipt | None, Mapping[str, object]]:
     for resolver in (
+        azure_rollback_failure_details,
         foundry_rollback_failure_details,
         github_rollback_failure_details,
     ):

@@ -544,6 +544,10 @@ class GitHubAzureConnectionManager:
             "azure": azure_driver,
         }
         self._state_root = Path(state_root) if state_root is not None else None
+        self._checkpoints: dict[
+            ConnectionPhaseName,
+            Mapping[str, object],
+        ] = {}
 
     def build_plan(
         self,
@@ -640,8 +644,6 @@ class GitHubAzureConnectionManager:
     ) -> ConnectionReceipt:
         self.bind_approval(plan, approval)
         envelope = self._load_bound_state(plan)
-        if any(item.state == "applying" for item in envelope.phase_receipts):
-            raise BootstrapApplyError("connection cannot safely resume an interrupted in-flight child phase")
         existing = {item.phase: item for item in envelope.phase_receipts}
         if all(existing.get(phase) is not None and existing[phase].state == "applied" for phase in _PHASES):
             return self._build_receipt(envelope)
@@ -653,14 +655,56 @@ class GitHubAzureConnectionManager:
         latest = envelope
         for phase in _PHASES:
             current = {item.phase: item for item in latest.phase_receipts}.get(phase)
-            if current is not None:
+            if current is not None and current.state == "applied":
                 continue
-            live = self._validate_live_fingerprints(plan, phase, context=context)
-            applying = self._applying_phase_receipt(plan, phase, approval, live)
-            latest = self._write_phase_receipt(latest, applying)
-            finalized = self._execute_phase(plan, phase, approval, live)
+            if current is not None and current.state != "applying":
+                raise BootstrapApplyError(
+                    "connection apply cannot resume a failed or rolled-back connection step"
+                )
+            live = self._validate_live_fingerprints(
+                plan,
+                phase,
+                context=context,
+                current=current,
+                approval=approval,
+            )
+            if current is None:
+                applying = self._applying_phase_receipt(
+                    plan,
+                    phase,
+                    approval,
+                    live,
+                )
+                latest = self._write_phase_receipt(latest, applying)
+            else:
+                applying = current
+                if not (
+                    applying.provider_state.get("checkpoint") is True
+                    and applying.approval_hash == approval.approval_hash
+                ):
+                    raise BootstrapApplyError(
+                        "connection cannot safely resume an uncheckpointed child phase"
+                    )
+            self._install_checkpoint(plan, phase)
+            try:
+                self._restore_in_flight(phase, applying.provider_state)
+                finalized = self._execute_phase(
+                    plan,
+                    phase,
+                    approval,
+                    live,
+                )
+            finally:
+                self._clear_checkpoint(phase)
+            latest = self._load_bound_state(plan)
             latest = self._write_phase_receipt(latest, finalized)
             if finalized.state != "applied":
+                if finalized.state == "compensation_required":
+                    finalized, _ = self._rollback_child_phase(
+                        finalized,
+                        reason=f"rolled back failed {phase}",
+                    )
+                    latest = self._write_phase_receipt(latest, finalized)
                 if phase == "azure":
                     latest = self._compensate_prior_success(plan, latest)
                 return self._build_receipt(latest)
@@ -780,6 +824,8 @@ class GitHubAzureConnectionManager:
         phase: ConnectionPhaseName,
         *,
         context: Mapping[str, object] | None,
+        current: PhaseReceipt | None = None,
+        approval: ConnectionApproval | None = None,
     ) -> tuple[FingerprintRecord, ...]:
         phase_plan = plan.phase_plan(phase)
         live = _sorted_fingerprints(
@@ -796,6 +842,17 @@ class GitHubAzureConnectionManager:
             )
         )
         if live != phase_plan.live_fingerprints:
+            resumable = (
+                current is not None
+                and current.state == "applying"
+                and current.provider_state.get("checkpoint") is True
+                and approval is not None
+                and current.approval_hash == approval.approval_hash
+                and _sorted_fingerprints(current.recorded_fingerprints)
+                == phase_plan.live_fingerprints
+            )
+            if resumable:
+                return phase_plan.live_fingerprints
             raise BootstrapApplyError(f"{phase} live fingerprints drifted from the approved connection plan")
         return live
 
@@ -829,6 +886,76 @@ class GitHubAzureConnectionManager:
             recorded_fingerprints=tuple(live),
         )
 
+    def _install_checkpoint(
+        self,
+        plan: ConnectionPlan,
+        phase: ConnectionPhaseName,
+    ) -> None:
+        setter = getattr(self._drivers[phase], "set_checkpoint", None)
+        if not callable(setter):
+            return
+
+        def _persist(snapshot: Mapping[str, object]) -> None:
+            if snapshot.get("checkpoint") is not True:
+                raise BootstrapApplyError(
+                    "connection child checkpoint marker is invalid"
+                )
+            latest = self._load_bound_state(plan)
+            current = next(
+                (
+                    item
+                    for item in latest.phase_receipts
+                    if item.phase == phase and item.state == "applying"
+                ),
+                None,
+            )
+            if current is None:
+                raise BootstrapApplyError(
+                    "connection child checkpoint has no applying parent state"
+                )
+            receipt = current.receipt
+            receipt_raw = snapshot.get("receipt")
+            if isinstance(receipt_raw, Mapping):
+                candidate = BootstrapReceipt.model_validate(receipt_raw)
+                phase_plan = plan.phase_plan(phase).plan
+                if (
+                    candidate.operation_id != plan.operation_id
+                    or candidate.repository_identity
+                    != plan.repository_identity
+                    or candidate.plan_hash != phase_plan.plan_hash
+                ):
+                    raise BootstrapApplyError(
+                        "connection child checkpoint does not match its plan"
+                    )
+                receipt = candidate
+            safe_persisted_document(snapshot)
+            checkpointed = current.model_copy(
+                update={
+                    "receipt": receipt,
+                    "provider_state": dict(snapshot),
+                }
+            )
+            self._write_phase_receipt(latest, checkpointed)
+            self._checkpoints[phase] = dict(snapshot)
+
+        setter(_persist)
+
+    def _clear_checkpoint(self, phase: ConnectionPhaseName) -> None:
+        setter = getattr(self._drivers[phase], "set_checkpoint", None)
+        if callable(setter):
+            setter(None)
+        self._checkpoints.pop(phase, None)
+
+    def _restore_in_flight(
+        self,
+        phase: ConnectionPhaseName,
+        provider_state: Mapping[str, object],
+    ) -> None:
+        if provider_state.get("checkpoint") is not True:
+            return
+        self._checkpoints[phase] = dict(provider_state)
+        self._drivers[phase].restore_provider_state(provider_state)
+
     def _execute_phase(
         self,
         plan: ConnectionPlan,
@@ -843,7 +970,8 @@ class GitHubAzureConnectionManager:
             receipt = driver.apply(phase_plan.plan)
             if receipt.plan_hash != phase_plan.plan.plan_hash:
                 raise BootstrapApplyError("provider receipt does not match the child connection phase plan")
-            provider_state = self._safe_provider_state(driver, receipt)
+            provider_state = driver.export_provider_state(receipt)
+            safe_persisted_document(provider_state)
             if not driver.verify(receipt):
                 raise BootstrapApplyError("connection child phase verification failed")
             return PhaseReceipt(
@@ -862,14 +990,33 @@ class GitHubAzureConnectionManager:
             original_receipt = receipt if isinstance(receipt, BootstrapReceipt) else None
             compensation_actions: tuple[str, ...] = ()
             provider_state: Mapping[str, object] = {}
+            checkpoint = self._checkpoints.get(phase, {})
+            checkpoint_receipt: BootstrapReceipt | None = None
+            checkpoint_raw = checkpoint.get("receipt")
+            if isinstance(checkpoint_raw, Mapping):
+                checkpoint_receipt = BootstrapReceipt.model_validate(
+                    checkpoint_raw
+                )
             rollback_receipt, rollback_state = _failure_details(exc)
             if rollback_receipt is not None:
                 original_receipt = rollback_receipt
-                compensation_actions = rollback_receipt.compensation_required_actions
+                compensation_actions = self._compensation_actions(
+                    rollback_receipt
+                )
                 provider_state = rollback_state
             elif original_receipt is not None:
-                compensation_actions = original_receipt.compensation_required_actions
+                compensation_actions = self._compensation_actions(
+                    original_receipt
+                )
                 provider_state = self._safe_provider_state(driver, original_receipt)
+                if not provider_state and checkpoint:
+                    provider_state = checkpoint
+            elif checkpoint_receipt is not None:
+                original_receipt = checkpoint_receipt
+                compensation_actions = self._compensation_actions(
+                    checkpoint_receipt
+                )
+                provider_state = checkpoint
             code, summary = self._sanitize_error(exc)
             failure = failure_receipt(
                 phase=phase,
@@ -898,6 +1045,20 @@ class GitHubAzureConnectionManager:
                 recorded_fingerprints=tuple(live),
             )
 
+    @staticmethod
+    def _compensation_actions(
+        receipt: BootstrapReceipt,
+    ) -> tuple[str, ...]:
+        return tuple(
+            dict.fromkeys(
+                (
+                    *receipt.compensation_required_actions,
+                    *receipt.created_actions,
+                    *receipt.changed_actions,
+                )
+            )
+        )
+
     def _rollback_child_phase(
         self,
         current: PhaseReceipt,
@@ -906,7 +1067,8 @@ class GitHubAzureConnectionManager:
     ) -> tuple[PhaseReceipt, bool]:
         driver = self._drivers[current.phase]  # type: ignore[index]
         try:
-            driver.restore_provider_state(current.provider_state)
+            if current.provider_state:
+                driver.restore_provider_state(current.provider_state)
             driver.rollback(current.receipt)
             if not driver.verify_rollback(current.receipt):
                 raise BootstrapApplyError("connection child phase rollback verification failed")

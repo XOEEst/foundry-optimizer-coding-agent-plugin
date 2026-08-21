@@ -6,7 +6,12 @@ import httpx
 import pytest
 
 from foundry_opt.bootstrap.canonical import canonical_sha256
-from foundry_opt.bootstrap.contracts import BootstrapAction, BootstrapPlan, FingerprintRecord
+from foundry_opt.bootstrap.contracts import (
+    BootstrapAction,
+    BootstrapPlan,
+    BootstrapReceipt,
+    FingerprintRecord,
+)
 from foundry_opt.bootstrap.providers.github import (
     GitHubBootstrapProvider,
     GitHubProviderApplyError,
@@ -290,6 +295,190 @@ def _stateful_handler(state: dict[str, object], log: list[tuple[str, str, object
         raise AssertionError((method, path))
 
     return handler
+
+
+def test_partial_environment_checkpoint_compensates_after_process_exit() -> None:
+    state = {
+        "env_exists": False,
+        "policy": None,
+        "variable_value": None,
+        "branch_policies": [],
+        "next_policy_id": 41,
+    }
+    log: list[tuple[str, str, object | None]] = []
+    checkpoints: list[dict[str, object]] = []
+
+    def checkpoint(snapshot) -> None:
+        checkpoints.append(json.loads(json.dumps(snapshot)))
+        if len(checkpoints) == 3:
+            raise SystemExit("simulated process exit")
+
+    transport = FakeGitHubTransport(_stateful_handler(state, log))
+    provider = GitHubBootstrapProvider(
+        token="ghp_secret",
+        transport=transport,
+        checkpoint=checkpoint,
+    )
+    plan = _plan(
+        BootstrapAction(
+            action_id="env",
+            phase="github",
+            stage="planned",
+            kind="github-environment",
+            diagnostics=("foundry-production",),
+        )
+    )
+
+    with pytest.raises(SystemExit, match="simulated process exit"):
+        provider.apply_changes(plan)
+
+    checkpoint_state = checkpoints[-1]
+    assert "ghp_secret" not in json.dumps(checkpoint_state)
+    assert (
+        checkpoint_state["provider_state"]["snapshots"][0]["mutation_stage"]
+        == "acknowledged"
+    )
+    receipt = BootstrapReceipt.model_validate(checkpoint_state["receipt"])
+    restarted = GitHubBootstrapProvider(
+        token="ghp_secret",
+        transport=transport,
+    )
+    restarted.restore_provider_state(checkpoint_state)
+    restarted.rollback_changes(receipt)
+
+    assert restarted.verify_rollback(receipt) is True
+    assert state["env_exists"] is False
+
+
+def test_pending_variable_rollback_refuses_external_drift() -> None:
+    state = {
+        "env_exists": True,
+        "policy": {
+            "protected_branches": False,
+            "custom_branch_policies": True,
+        },
+        "variable_value": "reviewed-value",
+        "branch_policies": [],
+        "next_policy_id": 61,
+    }
+    log: list[tuple[str, str, object | None]] = []
+    checkpoints: list[dict[str, object]] = []
+
+    def checkpoint(snapshot) -> None:
+        checkpoints.append(json.loads(json.dumps(snapshot)))
+        if len(checkpoints) == 2:
+            raise SystemExit("simulated process exit")
+
+    transport = FakeGitHubTransport(_stateful_handler(state, log))
+    provider = GitHubBootstrapProvider(
+        token="ghp_secret",
+        transport=transport,
+        checkpoint=checkpoint,
+    )
+    plan = _plan(
+        BootstrapAction(
+            action_id="var",
+            phase="github",
+            stage="planned",
+            kind="github-variable",
+            diagnostics=(
+                "foundry-production",
+                "approved-client-id",
+            ),
+        )
+    )
+
+    with pytest.raises(SystemExit, match="simulated process exit"):
+        provider.apply_changes(plan)
+
+    state["variable_value"] = "external-value"
+    checkpoint_state = checkpoints[-1]
+    receipt = BootstrapReceipt.model_validate(checkpoint_state["receipt"])
+    restarted = GitHubBootstrapProvider(
+        token="ghp_secret",
+        transport=transport,
+    )
+    restarted.restore_provider_state(checkpoint_state)
+
+    with pytest.raises(
+        GitHubProviderError,
+        match="live state drifted",
+    ):
+        restarted.rollback_changes(receipt)
+
+    assert state["variable_value"] == "external-value"
+
+
+def test_partial_rollback_retries_from_recorded_intermediate_state() -> None:
+    state = {
+        "env_exists": False,
+        "policy": None,
+        "variable_value": None,
+        "branch_policies": [],
+        "next_policy_id": 71,
+    }
+    log: list[tuple[str, str, object | None]] = []
+    base_handler = _stateful_handler(state, log)
+    fail_variable_delete = True
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal fail_variable_delete
+        if (
+            fail_variable_delete
+            and request.method == "DELETE"
+            and request.url.path.endswith(
+                "/variables/AZURE_OPTIMIZER_CLIENT_ID"
+            )
+        ):
+            fail_variable_delete = False
+            return _response(500, {"message": "transient"})
+        return base_handler(request)
+
+    transport = FakeGitHubTransport(handler)
+    plan = _plan(
+        BootstrapAction(
+            action_id="env",
+            phase="github",
+            stage="planned",
+            kind="github-environment",
+            diagnostics=("foundry-production",),
+        ),
+        BootstrapAction(
+            action_id="var",
+            phase="github",
+            stage="planned",
+            kind="github-variable",
+            diagnostics=("foundry-production", "client-id"),
+        ),
+        BootstrapAction(
+            action_id="branch",
+            phase="github",
+            stage="planned",
+            kind="github-branch-policy",
+            diagnostics=("foundry-production", "release"),
+        ),
+    )
+    provider = GitHubBootstrapProvider(
+        token="ghp_secret",
+        transport=transport,
+    )
+    receipt = provider.apply_changes(plan)
+    exported = provider.export_provider_state(receipt)
+
+    with pytest.raises(GitHubProviderError):
+        provider.rollback_changes(receipt)
+
+    assert state["branch_policies"] == []
+    assert state["variable_value"] == "client-id"
+    restarted = GitHubBootstrapProvider(
+        token="ghp_secret",
+        transport=transport,
+    )
+    restarted.restore_provider_state(exported)
+    restarted.rollback_changes(receipt)
+
+    assert restarted.verify_rollback(receipt) is True
+    assert state["env_exists"] is False
 
 
 def test_export_restore_verify_rollback_restart_flow() -> None:

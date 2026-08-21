@@ -16,6 +16,7 @@ from foundry_opt.bootstrap.contracts import (
     BootstrapReceipt,
     FingerprintRecord,
 )
+from foundry_opt.bootstrap.errors import BootstrapApplyError
 from foundry_opt.bootstrap.repository_setup import (
     BootstrapRepositorySetupHandler,
     RepositorySetupCoordinator,
@@ -155,6 +156,119 @@ class _Drivers:
         return self.github_driver
 
 
+class _BoundaryDriver(_Driver):
+    def __init__(
+        self,
+        phase: str,
+        calls: list[str],
+        *,
+        fail_at: str | None = None,
+    ) -> None:
+        super().__init__(phase, calls)
+        self.fail_at = fail_at
+        self.mutated = False
+        self._checkpoint = None
+
+    def set_checkpoint(self, checkpoint) -> None:
+        self._checkpoint = checkpoint
+
+    def plan(self, context: dict[str, object]):
+        if self.fail_at == "plan":
+            raise RuntimeError(f"{self.phase} plan failed")
+        return super().plan(context)
+
+    def apply(self, plan: BootstrapPlan) -> BootstrapReceipt:
+        self.calls.append(f"{self.phase}:apply")
+        receipt = BootstrapReceipt.create(
+            operation_id=plan.operation_id,
+            runtime_repository=plan.runtime_repository,
+            runtime_commit=plan.runtime_commit,
+            repository_identity=plan.repository_identity,
+            plan_hash=plan.plan_hash,
+            created_actions=(f"{self.phase}-connection",),
+            compensation_required_actions=(f"{self.phase}-connection",),
+        )
+        self.mutated = True
+        if self._checkpoint is not None:
+            provider_state = self._provider_state(receipt)
+            self._checkpoint(
+                {
+                    "version": 1,
+                    "checkpoint": True,
+                    "complete": self.fail_at != "apply",
+                    "receipt": receipt.model_dump(mode="json"),
+                    "provider_state": provider_state,
+                }
+            )
+        if self.fail_at == "apply":
+            raise RuntimeError(f"{self.phase} apply failed")
+        return receipt
+
+    def verify(self, receipt: BootstrapReceipt) -> bool:
+        self.calls.append(f"{self.phase}:verify")
+        return self.fail_at != "verify"
+
+    def export_provider_state(
+        self,
+        receipt: BootstrapReceipt,
+    ) -> dict[str, object]:
+        self.calls.append(f"{self.phase}:export")
+        if self.fail_at == "export":
+            raise RuntimeError(f"{self.phase} export failed")
+        return self._provider_state(receipt)
+
+    def _provider_state(
+        self,
+        receipt: BootstrapReceipt,
+    ) -> dict[str, object]:
+        state: dict[str, object] = {
+            "receipt_hash": receipt.receipt_hash,
+        }
+        if self.phase == "azure":
+            state["identity"] = {
+                "client_id": CLIENT_ID,
+                "principal_id": PRINCIPAL_ID,
+            }
+        return state
+
+    def restore_provider_state(self, mapping: dict[str, object]) -> None:
+        self.restored.append(dict(mapping))
+
+    def rollback(self, receipt: BootstrapReceipt) -> None:
+        self.calls.append(f"{self.phase}:rollback")
+        self.rolled_back.append(receipt.receipt_hash)
+        self.mutated = False
+
+    def verify_rollback(self, receipt: BootstrapReceipt) -> bool:
+        return not self.mutated
+
+
+class _BoundaryDrivers:
+    def __init__(
+        self,
+        *,
+        azure_failure: str | None = None,
+        github_failure: str | None = None,
+    ) -> None:
+        self.calls: list[str] = []
+        self.azure_driver = _BoundaryDriver(
+            "azure",
+            self.calls,
+            fail_at=azure_failure,
+        )
+        self.github_driver = _BoundaryDriver(
+            "github",
+            self.calls,
+            fail_at=github_failure,
+        )
+
+    def azure(self, plan_input):
+        return self.azure_driver
+
+    def github(self, plan_input):
+        return self.github_driver
+
+
 def _connection_operation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -256,6 +370,42 @@ def test_connection_handler_advances_to_commit_review(
     assert outcome.child_refs[-1].step == "connection"
 
 
+def test_azure_external_drift_invalidates_connection_approval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operation = _connection_operation(tmp_path, monkeypatch)
+    drivers = _Drivers()
+    coordinator = ConnectionSetupCoordinator(
+        inventory=_Inventory(),
+        drivers=drivers,
+        repository_coordinator=RepositorySetupCoordinator(
+            state_root=tmp_path / "repository-state"
+        ),
+        state_root=tmp_path / "connection-state",
+    )
+    coordinator.review(operation)
+    drivers.azure_driver.live_fingerprints = lambda context: (
+        FingerprintRecord(
+            label="azure:inventory",
+            sha256="c" * 64,
+        ),
+    )
+
+    with pytest.raises(
+        BootstrapApplyError,
+        match="inventory drifted",
+    ):
+        coordinator.approve(
+            operation,
+            actor="repo-owner",
+            summary="Approve connection.",
+        )
+
+    assert "azure:apply" not in drivers.calls
+    assert coordinator.build(operation).lifecycle_state == "awaiting_approval"
+
+
 def test_github_failure_compensates_azure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -327,3 +477,126 @@ def test_connection_rollback_restores_registry_identity(
     assert applied["identity"]["kind"] == "user_assigned_managed_identity"
     assert state.lifecycle_state == "rolled_back"
     assert restored["identity"]["kind"] == "unresolved_migration"
+
+
+@pytest.mark.parametrize(
+    ("phase", "boundary"),
+    [
+        ("azure", "apply"),
+        ("azure", "verify"),
+        ("azure", "export"),
+        ("github", "plan"),
+        ("github", "apply"),
+        ("github", "verify"),
+        ("github", "export"),
+    ],
+)
+def test_connection_failure_boundaries_compensate_all_mutations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    boundary: str,
+) -> None:
+    operation = _connection_operation(tmp_path, monkeypatch)
+    drivers = _BoundaryDrivers(
+        azure_failure=boundary if phase == "azure" else None,
+        github_failure=boundary if phase == "github" else None,
+    )
+    coordinator = ConnectionSetupCoordinator(
+        inventory=_Inventory(),
+        drivers=drivers,
+        repository_coordinator=RepositorySetupCoordinator(
+            state_root=tmp_path / "repository-state"
+        ),
+        state_root=tmp_path / "connection-state",
+    )
+
+    with pytest.raises((RuntimeError, BootstrapApplyError)):
+        coordinator.approve(
+            operation,
+            actor="repo-owner",
+            summary="Approve connection.",
+        )
+
+    state = coordinator.build(operation)
+    assert state.lifecycle_state == "awaiting_approval"
+    assert drivers.azure_driver.mutated is False
+    assert drivers.github_driver.mutated is False
+    if phase == "github":
+        assert drivers.azure_driver.rolled_back
+
+
+@pytest.mark.parametrize(
+    "failed_state",
+    [
+        "azure_applying_result",
+        "azure_applied",
+        "github_applying",
+        "github_applying_result",
+        "cloud_applied",
+        "applied",
+    ],
+)
+def test_parent_state_write_failures_leave_no_unmanaged_connection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failed_state: str,
+) -> None:
+    operation = _connection_operation(tmp_path, monkeypatch)
+    drivers = _BoundaryDrivers()
+    coordinator = ConnectionSetupCoordinator(
+        inventory=_Inventory(),
+        drivers=drivers,
+        repository_coordinator=RepositorySetupCoordinator(
+            state_root=tmp_path / "repository-state"
+        ),
+        state_root=tmp_path / "connection-state",
+    )
+    coordinator.review(operation)
+    original_write = coordinator._write
+    failed = False
+
+    def fail_once(envelope, *, expected=None):
+        nonlocal failed
+        provider_state = (
+            envelope.payload.azure_provider_state
+            if failed_state.startswith("azure")
+            else envelope.payload.github_provider_state
+        )
+        is_result_write = (
+            failed_state.endswith("_result")
+            and envelope.lifecycle_state
+            == failed_state.removesuffix("_result")
+            and bool(provider_state)
+            and provider_state.get("checkpoint") is not True
+        )
+        is_named_write = (
+            not failed_state.endswith("_result")
+            and envelope.lifecycle_state == failed_state
+        )
+        if not failed and (is_result_write or is_named_write):
+            failed = True
+            raise RuntimeError(f"state write failed at {failed_state}")
+        return original_write(envelope, expected=expected)
+
+    monkeypatch.setattr(coordinator, "_write", fail_once)
+
+    with pytest.raises((RuntimeError, BootstrapApplyError)):
+        coordinator.approve(
+            operation,
+            actor="repo-owner",
+            summary="Approve connection.",
+        )
+
+    state = coordinator.build(operation)
+    assert failed is True
+    assert state.lifecycle_state == "awaiting_approval"
+    assert drivers.azure_driver.mutated is False
+    assert drivers.github_driver.mutated is False
+    repository = Path(operation.repository_binding.repository_root)
+    registry = yaml.safe_load(
+        (repository / ".foundry-opt" / "registry.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert registry["identity"]["kind"] == "unresolved_migration"

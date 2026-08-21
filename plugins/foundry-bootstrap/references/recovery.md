@@ -28,8 +28,11 @@ ID. Refresh status and answer only the newly returned question.
   or agent name through the documented answer flags, or fix Azure access and
   retry the same reviewed target.
 - Repository and connection operations retain redacted child receipts.
-- A partial GitHub/Azure connection compensates only resources created by that
-  operation.
+- A partial GitHub/Azure connection deletes operation-created resources and
+  restores operation-changed resources from their recorded preimages.
+- Connection child intent and provider state are checkpointed around each
+  mutation, so retries reconcile or compensate the recorded operation instead
+  of adopting an ambiguous live resource.
 - A failed local deployment retains completed-agent receipts and can resume the
   same exact approved plan. Published regular versions are not deleted.
 - Operation-owned evaluation drafts are cleaned before a successful

@@ -37,8 +37,11 @@ from foundry_opt.bootstrap.shared import require_safe_operation_id
 
 ConnectionSetupLifecycleState = Literal[
     "awaiting_approval",
+    "azure_applying",
     "azure_applied",
+    "github_applying",
     "cloud_applied",
+    "registry_applying",
     "applied",
     "rolled_back",
 ]
@@ -547,142 +550,294 @@ class ConnectionSetupCoordinator:
                     "connection approval does not match the recorded approval"
                 )
             return envelope
+        if (
+            envelope.payload.approval is not None
+            and envelope.payload.approval != approval
+        ):
+            raise BootstrapApplyError(
+                "connection approval does not match the recorded approval"
+            )
+        if envelope.lifecycle_state in {"azure_applying", "github_applying"}:
+            envelope = self._recover_connection_failure(operation)
         current = envelope
         if current.lifecycle_state == "awaiting_approval":
             azure_driver = self._drivers.azure(current.plan.azure_plan_input)
-            context = _driver_context(
-                operation,
-                current.plan.azure_plan_input,
-                phase="azure",
+            applying = self._next(
+                current,
+                lifecycle_state="azure_applying",
+                approval=approval,
             )
-            live = tuple(azure_driver.live_fingerprints(context))
-            if live != current.plan.azure_live_fingerprints:
-                raise BootstrapApplyError(
-                    "Azure connection inventory drifted from the reviewed plan"
-                )
+            self._write(applying, expected=current)
+            current = applying
+            self._install_child_checkpoint(
+                operation,
+                phase="azure",
+                driver=azure_driver,
+            )
+            azure_receipt: BootstrapReceipt | None = None
+            azure_state: Mapping[str, object] = {}
             try:
+                context = _driver_context(
+                    operation,
+                    current.plan.azure_plan_input,
+                    phase="azure",
+                )
+                live = tuple(azure_driver.live_fingerprints(context))
+                if live != current.plan.azure_live_fingerprints:
+                    raise BootstrapApplyError(
+                        "Azure connection inventory drifted from the reviewed plan"
+                    )
                 azure_receipt = azure_driver.apply(current.plan.azure_plan)
-            except Exception as exc:
-                _compensate_driver_failure(azure_driver, exc)
+                if azure_receipt.plan_hash != current.plan.azure_plan.plan_hash:
+                    raise BootstrapApplyError(
+                        "Azure connection receipt does not match the reviewed plan"
+                    )
+                azure_state = azure_driver.export_provider_state(
+                    azure_receipt
+                )
+                current = self._persist_child_result(
+                    operation,
+                    phase="azure",
+                    receipt=azure_receipt,
+                    provider_state=azure_state,
+                )
+                if not azure_driver.verify(azure_receipt):
+                    raise BootstrapApplyError(
+                        "Azure connection verification failed"
+                    )
+            except Exception:
+                self._clear_child_checkpoint(azure_driver)
+                try:
+                    self._recover_connection_failure(
+                        operation,
+                        ephemeral=(
+                            "azure",
+                            azure_driver,
+                            azure_receipt,
+                            azure_state,
+                        ),
+                    )
+                except Exception as recovery_exc:
+                    raise BootstrapApplyError(
+                        "Azure connection compensation failed"
+                    ) from recovery_exc
                 raise
-            if not azure_driver.verify(azure_receipt):
-                raise BootstrapApplyError("Azure connection verification failed")
-            azure_state = azure_driver.export_provider_state(azure_receipt)
+            finally:
+                self._clear_child_checkpoint(azure_driver)
             identity = azure_state.get("identity")
             if not isinstance(identity, Mapping) or not identity.get("client_id"):
+                try:
+                    self._recover_connection_failure(
+                        operation,
+                        ephemeral=(
+                            "azure",
+                            azure_driver,
+                            azure_receipt,
+                            azure_state,
+                        ),
+                    )
+                except Exception as recovery_exc:
+                    raise BootstrapApplyError(
+                        "Azure connection compensation failed"
+                    ) from recovery_exc
                 raise BootstrapApplyError(
                     "Azure connection did not return the managed identity client id"
                 )
-            client_id = str(identity["client_id"])
-            github_input = _connection_plan_input(
-                current.plan.azure_plan_input,
-                inventory=current.plan.inventory,
-                repository_identity=current.plan.repository_identity,
-                client_id=client_id,
-                require_github=True,
-            )
-            github_driver = self._drivers.github(github_input)
-            github_context = _driver_context(
-                operation,
-                github_input,
-                phase="github",
-            )
-            github_live = tuple(github_driver.live_fingerprints(github_context))
-            github_plan = BootstrapPlan.create(
-                operation_id=current.plan.operation_id,
-                runtime_repository=current.plan.runtime_repository,
-                runtime_commit=current.plan.runtime_commit,
-                repository_identity=current.plan.repository_identity,
-                actions=tuple(github_driver.plan(github_context)),
-            )
             azure_applied = self._next(
                 current,
                 lifecycle_state="azure_applied",
-                approval=approval,
                 azure_receipt=azure_receipt,
                 azure_provider_state=azure_state,
-                github_plan_input=github_input,
-                github_plan=github_plan,
-                github_live_fingerprints=github_live,
             )
-            self._write(azure_applied, expected=current)
+            try:
+                self._write(azure_applied, expected=current)
+            except Exception:
+                try:
+                    self._recover_connection_failure(
+                        operation,
+                        ephemeral=(
+                            "azure",
+                            azure_driver,
+                            azure_receipt,
+                            azure_state,
+                        ),
+                    )
+                except Exception as recovery_exc:
+                    raise BootstrapApplyError(
+                        "Azure connection compensation failed"
+                    ) from recovery_exc
+                raise
             current = azure_applied
         if current.lifecycle_state == "azure_applied":
+            if current.payload.azure_receipt is None:
+                raise BootstrapApplyError(
+                    "connection setup is missing its Azure-applied continuation"
+                )
+            try:
+                identity = current.payload.azure_provider_state.get("identity")
+                if not isinstance(identity, Mapping) or not identity.get(
+                    "client_id"
+                ):
+                    raise BootstrapApplyError(
+                        "connection setup is missing the resolved Azure identity"
+                    )
+                github_input = _connection_plan_input(
+                    current.plan.azure_plan_input,
+                    inventory=current.plan.inventory,
+                    repository_identity=current.plan.repository_identity,
+                    client_id=str(identity["client_id"]),
+                    require_github=True,
+                )
+                github_driver = self._drivers.github(github_input)
+                github_context = _driver_context(
+                    operation,
+                    github_input,
+                    phase="github",
+                )
+                github_live = tuple(
+                    github_driver.live_fingerprints(github_context)
+                )
+                github_plan = BootstrapPlan.create(
+                    operation_id=current.plan.operation_id,
+                    runtime_repository=current.plan.runtime_repository,
+                    runtime_commit=current.plan.runtime_commit,
+                    repository_identity=current.plan.repository_identity,
+                    actions=tuple(github_driver.plan(github_context)),
+                )
+                preimages = _registry_connection_preimages(
+                    Path(operation.repository_binding.repository_root)
+                )
+                github_applying = self._next(
+                    current,
+                    lifecycle_state="github_applying",
+                    github_plan_input=github_input,
+                    github_plan=github_plan,
+                    github_live_fingerprints=github_live,
+                    repository_preimages=preimages,
+                )
+                self._write(github_applying, expected=current)
+                current = github_applying
+            except Exception:
+                try:
+                    self._recover_connection_failure(operation)
+                except Exception as recovery_exc:
+                    raise BootstrapApplyError(
+                        "connection compensation failed after GitHub planning"
+                    ) from recovery_exc
+                raise
+        if current.lifecycle_state == "github_applying":
             if (
                 current.payload.github_plan_input is None
                 or current.payload.github_plan is None
                 or current.payload.azure_receipt is None
             ):
                 raise BootstrapApplyError(
-                    "connection setup is missing its Azure-applied continuation"
+                    "connection setup is missing its GitHub-applying continuation"
                 )
             github_driver = self._drivers.github(
                 current.payload.github_plan_input
             )
-            github_context = _driver_context(
+            self._install_child_checkpoint(
                 operation,
-                current.payload.github_plan_input,
                 phase="github",
+                driver=github_driver,
             )
-            live = tuple(github_driver.live_fingerprints(github_context))
-            if live != current.payload.github_live_fingerprints:
-                raise BootstrapApplyError(
-                    "GitHub connection inventory drifted from the reviewed continuation"
-                )
+            github_receipt: BootstrapReceipt | None = None
+            github_state: Mapping[str, object] = {}
             try:
+                github_context = _driver_context(
+                    operation,
+                    current.payload.github_plan_input,
+                    phase="github",
+                )
+                live = tuple(
+                    github_driver.live_fingerprints(github_context)
+                )
+                if live != current.payload.github_live_fingerprints:
+                    raise BootstrapApplyError(
+                        "GitHub connection inventory drifted from the reviewed continuation"
+                    )
                 github_receipt = github_driver.apply(
                     current.payload.github_plan
+                )
+                if github_receipt.plan_hash != current.payload.github_plan.plan_hash:
+                    raise BootstrapApplyError(
+                        "GitHub connection receipt does not match the reviewed continuation"
+                    )
+                github_state = github_driver.export_provider_state(
+                    github_receipt
+                )
+                current = self._persist_child_result(
+                    operation,
+                    phase="github",
+                    receipt=github_receipt,
+                    provider_state=github_state,
                 )
                 if not github_driver.verify(github_receipt):
                     raise BootstrapApplyError(
                         "GitHub connection verification failed"
                     )
-                github_state = github_driver.export_provider_state(
-                    github_receipt
-                )
-            except Exception as exc:
-                _compensate_driver_failure(github_driver, exc)
-                azure_driver = self._drivers.azure(
-                    current.plan.azure_plan_input
-                )
-                azure_driver.restore_provider_state(
-                    current.payload.azure_provider_state
-                )
-                azure_driver.rollback(current.payload.azure_receipt)
-                if not azure_driver.verify_rollback(
-                    current.payload.azure_receipt
-                ):
-                    raise BootstrapApplyError(
-                        "Azure compensation verification failed"
+            except Exception:
+                self._clear_child_checkpoint(github_driver)
+                try:
+                    self._recover_connection_failure(
+                        operation,
+                        ephemeral=(
+                            "github",
+                            github_driver,
+                            github_receipt,
+                            github_state,
+                        ),
                     )
-                reset = self._next(
-                    current,
-                    lifecycle_state="awaiting_approval",
-                    approval=None,
-                    azure_receipt=None,
-                    azure_provider_state={},
-                    github_plan_input=None,
-                    github_plan=None,
-                    github_live_fingerprints=(),
-                    github_receipt=None,
-                    github_provider_state={},
-                    repository_preimages={},
-                )
-                self._write(reset, expected=current)
+                except Exception as recovery_exc:
+                    raise BootstrapApplyError(
+                        "GitHub and Azure connection compensation failed"
+                    ) from recovery_exc
                 raise
-            preimages = _registry_connection_preimages(
-                Path(operation.repository_binding.repository_root)
-            )
+            finally:
+                self._clear_child_checkpoint(github_driver)
             cloud_applied = self._next(
                 current,
                 lifecycle_state="cloud_applied",
                 github_receipt=github_receipt,
                 github_provider_state=github_state,
-                repository_preimages=preimages,
             )
-            self._write(cloud_applied, expected=current)
+            try:
+                self._write(cloud_applied, expected=current)
+            except Exception:
+                try:
+                    self._recover_connection_failure(
+                        operation,
+                        ephemeral=(
+                            "github",
+                            github_driver,
+                            github_receipt,
+                            github_state,
+                        ),
+                    )
+                except Exception as recovery_exc:
+                    raise BootstrapApplyError(
+                        "GitHub and Azure connection compensation failed"
+                    ) from recovery_exc
+                raise
             current = cloud_applied
-        if current.lifecycle_state != "cloud_applied":
+        if current.lifecycle_state == "cloud_applied":
+            registry_applying = self._next(
+                current,
+                lifecycle_state="registry_applying",
+            )
+            try:
+                self._write(registry_applying, expected=current)
+            except Exception:
+                try:
+                    self._recover_connection_failure(operation)
+                except Exception as recovery_exc:
+                    raise BootstrapApplyError(
+                        "connection compensation failed before registry apply"
+                    ) from recovery_exc
+                raise
+            current = registry_applying
+        if current.lifecycle_state != "registry_applying":
             raise BootstrapApplyError(
                 "connection setup is missing its cloud-applied continuation"
             )
@@ -691,60 +846,293 @@ class ConnectionSetupCoordinator:
             raise BootstrapApplyError(
                 "connection setup is missing the resolved Azure identity"
             )
-        _apply_registry_connection(
-            Path(operation.repository_binding.repository_root),
-            identity_resource_id=current.plan.inventory.identity_resource_id,
-            client_id=str(identity["client_id"]),
-            preimages=current.payload.repository_preimages,
-        )
-        applied = self._next(current, lifecycle_state="applied")
-        self._write(applied, expected=current)
+        try:
+            _apply_registry_connection(
+                Path(operation.repository_binding.repository_root),
+                identity_resource_id=current.plan.inventory.identity_resource_id,
+                client_id=str(identity["client_id"]),
+                preimages=current.payload.repository_preimages,
+            )
+            latest = self._load(
+                current.plan.repository_identity,
+                current.plan.operation_id,
+            )
+            applied = self._next(latest, lifecycle_state="applied")
+            self._write(applied, expected=latest)
+        except Exception:
+            try:
+                self._recover_connection_failure(
+                    operation,
+                    restore_registry=True,
+                )
+            except Exception as recovery_exc:
+                raise BootstrapApplyError(
+                    "connection compensation failed after registry apply"
+                ) from recovery_exc
+            raise
         return applied
+
+    def _install_child_checkpoint(
+        self,
+        operation,
+        *,
+        phase: Literal["azure", "github"],
+        driver,
+    ) -> None:
+        setter = getattr(driver, "set_checkpoint", None)
+        if not callable(setter):
+            return
+        lifecycle = f"{phase}_applying"
+
+        def _persist(snapshot: Mapping[str, object]) -> None:
+            if snapshot.get("checkpoint") is not True:
+                raise BootstrapApplyError(
+                    "connection child checkpoint marker is invalid"
+                )
+            receipt_raw = snapshot.get("receipt")
+            if not isinstance(receipt_raw, Mapping):
+                raise BootstrapApplyError(
+                    "connection child checkpoint receipt is missing"
+                )
+            receipt = BootstrapReceipt.model_validate(receipt_raw)
+            latest = self._load(
+                operation.repository_binding.repository_id,
+                operation.operation_id,
+            )
+            if latest.lifecycle_state != lifecycle:
+                raise BootstrapApplyError(
+                    "connection child checkpoint has no applying parent state"
+                )
+            phase_plan = (
+                latest.plan.azure_plan
+                if phase == "azure"
+                else latest.payload.github_plan
+            )
+            if (
+                phase_plan is None
+                or receipt.operation_id != latest.plan.operation_id
+                or receipt.repository_identity
+                != latest.plan.repository_identity
+                or receipt.plan_hash != phase_plan.plan_hash
+            ):
+                raise BootstrapApplyError(
+                    "connection child checkpoint does not match its plan"
+                )
+            safe_persisted_document(snapshot)
+            updates = (
+                {
+                    "azure_receipt": receipt,
+                    "azure_provider_state": dict(snapshot),
+                }
+                if phase == "azure"
+                else {
+                    "github_receipt": receipt,
+                    "github_provider_state": dict(snapshot),
+                }
+            )
+            updated = self._next(latest, **updates)
+            self._write(updated, expected=latest)
+
+        setter(_persist)
+
+    @staticmethod
+    def _clear_child_checkpoint(driver) -> None:
+        setter = getattr(driver, "set_checkpoint", None)
+        if callable(setter):
+            setter(None)
+
+    def _persist_child_result(
+        self,
+        operation,
+        *,
+        phase: Literal["azure", "github"],
+        receipt: BootstrapReceipt,
+        provider_state: Mapping[str, object],
+    ) -> ConnectionSetupStateEnvelope:
+        safe_persisted_document(provider_state)
+        latest = self._load(
+            operation.repository_binding.repository_id,
+            operation.operation_id,
+        )
+        if latest.lifecycle_state != f"{phase}_applying":
+            raise BootstrapApplyError(
+                "connection child result is not in its applying state"
+            )
+        updates = (
+            {
+                "azure_receipt": receipt,
+                "azure_provider_state": dict(provider_state),
+            }
+            if phase == "azure"
+            else {
+                "github_receipt": receipt,
+                "github_provider_state": dict(provider_state),
+            }
+        )
+        updated = self._next(latest, **updates)
+        self._write(updated, expected=latest)
+        return updated
+
+    def _recover_connection_failure(
+        self,
+        operation,
+        *,
+        ephemeral: tuple[
+            Literal["azure", "github"],
+            object,
+            BootstrapReceipt | None,
+            Mapping[str, object],
+        ]
+        | None = None,
+        restore_registry: bool = False,
+    ) -> ConnectionSetupStateEnvelope:
+        latest = self._load(
+            operation.repository_binding.repository_id,
+            operation.operation_id,
+        )
+        compensated: set[str] = set()
+        if restore_registry and latest.payload.repository_preimages:
+            _restore_registry_connection_safely(
+                Path(operation.repository_binding.repository_root),
+                latest.payload.repository_preimages,
+                identity_resource_id=latest.plan.inventory.identity_resource_id,
+                client_id=self._connection_client_id(latest),
+            )
+        if ephemeral is not None:
+            phase, driver, receipt, provider_state = ephemeral
+            if receipt is not None and _receipt_has_mutations(receipt):
+                self._compensate_child(
+                    driver,
+                    receipt,
+                    provider_state,
+                    label=phase,
+                )
+                compensated.add(phase)
+        latest = self._load(
+            operation.repository_binding.repository_id,
+            operation.operation_id,
+        )
+        if (
+            "github" not in compensated
+            and latest.payload.github_receipt is not None
+            and latest.payload.github_plan_input is not None
+            and _receipt_has_mutations(latest.payload.github_receipt)
+        ):
+            self._compensate_child(
+                self._drivers.github(latest.payload.github_plan_input),
+                latest.payload.github_receipt,
+                latest.payload.github_provider_state,
+                label="GitHub",
+            )
+        if (
+            "azure" not in compensated
+            and latest.payload.azure_receipt is not None
+            and _receipt_has_mutations(latest.payload.azure_receipt)
+        ):
+            self._compensate_child(
+                self._drivers.azure(latest.plan.azure_plan_input),
+                latest.payload.azure_receipt,
+                latest.payload.azure_provider_state,
+                label="Azure",
+            )
+        latest = self._load(
+            operation.repository_binding.repository_id,
+            operation.operation_id,
+        )
+        reset = self._next(
+            latest,
+            lifecycle_state="awaiting_approval",
+            approval=None,
+            azure_receipt=None,
+            azure_provider_state={},
+            github_plan_input=None,
+            github_plan=None,
+            github_live_fingerprints=(),
+            github_receipt=None,
+            github_provider_state={},
+            repository_preimages={},
+        )
+        self._write(reset, expected=latest)
+        return reset
+
+    @staticmethod
+    def _compensate_child(
+        driver,
+        receipt: BootstrapReceipt,
+        provider_state: Mapping[str, object],
+        *,
+        label: str,
+    ) -> None:
+        if provider_state:
+            driver.restore_provider_state(provider_state)
+        try:
+            already_rolled_back = bool(driver.verify_rollback(receipt))
+        except Exception:
+            already_rolled_back = False
+        if already_rolled_back:
+            return
+        driver.rollback(receipt)
+        if not driver.verify_rollback(receipt):
+            raise BootstrapApplyError(
+                f"{label} connection compensation verification failed"
+            )
+
+    @staticmethod
+    def _connection_client_id(
+        envelope: ConnectionSetupStateEnvelope,
+    ) -> str:
+        identity = envelope.payload.azure_provider_state.get("identity")
+        if not isinstance(identity, Mapping) or not identity.get("client_id"):
+            raise BootstrapApplyError(
+                "connection setup is missing the resolved Azure identity"
+            )
+        return str(identity["client_id"])
 
     def rollback(self, operation) -> ConnectionSetupStateEnvelope:
         envelope = self.build(operation)
         if envelope.lifecycle_state not in {
             "azure_applied",
+            "github_applying",
             "cloud_applied",
+            "registry_applying",
             "applied",
         }:
             raise BootstrapApplyError(
                 "connection rollback requires applied Azure or GitHub work"
             )
+        if envelope.lifecycle_state in {"registry_applying", "applied"}:
+            _restore_registry_connection_safely(
+                Path(operation.repository_binding.repository_root),
+                envelope.payload.repository_preimages,
+                identity_resource_id=envelope.plan.inventory.identity_resource_id,
+                client_id=self._connection_client_id(envelope),
+            )
         if (
-            envelope.lifecycle_state in {"cloud_applied", "applied"}
+            envelope.lifecycle_state
+            in {"github_applying", "cloud_applied", "registry_applying", "applied"}
             and envelope.payload.github_receipt is not None
             and envelope.payload.github_plan_input is not None
+            and _receipt_has_mutations(envelope.payload.github_receipt)
         ):
             github_driver = self._drivers.github(
                 envelope.payload.github_plan_input
             )
-            github_driver.restore_provider_state(
-                envelope.payload.github_provider_state
+            self._compensate_child(
+                github_driver,
+                envelope.payload.github_receipt,
+                envelope.payload.github_provider_state,
+                label="GitHub",
             )
-            github_driver.rollback(envelope.payload.github_receipt)
-            if not github_driver.verify_rollback(
-                envelope.payload.github_receipt
-            ):
-                raise BootstrapApplyError(
-                    "GitHub connection rollback verification failed"
-                )
-        if envelope.payload.azure_receipt is not None:
+        if (
+            envelope.payload.azure_receipt is not None
+            and _receipt_has_mutations(envelope.payload.azure_receipt)
+        ):
             azure_driver = self._drivers.azure(envelope.plan.azure_plan_input)
-            azure_driver.restore_provider_state(
-                envelope.payload.azure_provider_state
-            )
-            azure_driver.rollback(envelope.payload.azure_receipt)
-            if not azure_driver.verify_rollback(
-                envelope.payload.azure_receipt
-            ):
-                raise BootstrapApplyError(
-                    "Azure connection rollback verification failed"
-                )
-        if envelope.lifecycle_state == "applied":
-            _restore_registry_connection(
-                Path(operation.repository_binding.repository_root),
-                envelope.payload.repository_preimages,
+            self._compensate_child(
+                azure_driver,
+                envelope.payload.azure_receipt,
+                envelope.payload.azure_provider_state,
+                label="Azure",
             )
         rolled = self._next(envelope, lifecycle_state="rolled_back")
         self._write(rolled, expected=envelope)
@@ -1040,20 +1428,12 @@ def _driver_context(
     }
 
 
-def _compensate_driver_failure(driver, error: Exception) -> None:
-    receipt = getattr(error, "compensation_receipt", None)
-    provider_state = getattr(error, "provider_state", None)
-    if not isinstance(receipt, BootstrapReceipt) or not isinstance(
-        provider_state,
-        Mapping,
-    ):
-        return
-    driver.restore_provider_state(provider_state)
-    driver.rollback(receipt)
-    if not driver.verify_rollback(receipt):
-        raise BootstrapApplyError(
-            "connection child compensation verification failed"
-        ) from error
+def _receipt_has_mutations(receipt: BootstrapReceipt) -> bool:
+    return bool(
+        receipt.created_actions
+        or receipt.changed_actions
+        or receipt.compensation_required_actions
+    )
 
 
 def _registry_connection_preimages(
@@ -1126,6 +1506,34 @@ def _restore_registry_connection(
                 "connection rollback preimage is invalid"
             ) from exc
         _atomic_write(repository_root / repo_path, content)
+
+
+def _restore_registry_connection_safely(
+    repository_root: Path,
+    preimages: Mapping[str, str],
+    *,
+    identity_resource_id: str,
+    client_id: str,
+) -> None:
+    desired = _desired_registry_connection(
+        preimages,
+        identity_resource_id=identity_resource_id,
+        client_id=client_id,
+    )
+    for repo_path, desired_bytes in desired.items():
+        path = repository_root / repo_path
+        try:
+            before = bytes.fromhex(preimages[repo_path])
+            current = path.read_bytes()
+        except (KeyError, ValueError, OSError) as exc:
+            raise BootstrapApplyError(
+                "connection rollback preimage is unavailable"
+            ) from exc
+        if current not in {before, desired_bytes}:
+            raise BootstrapApplyError(
+                f"connection rollback refused repository drift at {repo_path}"
+            )
+    _restore_registry_connection(repository_root, preimages)
 
 
 def _desired_registry_connection(
