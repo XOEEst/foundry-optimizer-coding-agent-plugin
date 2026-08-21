@@ -14,6 +14,12 @@ Foundry Optimizer gives a repository owner one plain-language path from
 - **Foundry Optimizer** - the workflow that discovers agents, records
   approvals, and keeps deployment decisions explicit.
 
+The default flow uses standard Copilot. The setup workflow installs the
+reviewed CLI and skill, and repository instructions tell Copilot how to use
+them. Bootstrap does not require or automatically select a custom agent.
+An optional specialist profile is available under `examples/custom-agents/`
+for teams that deliberately want another agent choice.
+
 If you are new here, read these in order:
 
 1. [Bootstrap](bootstrap.md)

@@ -7,7 +7,6 @@ on:
       - .foundry-opt/registry.yaml
       - agent/.foundry/foundry-opt.yaml
       - .github/ISSUE_TEMPLATE/foundry-optimize-agent.yml
-      - .github/agents/foundry-optimizer.agent.md
       - .github/instructions/foundry-opt.instructions.md
       - .github/workflows/copilot-setup-steps.yml
       - .github/workflows/foundry-opt-validation.yml

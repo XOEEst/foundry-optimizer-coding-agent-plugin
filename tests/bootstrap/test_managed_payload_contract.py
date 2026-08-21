@@ -38,7 +38,6 @@ EXPECTED_PAYLOADS = (
     ("sidecar", "{selected.root}/.foundry/foundry-opt.yaml"),
     ("optimizer-instruction", ".github/instructions/foundry-opt.instructions.md"),
     ("optimizer-issue-form", ".github/ISSUE_TEMPLATE/foundry-optimize-agent.yml"),
-    ("custom-agent", ".github/agents/foundry-optimizer.agent.md"),
     ("setup-semantic-patch", ".github/workflows/copilot-setup-steps.yml"),
     ("validation-workflow", ".github/workflows/foundry-opt-validation.yml"),
     ("deploy-workflow", ".github/workflows/foundry-opt-deploy.yml"),
@@ -103,7 +102,7 @@ def test_trusted_manifest_pins_exactly_the_v1_payload_set() -> None:
     manifest = TrustedTemplateManifest.load_pinned_manifest()
 
     assert tuple((item.template_id, item.destination_path) for item in manifest.managed_payloads) == EXPECTED_PAYLOADS
-    assert len(manifest.managed_payloads) == 8
+    assert len(manifest.managed_payloads) == 7
     assert LEGACY_LOCK_PATH not in {item.destination_path for item in manifest.managed_payloads}
     assert MANAGED_LOCK_PATH not in {item.destination_path for item in manifest.managed_payloads}
 

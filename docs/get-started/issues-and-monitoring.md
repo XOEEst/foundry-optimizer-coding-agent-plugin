@@ -3,6 +3,13 @@
 After bootstrap, owners mostly do two things: open or review optimization
 issues, and watch the evidence that comes back.
 
+Assign the issue to standard Copilot. The setup workflow and repository
+instructions direct it to the installed optimizer skill and CLI.
+
+If your team explicitly installs the optional custom-agent example, you may
+select that profile from the assignment dropdown instead. It is not selected
+automatically.
+
 ## What an optimization issue should answer
 
 - What agent should change?
@@ -27,7 +34,7 @@ Foundry Optimizer resolves verification in this order:
      evaluator bundle.
    - Owners do not need to repeat the same inputs in every issue.
 3. **Issue checks**
-   - Use repository commands or checks named in the issue.
+   - Use approved repository commands supplied in the issue.
    - Good for policy or smoke validation, but not for choosing a numeric
      winner.
 4. **Repository default checks**

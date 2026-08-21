@@ -17,6 +17,9 @@ SIDECAR_PATH = CUSTOMER_TEMPLATE_ROOT / "agent" / ".foundry" / "foundry-opt.yaml
 INSTRUCTIONS_PATH = CUSTOMER_TEMPLATE_ROOT / ".github" / "instructions" / "foundry-opt.instructions.md"
 ISSUE_FORM_PATH = CUSTOMER_TEMPLATE_ROOT / ".github" / "ISSUE_TEMPLATE" / "foundry-optimize-agent.yml"
 WORKFLOW_ROOT = CUSTOMER_TEMPLATE_ROOT / ".github" / "workflows"
+OPTIONAL_CUSTOM_AGENT = (
+    REPOSITORY_ROOT / "examples" / "custom-agents" / "foundry-optimizer.agent.md"
+)
 EXPECTED_WORKFLOWS = {"agent-ci.yml", "copilot-setup-steps.yml", "foundry-opt-validation.yml", "foundry-opt-deploy.yml"}
 FIXTURE_ROOT = REPOSITORY_ROOT / "tests" / "bootstrap" / "fixtures" / "templates"
 RUNTIME_SHA = "770ad878f0658e9368b042d9a7f6732e49ff0200"
@@ -73,6 +76,18 @@ def test_customer_templates_do_not_ship_the_legacy_shared_pin() -> None:
         if path.is_file() and path.suffix in {".yml", ".yaml", ".md"}
     )
     assert ".github/foundry-opt.lock.yml" not in combined
+
+
+def test_default_bootstrap_does_not_install_a_custom_agent() -> None:
+    assert not (
+        CUSTOMER_TEMPLATE_ROOT
+        / ".github"
+        / "agents"
+        / "foundry-optimizer.agent.md"
+    ).exists()
+    text = _read(OPTIONAL_CUSTOM_AGENT)
+    assert "target: github-copilot" in text
+    assert "explicitly selects" in text
 
 
 def test_legacy_single_agent_files_exist_only_as_migration_fixtures() -> None:
