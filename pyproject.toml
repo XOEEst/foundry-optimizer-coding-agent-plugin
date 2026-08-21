@@ -5,7 +5,7 @@ description = "Issue-driven Microsoft Foundry agent optimization for GitHub Copi
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "azure-ai-projects>=2.4.0",
+    "azure-ai-projects>=2.4.0,<2.5.0",
     "azure-identity>=1.25",
     "httpx>=0.28",
     "pydantic>=2.12",
@@ -29,4 +29,3 @@ dev = [
 testpaths = ["tests"]
 addopts = "-q"
 pythonpath = ["."]
-
