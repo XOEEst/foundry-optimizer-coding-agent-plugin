@@ -41,12 +41,17 @@ from foundry_opt.bootstrap.plan_factory import (
 )
 from foundry_opt.bootstrap.providers.azure import AzureArmRestProvider
 from foundry_opt.bootstrap.receipts import ApprovalRecord, ApplyPhaseName, EvaluationReplacementRecord
-from foundry_opt.distribution import load_shared_pin, verify_shared_checkout, write_bootstrap_receipt
+from foundry_opt.distribution import (
+    CANONICAL_OPTIMIZER_SKILL_PATH,
+    load_shared_pin,
+    verify_shared_checkout,
+    write_bootstrap_receipt,
+)
 from foundry_opt.poc.config import SharedPin
 
 _APPROVAL_HASH_FIELD = "approval_hash"
 _DEFAULT_PACKAGE_PATH = "."
-_DEFAULT_SKILL_PATH = "src/foundry_opt/templates/skills/foundry-agent-optimizer"
+_DEFAULT_SKILL_PATH = CANONICAL_OPTIMIZER_SKILL_PATH
 
 
 def _pin_from_registry(

@@ -15,6 +15,7 @@ from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
+from foundry_opt.distribution import optimizer_skill_paths_match
 from foundry_opt.poc.auth import AuthError, GitHubActionsOidcConfig, build_client_assertion_credential
 from foundry_opt.poc.bootstrap import BootstrapReceipt, load_shared_pin, read_bootstrap_receipt
 from foundry_opt.poc.candidate import CandidateWorkspace, FinalizedCandidate
@@ -1897,7 +1898,7 @@ def _validate_bootstrap_receipt(pin: SharedPin, receipt: BootstrapReceipt) -> No
         raise RuntimeIntegrationError("bootstrap receipt commit does not match the shared pin")
     if receipt.package_path != pin.package_path:
         raise RuntimeIntegrationError("bootstrap receipt package_path does not match the shared pin")
-    if receipt.skill_path != pin.skill_path:
+    if not optimizer_skill_paths_match(receipt.skill_path, pin.skill_path):
         raise RuntimeIntegrationError("bootstrap receipt skill_path does not match the shared pin")
     if receipt.lock_sha256 != pin.uv_lock_sha256:
         raise RuntimeIntegrationError("bootstrap receipt lock_sha256 does not match the shared pin")

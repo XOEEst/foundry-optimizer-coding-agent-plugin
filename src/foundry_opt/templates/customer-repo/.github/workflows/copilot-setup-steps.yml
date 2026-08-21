@@ -62,7 +62,7 @@ jobs:
           test "$resolved_commit" = "$commit"
           echo "FOUNDRY_OPT_SHARED_ROOT=$shared_root" >>"$GITHUB_ENV"
           echo "FOUNDRY_OPT_PACKAGE_ROOT=$shared_root" >>"$GITHUB_ENV"
-          echo "FOUNDRY_OPT_SKILL_SOURCE=$shared_root/src/foundry_opt/templates/skills/foundry-agent-optimizer" >>"$GITHUB_ENV"
+          echo "FOUNDRY_OPT_SKILL_SOURCE=$shared_root/plugins/foundry-agent-optimizer" >>"$GITHUB_ENV"
 
       - name: Install the exact shared CLI and skill
         shell: bash

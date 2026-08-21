@@ -20,6 +20,9 @@ foundry-opt = "foundry_opt:main"
 requires = ["uv_build>=0.11.6,<0.12.0"]
 build-backend = "uv_build"
 
+[tool.uv.build-backend]
+source-include = ["plugins/**"]
+
 [dependency-groups]
 dev = [
     "pytest>=8.4",

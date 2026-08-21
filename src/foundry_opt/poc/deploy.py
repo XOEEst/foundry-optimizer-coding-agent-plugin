@@ -18,6 +18,7 @@ from foundry_opt.bootstrap.workflow_integration import (
     RegistrySelection,
     resolve_registry_selection,
 )
+from foundry_opt.distribution import optimizer_skill_paths_match
 from foundry_opt.poc.auth import (
     AuthError,
     GitHubActionsOidcConfig,
@@ -1994,7 +1995,6 @@ def _validate_bootstrap_receipt(
         (receipt.repository, pin.repository_url, "repository"),
         (receipt.commit, pin.commit, "commit"),
         (receipt.package_path, pin.package_path, "package_path"),
-        (receipt.skill_path, pin.skill_path, "skill_path"),
         (receipt.lock_sha256, pin.uv_lock_sha256, "lock_sha256"),
     )
     for actual, trusted, field in expected:
@@ -2002,6 +2002,10 @@ def _validate_bootstrap_receipt(
             raise RuntimeIntegrationError(
                 f"bootstrap receipt {field} does not match the shared pin"
             )
+    if not optimizer_skill_paths_match(receipt.skill_path, pin.skill_path):
+        raise RuntimeIntegrationError(
+            "bootstrap receipt skill_path does not match the shared pin"
+        )
 
 
 def _validate_repository_environment(

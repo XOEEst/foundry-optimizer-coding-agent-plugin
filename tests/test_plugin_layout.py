@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import tomllib
 from pathlib import Path
 
 import yaml
@@ -10,7 +11,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 PLUGINS_ROOT = REPOSITORY_ROOT / "plugins"
 BOOTSTRAP_ROOT = PLUGINS_ROOT / "foundry-bootstrap"
 OPTIMIZER_ROOT = PLUGINS_ROOT / "foundry-agent-optimizer"
-RUNTIME_OPTIMIZER_ROOT = (
+LEGACY_OPTIMIZER_ROOT = (
     REPOSITORY_ROOT
     / "src"
     / "foundry_opt"
@@ -20,6 +21,28 @@ RUNTIME_OPTIMIZER_ROOT = (
 )
 EXPECTED_PLUGIN_FILES = {
     "plugins/README.md",
+    "plugins/foundry-agent-optimizer/README.md",
+    "plugins/foundry-agent-optimizer/SKILL.md",
+    "plugins/foundry-agent-optimizer/references/.gitattributes",
+    "plugins/foundry-agent-optimizer/references/ADAPTER_MAPPING.md",
+    "plugins/foundry-agent-optimizer/references/TENZING_ATTRIBUTION.md",
+    "plugins/foundry-agent-optimizer/references/tenzing/.github/ISSUE_TEMPLATE/JitAccess.yml",
+    "plugins/foundry-agent-optimizer/references/tenzing/.github/acl/access.yml",
+    "plugins/foundry-agent-optimizer/references/tenzing/.github/compliance/inventory.yml",
+    "plugins/foundry-agent-optimizer/references/tenzing/.github/policies/jit.yml",
+    "plugins/foundry-agent-optimizer/references/tenzing/.gitignore",
+    "plugins/foundry-agent-optimizer/references/tenzing/INIT.md",
+    "plugins/foundry-agent-optimizer/references/tenzing/LICENSE",
+    "plugins/foundry-agent-optimizer/references/tenzing/README.md",
+    "plugins/foundry-agent-optimizer/references/tenzing/assets/logo.svg",
+    "plugins/foundry-agent-optimizer/references/tenzing/climb.md",
+    "plugins/foundry-agent-optimizer/references/tenzing/climb_config/background.md",
+    "plugins/foundry-agent-optimizer/references/tenzing/climb_config/data.md",
+    "plugins/foundry-agent-optimizer/references/tenzing/climb_config/dos-and-donts.md",
+    "plugins/foundry-agent-optimizer/references/tenzing/climb_config/environment.md",
+    "plugins/foundry-agent-optimizer/references/tenzing/climb_config/evaluation.md",
+    "plugins/foundry-agent-optimizer/references/tenzing/climb_config/objective.md",
+    "plugins/foundry-agent-optimizer/references/tenzing/climb_config/tracking-experiments.md",
     "plugins/foundry-agent-optimizer/README.md",
     "plugins/foundry-bootstrap/SKILL.md",
     "plugins/foundry-bootstrap/references/README.md",
@@ -66,9 +89,10 @@ def test_plugins_readme_and_discovery_boundary_are_explicit() -> None:
     assert "`foundry-bootstrap/`" in normalized
     assert "`foundry-agent-optimizer/`" in normalized
     assert "shared `foundry_opt` runtime package" in normalized
+    assert "canonical issue-time optimizer skill folder" in normalized
     assert (BOOTSTRAP_ROOT / "SKILL.md").is_file()
-    assert not (OPTIMIZER_ROOT / "SKILL.md").exists()
-    assert (RUNTIME_OPTIMIZER_ROOT / "SKILL.md").is_file()
+    assert (OPTIMIZER_ROOT / "SKILL.md").is_file()
+    assert not LEGACY_OPTIMIZER_ROOT.exists()
 
 
 def test_bootstrap_skill_frontmatter_and_owner_contract_are_placeholders_only() -> None:
@@ -90,9 +114,10 @@ def test_bootstrap_skill_frontmatter_and_owner_contract_are_placeholders_only() 
 def test_plugin_tree_contains_only_allowed_boundary_files() -> None:
     assert _plugin_files() == EXPECTED_PLUGIN_FILES
 
-    assert "placeholder reserves the top-level plugin folder only" in _read(
-        OPTIMIZER_ROOT / "README.md"
-    )
+    assert "canonical issue-time optimizer skill folder" in _read(OPTIMIZER_ROOT / "README.md")
+    assert "do not maintain a second full copy" in _read(OPTIMIZER_ROOT / "README.md")
+    assert (OPTIMIZER_ROOT / "references" / "ADAPTER_MAPPING.md").is_file()
+    assert (OPTIMIZER_ROOT / "references" / "TENZING_ATTRIBUTION.md").is_file()
     assert "Nothing in this folder is executable in this task." in _read(
         BOOTSTRAP_ROOT / "scripts" / "README.md"
     )
@@ -116,3 +141,10 @@ def test_lock_template_uses_exact_placeholder_fields_and_no_runtime_executables(
         for path in PLUGINS_ROOT.rglob("*")
         if path.is_file()
     )
+
+
+def test_build_configuration_includes_plugin_skill_in_source_artifacts() -> None:
+    pyproject = tomllib.loads(_read(REPOSITORY_ROOT / "pyproject.toml"))
+    build_backend = pyproject["tool"]["uv"]["build-backend"]
+
+    assert "plugins/**" in build_backend["source-include"]

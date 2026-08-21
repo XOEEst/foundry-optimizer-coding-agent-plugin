@@ -1,8 +1,9 @@
 # Foundry agent optimizer plugin
 
-The existing optimizer skill still lives under
-`src/foundry_opt/templates/skills/foundry-agent-optimizer/`.
+This is the canonical issue-time optimizer skill folder.
 
-This placeholder reserves the top-level plugin folder only. A dependent task
-will move the discoverable optimizer skill assets here without changing the
-shared runtime in this step.
+- Install or copy the skill from `plugins/foundry-agent-optimizer/`.
+- The setup workflow and bootstrap defaults now resolve this path directly.
+- Legacy explicit pins and receipts that still name
+  `src/foundry_opt/templates/skills/foundry-agent-optimizer/` are compatibly
+  redirected here; do not maintain a second full copy.

@@ -105,6 +105,8 @@ def test_setup_uses_venv_python_and_offline_unsets_broker() -> None:
     assert "\"$FOUNDRY_OPT_PACKAGE_ROOT/.venv/bin/python\" - <<'PY'" in text
     assert 'python3 -m pip install' in text
     assert '"uv==0.11.6"' in text
+    assert 'FOUNDRY_OPT_SKILL_SOURCE=$shared_root/plugins/foundry-agent-optimizer' in text
+    assert 'src/foundry_opt/templates/skills/foundry-agent-optimizer' not in text
     assert 'unset FOUNDRY_OPT_GITHUB_BINDING' in text
     assert 'unset FOUNDRY_OPT_BROKER_SOCKET' in text
     assert '--head-ref' in text and '--ref-name' in text
