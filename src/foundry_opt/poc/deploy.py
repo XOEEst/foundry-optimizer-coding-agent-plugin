@@ -9,7 +9,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
@@ -101,10 +101,12 @@ class DeploymentGuardrailError(DeploymentError):
         *,
         evaluation_link: str,
         guardrails: tuple["DeploymentGuardrail", ...],
+        verification: "DeploymentVerification",
     ) -> None:
         super().__init__(message)
         self.evaluation_link = evaluation_link
         self.guardrails = guardrails
+        self.verification = verification
 
 
 class DeploymentPostPublishError(DeploymentError):
@@ -178,6 +180,25 @@ class DeploymentReceipt(_FrozenModel):
     latest_verified: Literal[True] = True
 
 
+class DeploymentVerificationReceipt(_FrozenModel):
+    status: Literal["verified"] = "verified"
+    repository: str
+    release_commit: str = Field(pattern=_COMMIT_PATTERN)
+    project_endpoint: str
+    agent_name: str
+    operation_id: str
+    source_root: str
+    source_tree_sha256: str = Field(pattern=_SHA256_PATTERN)
+    source_zip_sha256: str = Field(pattern=_SHA256_PATTERN)
+    verification: DeploymentVerification
+    published: Literal[False] = False
+    draft_cleanup_complete: Literal[True] = True
+    route_mode: Literal["service-managed-latest"] = "service-managed-latest"
+    route_mutated: Literal[False] = False
+    repo_agent_id: str | None = Field(default=None, min_length=1, max_length=256)
+    config_path: str | None = Field(default=None, min_length=1, max_length=512)
+
+
 class DeploymentSettings(_FrozenModel):
     repository_root: Path
     policy: RepositoryPolicy
@@ -216,6 +237,14 @@ class DeploymentHandle:
     settings: DeploymentSettings
     service: "DeploymentService"
     close: Callable[[], None]
+
+
+@dataclass(frozen=True, slots=True)
+class _VerifiedDeployment:
+    route_before: RouteFingerprint
+    definition: HostedDefinition
+    operation_id: str
+    verification: DeploymentVerification
 
 
 class DeploymentService:
@@ -271,6 +300,124 @@ class DeploymentService:
         repository_root: Path | None = None,
         verification: DeploymentVerification | None = None,
     ) -> DeploymentReceipt:
+        verified = self._verify(
+            repository=repository,
+            release_commit=release_commit,
+            packaged=packaged,
+            repository_root=repository_root,
+            verification=verification,
+        )
+        if self._freshness_check is not None:
+            self._freshness_check(release_commit)
+        matching_latest = self._matching_latest_version(
+            route=verified.route_before,
+            packaged=packaged,
+        )
+        if matching_latest is not None:
+            return self._receipt(
+                repository=repository,
+                release_commit=release_commit,
+                packaged=packaged,
+                route_before=verified.route_before,
+                reference=matching_latest,
+                reconciled=True,
+                verification=verified.verification,
+            )
+        provenance = {
+            RELEASE_COMMIT_METADATA_KEY: release_commit,
+            REPOSITORY_METADATA_KEY: repository,
+            SOURCE_ROOT_METADATA_KEY: packaged.source_root,
+            SOURCE_TREE_METADATA_KEY: packaged.tree_sha256,
+        }
+        published = self._client.create_regular_version(
+            self._metadata.agent_name,
+            verified.definition,
+            packaged.archive_bytes,
+            operation_id=verified.operation_id,
+            provenance=provenance,
+            description=f"Deploy {repository}@{release_commit[:12]}",
+            deadline_monotonic=self._deadline(),
+        )
+        try:
+            active = self._client.wait_for_regular_version_active(
+                published,
+                deadline_monotonic=self._deadline(),
+            )
+            downloaded = self._client.download_regular_version_code(
+                active,
+                deadline_monotonic=self._deadline(),
+            )
+            if downloaded != packaged.archive_bytes:
+                raise ContractError(
+                    "published regular version did not contain the exact source ZIP"
+                )
+            latest = self._client.assert_regular_version_is_latest(
+                active,
+                deadline_monotonic=self._deadline(),
+            )
+        except (
+            AuthError,
+            ContractError,
+            DeadlineError,
+            RouteModeError,
+            ServiceError,
+        ) as error:
+            raise DeploymentPostPublishError(
+                str(error),
+                reference=published,
+            ) from error
+        if latest.latest_version != active.version:
+            raise DeploymentPostPublishError(
+                "published regular version was not confirmed as latest",
+                reference=active,
+            )
+        return self._receipt(
+            repository=repository,
+            release_commit=release_commit,
+            packaged=packaged,
+            route_before=verified.route_before,
+            reference=active,
+            reconciled=published.reconciled,
+            verification=verified.verification,
+        )
+
+    def verify(
+        self,
+        *,
+        repository: str,
+        release_commit: str,
+        packaged: PackagedSource,
+        repository_root: Path | None = None,
+        verification: DeploymentVerification | None = None,
+    ) -> DeploymentVerificationReceipt:
+        verified = self._verify(
+            repository=repository,
+            release_commit=release_commit,
+            packaged=packaged,
+            repository_root=repository_root,
+            verification=verification,
+        )
+        return DeploymentVerificationReceipt(
+            repository=repository,
+            release_commit=release_commit,
+            project_endpoint=self._metadata.project_endpoint,
+            agent_name=self._metadata.agent_name,
+            operation_id=verified.operation_id,
+            source_root=packaged.source_root,
+            source_tree_sha256=packaged.tree_sha256,
+            source_zip_sha256=packaged.zip_sha256,
+            verification=verified.verification,
+        )
+
+    def _verify(
+        self,
+        *,
+        repository: str,
+        release_commit: str,
+        packaged: PackagedSource,
+        repository_root: Path | None,
+        verification: DeploymentVerification | None,
+    ) -> _VerifiedDeployment:
         if packaged.commit != release_commit:
             raise DeploymentError(
                 "packaged source commit does not match the requested release commit"
@@ -314,77 +461,10 @@ class DeploymentService:
         )
         if route_after_verification.latest_version != route_before.latest_version:
             raise DeploymentError(route_change_detail)
-        if self._freshness_check is not None:
-            self._freshness_check(release_commit)
-        matching_latest = self._matching_latest_version(
-            route=route_after_verification,
-            packaged=packaged,
-        )
-        if matching_latest is not None:
-            return self._receipt(
-                repository=repository,
-                release_commit=release_commit,
-                packaged=packaged,
-                route_before=route_before,
-                reference=matching_latest,
-                reconciled=True,
-                verification=completed_verification,
-            )
-        provenance = {
-            RELEASE_COMMIT_METADATA_KEY: release_commit,
-            REPOSITORY_METADATA_KEY: repository,
-            SOURCE_ROOT_METADATA_KEY: packaged.source_root,
-            SOURCE_TREE_METADATA_KEY: packaged.tree_sha256,
-        }
-        published = self._client.create_regular_version(
-            self._metadata.agent_name,
-            definition,
-            packaged.archive_bytes,
-            operation_id=operation_id,
-            provenance=provenance,
-            description=f"Deploy {repository}@{release_commit[:12]}",
-            deadline_monotonic=self._deadline(),
-        )
-        try:
-            active = self._client.wait_for_regular_version_active(
-                published,
-                deadline_monotonic=self._deadline(),
-            )
-            downloaded = self._client.download_regular_version_code(
-                active,
-                deadline_monotonic=self._deadline(),
-            )
-            if downloaded != packaged.archive_bytes:
-                raise ContractError(
-                    "published regular version did not contain the exact source ZIP"
-                )
-            latest = self._client.assert_regular_version_is_latest(
-                active,
-                deadline_monotonic=self._deadline(),
-            )
-        except (
-            AuthError,
-            ContractError,
-            DeadlineError,
-            RouteModeError,
-            ServiceError,
-        ) as error:
-            raise DeploymentPostPublishError(
-                str(error),
-                reference=published,
-            ) from error
-        if latest.latest_version != active.version:
-            raise DeploymentPostPublishError(
-                "published regular version was not confirmed as latest",
-                reference=active,
-            )
-        return self._receipt(
-            repository=repository,
-            release_commit=release_commit,
-            packaged=packaged,
+        return _VerifiedDeployment(
             route_before=route_before,
-            reference=active,
-            reconciled=published.reconciled,
+            definition=definition,
+            operation_id=operation_id,
             verification=completed_verification,
         )
 
@@ -454,19 +534,21 @@ class DeploymentService:
         )
         guardrails = self._deployment_guardrails(evidence)
         failed = tuple(item.name for item in guardrails if not item.passed)
+        completed = verification.model_copy(
+            update={
+                "status": ("failed" if failed else "passed"),
+                "evaluation_link": evidence.report_url,
+                "guardrails": guardrails,
+            }
+        )
         if failed:
             raise DeploymentGuardrailError(
                 "deployment hard guardrails failed: " + ", ".join(failed),
                 evaluation_link=evidence.report_url,
                 guardrails=guardrails,
+                verification=completed,
             )
-        return verification.model_copy(
-            update={
-                "status": "passed",
-                "evaluation_link": evidence.report_url,
-                "guardrails": guardrails,
-            }
-        )
+        return completed
 
     def _repository_check_verification(
         self,
@@ -853,6 +935,26 @@ def publish_deployment(
         handle.close()
 
 
+def load_registered_verification_settings(
+    repository: Path,
+    *,
+    repo_agent_id: str,
+    exact_source: str,
+    environment: Mapping[str, str] | None = None,
+    artifact_root: Path | None = None,
+    deadline_seconds: float | str | None = None,
+) -> RegisteredDeploymentSettings:
+    return _load_registered_settings(
+        repository,
+        repo_agent_id=repo_agent_id,
+        exact_source=exact_source,
+        environment=environment,
+        artifact_root=artifact_root,
+        deadline_seconds=deadline_seconds,
+        require_exact_branch_ref=False,
+    )
+
+
 def load_registered_deployment_settings(
     repository: Path,
     *,
@@ -861,6 +963,27 @@ def load_registered_deployment_settings(
     environment: Mapping[str, str] | None = None,
     artifact_root: Path | None = None,
     deadline_seconds: float | str | None = None,
+) -> RegisteredDeploymentSettings:
+    return _load_registered_settings(
+        repository,
+        repo_agent_id=repo_agent_id,
+        exact_source=exact_source,
+        environment=environment,
+        artifact_root=artifact_root,
+        deadline_seconds=deadline_seconds,
+        require_exact_branch_ref=True,
+    )
+
+
+def _load_registered_settings(
+    repository: Path,
+    *,
+    repo_agent_id: str,
+    exact_source: str,
+    environment: Mapping[str, str] | None,
+    artifact_root: Path | None,
+    deadline_seconds: float | str | None,
+    require_exact_branch_ref: bool,
 ) -> RegisteredDeploymentSettings:
     env = os.environ if environment is None else environment
     if env.get("GITHUB_ACTIONS", "").casefold() != "true":
@@ -996,11 +1119,10 @@ def load_registered_deployment_settings(
         raise RuntimeIntegrationError(
             "GITHUB_REPOSITORY_ID must be a positive integer"
         )
-    default_branch = _required_environment_value(env, "GITHUB_REF_NAME")
-    if env.get("GITHUB_REF") != f"refs/heads/{default_branch}":
-        raise RuntimeIntegrationError(
-            "registered deployment requires an exact branch push ref"
-        )
+    default_branch = _registered_branch_context(
+        env,
+        require_exact_branch_ref=require_exact_branch_ref,
+    )
 
     github_sha = env.get("GITHUB_SHA")
     if github_sha is not None and github_sha != release_commit:
@@ -1059,17 +1181,41 @@ def load_registered_deployment_settings(
     )
 
 
-def publish_registered_deployment(
+def _registered_branch_context(
+    environment: Mapping[str, str],
+    *,
+    require_exact_branch_ref: bool,
+) -> str:
+    if require_exact_branch_ref:
+        branch = _required_environment_value(environment, "GITHUB_REF_NAME")
+        if environment.get("GITHUB_REF") != f"refs/heads/{branch}":
+            raise RuntimeIntegrationError(
+                "registered deployment requires an exact branch push ref"
+            )
+        return branch
+    base_branch = environment.get("GITHUB_BASE_REF", "").strip()
+    if base_branch:
+        return base_branch
+    return _required_environment_value(environment, "GITHUB_REF_NAME")
+
+
+_RegisteredOperation = TypeVar("_RegisteredOperation")
+
+
+def _run_registered_deployment_operation(
     settings: RegisteredDeploymentSettings,
     *,
-    environment: Mapping[str, str] | None = None,
-    credential_builder: Callable[..., object] = build_client_assertion_credential,
-    evaluation_backend_factory: Callable[..., AzureProjectsEvaluationBackend] = (
-        AzureProjectsEvaluationBackend
-    ),
-    foundry_client_factory: Callable[..., FoundryPocClient] = FoundryPocClient,
-    service_factory: Callable[..., DeploymentService] = DeploymentService,
-) -> DeploymentReceipt:
+    environment: Mapping[str, str] | None,
+    require_freshness_check: bool,
+    credential_builder: Callable[..., object],
+    evaluation_backend_factory: Callable[..., AzureProjectsEvaluationBackend],
+    foundry_client_factory: Callable[..., FoundryPocClient],
+    service_factory: Callable[..., DeploymentService],
+    operation: Callable[
+        [DeploymentService, PackagedSource],
+        _RegisteredOperation,
+    ],
+) -> _RegisteredOperation:
     packaged = package_git_source(
         settings.repository_root,
         commit=settings.release_commit,
@@ -1096,19 +1242,17 @@ def publish_registered_deployment(
             policy=settings.policy,
             metadata=settings.metadata,
             deadline_seconds=settings.deadline_seconds,
-            freshness_check=deployment_freshness_check(
-                repository=settings.metadata.repository_identity,
-                branch=settings.metadata.default_branch,
-                environment=environment,
+            freshness_check=(
+                deployment_freshness_check(
+                    repository=settings.metadata.repository_identity,
+                    branch=settings.metadata.default_branch,
+                    environment=environment,
+                )
+                if require_freshness_check
+                else None
             ),
         )
-        return service.publish(
-            repository=settings.metadata.repository_identity,
-            release_commit=settings.release_commit,
-            packaged=packaged,
-            repository_root=settings.repository_root,
-            verification=settings.verification,
-        )
+        return operation(service, packaged)
     finally:
         try:
             client_closer = getattr(client, "close", None)
@@ -1118,6 +1262,70 @@ def publish_registered_deployment(
             credential_closer = getattr(credential, "close", None)
             if callable(credential_closer):
                 credential_closer()
+
+
+def verify_registered_deployment(
+    settings: RegisteredDeploymentSettings,
+    *,
+    environment: Mapping[str, str] | None = None,
+    credential_builder: Callable[..., object] = build_client_assertion_credential,
+    evaluation_backend_factory: Callable[..., AzureProjectsEvaluationBackend] = (
+        AzureProjectsEvaluationBackend
+    ),
+    foundry_client_factory: Callable[..., FoundryPocClient] = FoundryPocClient,
+    service_factory: Callable[..., DeploymentService] = DeploymentService,
+) -> DeploymentVerificationReceipt:
+    receipt = _run_registered_deployment_operation(
+        settings,
+        environment=environment,
+        require_freshness_check=False,
+        credential_builder=credential_builder,
+        evaluation_backend_factory=evaluation_backend_factory,
+        foundry_client_factory=foundry_client_factory,
+        service_factory=service_factory,
+        operation=lambda service, packaged: service.verify(
+            repository=settings.metadata.repository_identity,
+            release_commit=settings.release_commit,
+            packaged=packaged,
+            repository_root=settings.repository_root,
+            verification=settings.verification,
+        ),
+    )
+    return receipt.model_copy(
+        update={
+            "repo_agent_id": settings.selection.repo_agent_id,
+            "config_path": settings.selection.config_path,
+        }
+    )
+
+
+def publish_registered_deployment(
+    settings: RegisteredDeploymentSettings,
+    *,
+    environment: Mapping[str, str] | None = None,
+    credential_builder: Callable[..., object] = build_client_assertion_credential,
+    evaluation_backend_factory: Callable[..., AzureProjectsEvaluationBackend] = (
+        AzureProjectsEvaluationBackend
+    ),
+    foundry_client_factory: Callable[..., FoundryPocClient] = FoundryPocClient,
+    service_factory: Callable[..., DeploymentService] = DeploymentService,
+) -> DeploymentReceipt:
+    return _run_registered_deployment_operation(
+        settings,
+        environment=environment,
+        require_freshness_check=True,
+        credential_builder=credential_builder,
+        evaluation_backend_factory=evaluation_backend_factory,
+        foundry_client_factory=foundry_client_factory,
+        service_factory=service_factory,
+        operation=lambda service, packaged: service.publish(
+            repository=settings.metadata.repository_identity,
+            release_commit=settings.release_commit,
+            packaged=packaged,
+            repository_root=settings.repository_root,
+            verification=settings.verification,
+        ),
+    )
 
 
 def deployment_operation_id(

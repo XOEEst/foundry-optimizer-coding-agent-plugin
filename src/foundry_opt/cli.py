@@ -55,9 +55,11 @@ from foundry_opt.poc.deploy import (
     DeploymentSupersededError,
     load_deployment_settings,
     load_registered_deployment_settings,
+    load_registered_verification_settings,
     publish_deployment,
     publish_registered_deployment,
     run_deployment_preflight,
+    verify_registered_deployment,
 )
 from foundry_opt.poc.foundry import (
     AzureProjectsEvaluationBackend,
@@ -508,17 +510,19 @@ def deploy_publish(
             _write_json_document(receipt, payload)
         _echo_json(payload)
     except DeploymentGuardrailError as error:
-        _echo_json(
-            {
-                "error": _redact_text(str(error)) or "deployment guardrails failed",
-                "evaluation_link": error.evaluation_link,
-                "guardrails": [
-                    item.model_dump(mode="json")
-                    for item in error.guardrails
-                ],
-                "status": "blocked",
-            }
-        )
+        payload = {
+            "error": _redact_text(str(error)) or "deployment guardrails failed",
+            "evaluation_link": error.evaluation_link,
+            "guardrails": [
+                item.model_dump(mode="json")
+                for item in error.guardrails
+            ],
+            "status": "blocked",
+            "verification": error.verification.model_dump(mode="json"),
+        }
+        if receipt is not None:
+            _write_json_document(receipt, payload)
+        _echo_json(payload)
         raise typer.Exit(code=2)
     except DeploymentSupersededError as error:
         payload = {
@@ -531,25 +535,95 @@ def deploy_publish(
             _write_json_document(receipt, payload)
         _echo_json(payload)
     except DeploymentRepositoryChecksError as error:
-        _echo_json(
-            {
-                "error": (
-                    _redact_text(str(error))
-                    or "deployment repository checks did not all pass"
-                ),
-                "status": "blocked",
-                "verification": error.verification.model_dump(mode="json"),
-            }
-        )
+        payload = {
+            "error": (
+                _redact_text(str(error))
+                or "deployment repository checks did not all pass"
+            ),
+            "status": "blocked",
+            "verification": error.verification.model_dump(mode="json"),
+        }
+        if receipt is not None:
+            _write_json_document(receipt, payload)
+        _echo_json(payload)
         raise typer.Exit(code=2)
     except DeploymentPostPublishError as error:
-        _echo_json(
-            {
-                "error": _redact_text(str(error)) or "post-publish verification failed",
-                "published_version": error.reference.version,
-                "status": "blocked",
-            }
+        payload = {
+            "error": _redact_text(str(error)) or "post-publish verification failed",
+            "published_version": error.reference.version,
+            "status": "blocked",
+        }
+        if receipt is not None:
+            _write_json_document(receipt, payload)
+        _echo_json(payload)
+        raise typer.Exit(code=2)
+    except _JOB_COMMAND_ERRORS as error:
+        _emit_blocked(error)
+
+
+@deploy_app.command("verify-registered")
+def deploy_verify_registered(
+    repository: Path = typer.Option(Path("."), "--repository"),
+    repo_agent_id: str = typer.Option(..., "--repo-agent-id"),
+    exact_source: str = typer.Option(..., "--exact-source"),
+    receipt: Path | None = typer.Option(None, "--receipt"),
+    artifact_root: Path | None = typer.Option(
+        None,
+        "--artifact-root",
+        envvar=DEPLOYMENT_ROOT_ENV,
+    ),
+    deadline_seconds: float = typer.Option(
+        DEFAULT_DEADLINE_SECONDS,
+        "--deadline-seconds",
+        envvar=DEADLINE_SECONDS_ENV,
+    ),
+) -> None:
+    """Run the selected deployment gate without creating a regular version."""
+
+    try:
+        settings = load_registered_verification_settings(
+            repository,
+            repo_agent_id=repo_agent_id,
+            exact_source=exact_source,
+            environment=os.environ,
+            artifact_root=artifact_root,
+            deadline_seconds=deadline_seconds,
         )
+        result = verify_registered_deployment(
+            settings,
+            environment=os.environ,
+        )
+        payload = result.model_dump(mode="json")
+        if receipt is not None:
+            _write_json_document(receipt, payload)
+        _echo_json(payload)
+    except DeploymentGuardrailError as error:
+        payload = {
+            "error": _redact_text(str(error)) or "deployment guardrails failed",
+            "evaluation_link": error.evaluation_link,
+            "guardrails": [
+                item.model_dump(mode="json")
+                for item in error.guardrails
+            ],
+            "status": "blocked",
+            "verification": error.verification.model_dump(mode="json"),
+        }
+        if receipt is not None:
+            _write_json_document(receipt, payload)
+        _echo_json(payload)
+        raise typer.Exit(code=2)
+    except DeploymentRepositoryChecksError as error:
+        payload = {
+            "error": (
+                _redact_text(str(error))
+                or "deployment repository checks did not all pass"
+            ),
+            "status": "blocked",
+            "verification": error.verification.model_dump(mode="json"),
+        }
+        if receipt is not None:
+            _write_json_document(receipt, payload)
+        _echo_json(payload)
         raise typer.Exit(code=2)
     except _JOB_COMMAND_ERRORS as error:
         _emit_blocked(error)
@@ -592,18 +666,20 @@ def deploy_publish_registered(
             _write_json_document(receipt, payload)
         _echo_json(payload)
     except DeploymentGuardrailError as error:
-        _echo_json(
-            {
-                "error": _redact_text(str(error))
-                or "deployment guardrails failed",
-                "evaluation_link": error.evaluation_link,
-                "guardrails": [
-                    item.model_dump(mode="json")
-                    for item in error.guardrails
-                ],
-                "status": "blocked",
-            }
-        )
+        payload = {
+            "error": _redact_text(str(error))
+            or "deployment guardrails failed",
+            "evaluation_link": error.evaluation_link,
+            "guardrails": [
+                item.model_dump(mode="json")
+                for item in error.guardrails
+            ],
+            "status": "blocked",
+            "verification": error.verification.model_dump(mode="json"),
+        }
+        if receipt is not None:
+            _write_json_document(receipt, payload)
+        _echo_json(payload)
         raise typer.Exit(code=2)
     except DeploymentSupersededError as error:
         payload = {
@@ -616,26 +692,28 @@ def deploy_publish_registered(
             _write_json_document(receipt, payload)
         _echo_json(payload)
     except DeploymentRepositoryChecksError as error:
-        _echo_json(
-            {
-                "error": (
-                    _redact_text(str(error))
-                    or "deployment repository checks did not all pass"
-                ),
-                "status": "blocked",
-                "verification": error.verification.model_dump(mode="json"),
-            }
-        )
+        payload = {
+            "error": (
+                _redact_text(str(error))
+                or "deployment repository checks did not all pass"
+            ),
+            "status": "blocked",
+            "verification": error.verification.model_dump(mode="json"),
+        }
+        if receipt is not None:
+            _write_json_document(receipt, payload)
+        _echo_json(payload)
         raise typer.Exit(code=2)
     except DeploymentPostPublishError as error:
-        _echo_json(
-            {
-                "error": _redact_text(str(error))
-                or "post-publish verification failed",
-                "published_version": error.reference.version,
-                "status": "blocked",
-            }
-        )
+        payload = {
+            "error": _redact_text(str(error))
+            or "post-publish verification failed",
+            "published_version": error.reference.version,
+            "status": "blocked",
+        }
+        if receipt is not None:
+            _write_json_document(receipt, payload)
+        _echo_json(payload)
         raise typer.Exit(code=2)
     except _JOB_COMMAND_ERRORS as error:
         _emit_blocked(error)

@@ -25,8 +25,11 @@ from foundry_opt.bootstrap.contracts import (
 from foundry_opt.poc.deploy import (
     DeploymentGuardrail,
     DeploymentReceipt,
+    DeploymentVerificationReceipt,
     load_registered_deployment_settings,
+    load_registered_verification_settings,
     publish_registered_deployment,
+    verify_registered_deployment,
 )
 from foundry_opt.poc.runtime import RuntimeIntegrationError
 from foundry_opt.verification import VerificationCheckSpec
@@ -392,6 +395,50 @@ def test_registered_settings_require_github_actions_oidc(tmp_path: Path) -> None
         )
 
 
+def test_registered_verification_settings_accept_pull_request_context(
+    tmp_path: Path,
+) -> None:
+    repository, commit, environment = _registered_repository(tmp_path)
+    environment.update(
+        {
+            "GITHUB_REF": "refs/pull/17/merge",
+            "GITHUB_REF_NAME": "17/merge",
+            "GITHUB_BASE_REF": "main",
+        }
+    )
+
+    settings = load_registered_verification_settings(
+        repository,
+        repo_agent_id="example-agent",
+        exact_source=commit,
+        environment=environment,
+    )
+
+    assert settings.release_commit == commit
+    assert settings.metadata.default_branch == "main"
+
+
+def test_registered_publish_settings_reject_pull_request_context(
+    tmp_path: Path,
+) -> None:
+    repository, commit, environment = _registered_repository(tmp_path)
+    environment.update(
+        {
+            "GITHUB_REF": "refs/pull/17/merge",
+            "GITHUB_REF_NAME": "17/merge",
+            "GITHUB_BASE_REF": "main",
+        }
+    )
+
+    with pytest.raises(RuntimeIntegrationError, match="exact branch push ref"):
+        load_registered_deployment_settings(
+            repository,
+            repo_agent_id="example-agent",
+            exact_source=commit,
+            environment=environment,
+        )
+
+
 def test_registered_settings_reject_uncommitted_sidecar_drift(tmp_path: Path) -> None:
     repository, commit, environment = _registered_repository(tmp_path)
     sidecar = repository / "agent" / ".foundry" / "foundry-opt.yaml"
@@ -491,4 +538,94 @@ def test_registered_publish_packages_exact_source_and_closes_clients(
     )
 
     assert receipt.published_version == "5"
+    assert closed == ["client", "credential"]
+
+
+def test_registered_verify_packages_exact_source_and_closes_clients(
+    tmp_path: Path,
+) -> None:
+    repository, commit, environment = _registered_repository(tmp_path)
+    environment.update(
+        {
+            "GITHUB_REF": "refs/pull/17/merge",
+            "GITHUB_REF_NAME": "17/merge",
+            "GITHUB_BASE_REF": "main",
+        }
+    )
+    settings = load_registered_verification_settings(
+        repository,
+        repo_agent_id="example-agent",
+        exact_source=commit,
+        environment=environment,
+    )
+    closed: list[str] = []
+
+    class Credential:
+        def close(self) -> None:
+            closed.append("credential")
+
+    class Client:
+        def close(self) -> None:
+            closed.append("client")
+
+    class Service:
+        def __init__(self, **kwargs: object) -> None:
+            assert kwargs["policy"] == settings.policy
+            assert kwargs["metadata"] == settings.metadata
+            assert kwargs["freshness_check"] is None
+
+        def verify(
+            self,
+            *,
+            repository: str,
+            release_commit: str,
+            packaged: object,
+            repository_root: object,
+            verification: object,
+        ) -> DeploymentVerificationReceipt:
+            assert repository == "example-org/example-repo"
+            assert release_commit == commit
+            assert getattr(packaged, "commit") == commit
+            assert getattr(packaged, "source_root") == "agent"
+            assert repository_root == settings.repository_root
+            assert getattr(verification, "mode") == "foundry_evaluation"
+            completed_verification = settings.verification.model_copy(
+                update={
+                    "status": "passed",
+                    "evaluation_link": "https://example.invalid/evaluations/deploy",
+                    "guardrails": (
+                        DeploymentGuardrail(
+                            name="violence",
+                            score=1.0,
+                            required_pass_rate=1.0,
+                            passed=True,
+                        ),
+                    ),
+                }
+            )
+            return DeploymentVerificationReceipt(
+                repository=repository,
+                release_commit=release_commit,
+                project_endpoint=settings.metadata.project_endpoint,
+                agent_name=settings.metadata.agent_name,
+                operation_id="deploy-verified",
+                source_root="agent",
+                source_tree_sha256=getattr(packaged, "tree_sha256"),
+                source_zip_sha256=getattr(packaged, "zip_sha256"),
+                verification=completed_verification,
+            )
+
+    receipt = verify_registered_deployment(
+        settings,
+        environment=environment,
+        credential_builder=lambda *_args, **_kwargs: Credential(),
+        evaluation_backend_factory=lambda **_kwargs: object(),
+        foundry_client_factory=lambda *_args, **_kwargs: Client(),
+        service_factory=Service,
+    )
+
+    assert receipt.published is False
+    assert receipt.verification.status == "passed"
+    assert receipt.repo_agent_id == "example-agent"
+    assert receipt.config_path == "agent/.foundry/foundry-opt.yaml"
     assert closed == ["client", "credential"]

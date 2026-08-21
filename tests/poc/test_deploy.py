@@ -420,6 +420,33 @@ def test_deployment_validates_draft_before_regular_publication() -> None:
     assert foundry.calls.index("cleanup") < foundry.calls.index("publish")
 
 
+def test_deployment_verify_only_runs_foundry_gate_without_publication() -> None:
+    policy, metadata = _configuration()
+    foundry = _Foundry()
+    service = DeploymentService(
+        client=foundry,
+        policy=policy,
+        metadata=metadata,
+        deadline_seconds=30,
+    )
+
+    receipt = service.verify(
+        repository="example-org/example-agent",
+        release_commit="a" * 40,
+        packaged=foundry.package,
+    )
+
+    assert receipt.status == "verified"
+    assert receipt.published is False
+    assert receipt.route_mutated is False
+    assert receipt.verification.mode == "foundry_evaluation"
+    assert receipt.verification.status == "passed"
+    assert receipt.verification.guardrails[0].passed is True
+    assert "publish" not in foundry.calls
+    assert "regular-get" not in foundry.calls
+    assert foundry.calls.index("cleanup") > foundry.calls.index("evaluate")
+
+
 def test_deployment_guardrail_failure_cleans_draft_and_does_not_publish() -> None:
     policy, metadata = _configuration()
     foundry = _Foundry(safety_score=0.75, safety_passed=False)
@@ -437,6 +464,29 @@ def test_deployment_guardrail_failure_cleans_draft_and_does_not_publish() -> Non
             packaged=foundry.package,
         )
 
+    assert "cleanup" in foundry.calls
+    assert "publish" not in foundry.calls
+
+
+def test_deployment_verify_only_reports_failed_guardrails_after_cleanup() -> None:
+    policy, metadata = _configuration()
+    foundry = _Foundry(safety_score=0.75, safety_passed=False)
+    service = DeploymentService(
+        client=foundry,
+        policy=policy,
+        metadata=metadata,
+        deadline_seconds=30,
+    )
+
+    with pytest.raises(DeploymentGuardrailError) as error:
+        service.verify(
+            repository="example-org/example-agent",
+            release_commit="a" * 40,
+            packaged=foundry.package,
+        )
+
+    assert error.value.verification.status == "failed"
+    assert error.value.verification.guardrails[0].passed is False
     assert "cleanup" in foundry.calls
     assert "publish" not in foundry.calls
 

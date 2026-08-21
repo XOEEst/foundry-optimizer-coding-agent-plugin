@@ -1,67 +1,93 @@
 # Evaluation gates
 
-Treat pull request evaluation and main-branch deployment as two separate
-owner controls.
+Treat pull request evaluation and main-branch deployment as separate owner
+controls.
 
-## Why two gates
+## Example workflows stay inactive until copied
 
-- A **pull request gate** helps you learn whether a proposed change is
-  worth merging.
-- A **deployment gate** helps you decide whether the reviewed main-branch
-  change is allowed to publish.
-
-They often reuse the same GitHub environments, Azure identity, Foundry
-project, datasets, evaluators, and runs, but they answer different owner
-questions.
+The repository now ships parseable examples under `examples/github-actions/`.
+They do **not** activate merely by existing there. A workflow runs only after
+you copy it into `.github/workflows/`.
 
 ## Template 1: opt-in PR gate
 
-Use this workflow concept when you want a pull request to say:
+- Source: `examples/github-actions/foundry-opt-pr-evaluation.yml`
+- Active path: `.github/workflows/foundry-opt-pr-evaluation.yml`
 
-- which agent changed
-- what verification source it used
-- whether the outcome is `winner`, `no_winner`, `recommended`, or
-  `proposed_unverified`
-- what the owner should review next
+Use this when you want a pull request check to verify the exact PR head
+commit with `foundry-opt deploy verify-registered` before merge.
 
-**Conceptual copy and enable steps**
+### Copy and configure
 
-1. Copy the PR gate template into `.github/workflows/` when the template
-   is available.
-2. Point it at the repository's selected agent IDs and managed profile.
-3. Configure it to run on the PR events or manual trigger you want.
-4. Make it publish a visible summary back to the pull request.
-5. If you want it to block merges, add it to branch protection as a
-   required status after you trust the signal.
+1. Copy `examples/github-actions/foundry-opt-pr-evaluation.yml` to
+   `.github/workflows/foundry-opt-pr-evaluation.yml`.
+2. Set `FOUNDRY_OPT_DEFAULT_REPO_AGENT_ID` to the exact enabled
+   `repoAgentId` from `.foundry-opt/registry.yaml`, or require the
+   `workflow_dispatch` input for multi-agent repositories.
+3. Keep the job `environment` aligned with the committed deployment
+   environment from the selected sidecar (typically `foundry-production`).
+4. Map `FOUNDRY_OPT_DEPLOYMENT_CLIENT_ID` and `AZURE_TENANT_ID` to the
+   environment-scoped GitHub variables that match the committed registry
+   identity.
+5. Leave the example on `pull_request` plus `workflow_dispatch`. The example
+   checks out `github.event.pull_request.head.sha` and exports that same exact
+   source to `GITHUB_SHA` before calling `verify-registered`, so the
+   verification receipt is bound to the reviewed commit rather than the merge
+   ref.
+6. The example resolves the shared CLI from the committed
+   `.foundry-opt/registry.yaml` plus `.foundry-opt/bootstrap.lock.json`
+   contract, verifies that pin, uploads the verification receipt, and writes a
+   GitHub step summary.
+7. Add the workflow as a required branch-protection status only after you
+   trust the signal.
+
+### Expected outcomes
+
+- `foundry_evaluation` - required Foundry evaluation ran and passed.
+- `repository_checks` - optional repository checks fallback passed.
+- `none` / `unverified` - the policy allowed a no-evidence path; the workflow
+  stays green but emits `WARNING: Unverified deployment permitted`.
+- Any required-check or guardrail failure returns a non-zero exit and fails the
+  PR gate after uploading the receipt.
 
 ## Template 2: main-branch deployment gate
 
-Use this workflow concept when you want main-branch deployment to say:
+- Source: `examples/github-actions/foundry-opt-main-deployment-gate.yml`
+- Active path: `.github/workflows/foundry-opt-main-deployment-gate.yml`
 
-- which exact reviewed commit is being published
-- whether binding and verification requirements are satisfied
-- whether deployment is fully verified or only policy-allowed
-- which GitHub environment approval and Foundry target are involved
+Use this when you want to verify the exact main-branch commit first and call
+`foundry-opt deploy publish-registered` only after the selected verification
+gate succeeds.
 
-**Conceptual copy and enable steps**
+### Copy and configure
 
-1. Copy the deployment template into `.github/workflows/` when the
-   template is available.
-2. Bind it to the protected deployment environment created during
-   bootstrap.
-3. Require the reviewed branch and exact runtime pin policy.
-4. Surface an explicit warning whenever policy allows deployment without
-   evaluation.
-5. Make sure owners can see the final link back to the GitHub run, Azure
-   identity context, and Foundry target.
+1. Copy `examples/github-actions/foundry-opt-main-deployment-gate.yml` to
+   `.github/workflows/foundry-opt-main-deployment-gate.yml`.
+2. Protect the `foundry-production` GitHub environment (or your committed
+   deployment environment equivalent) before allowing routine publication.
+3. Set `FOUNDRY_OPT_DEFAULT_REPO_AGENT_ID` to the exact enabled
+   `repoAgentId`, or require the workflow input if multiple agents can be
+   published from the same repository.
+4. Keep `FOUNDRY_OPT_DEPLOYMENT_CLIENT_ID`, `AZURE_TENANT_ID`, and
+   `GH_TOKEN` available exactly as shown. `publish-registered` still performs
+   the default-branch freshness check before creating a regular version.
+5. Preserve the exact-source pattern from the example: check out the exact
+   commit, export that same SHA before both `verify-registered` and
+   `publish-registered`, and stop before publish if verification fails.
+6. Review the step summary after each run. The example explicitly calls out:
+   - `required Foundry evaluation`
+   - `optional repository checks fallback`
+   - `no-evidence / off path permitted by policy`
+   - `WARNING: Unverified deployment permitted`
 
 ## Recommended owner stance
 
-- Start with the PR gate in an informational mode.
-- Turn on the deployment gate before you allow routine publication.
-- Reuse repository-default evaluation assets when you want stable,
-  repeatable signals.
-- Keep no-evidence deployment paths rare, deliberate, and visibly warned.
+- Start with the PR gate as informational.
+- Turn on the main deployment gate before routine publication.
+- Keep `none` / `unverified` publication paths rare, deliberate, and visibly
+  warned.
+- Reuse repository-default evaluation assets when you want stable, repeatable
+  signals.
 
 ## Related detail
 
