@@ -891,8 +891,13 @@ def test_mocked_customer_bootstrap_end_to_end(tmp_path: Path, request: pytest.Fi
     matrix_shared = build_changed_path_matrix(repo, changed_paths=[".foundry-opt/registry.yaml"])
     assert sorted(entry.repo_agent_id for entry in matrix_shared) == sorted([ALIGNED_ID, UNKNOWN_ID])
 
-    with pytest.raises(BootstrapConfigError, match="repository default evaluator bundle"):
-        build_registered_deployment_plan(selection, changed_root=ALIGNED_ROOT, exact_source=PILOT_BASELINE_COMMIT, use_repository_default_evaluators=False)
+    fallback_plan = build_registered_deployment_plan(
+        selection,
+        changed_root=ALIGNED_ROOT,
+        exact_source=PILOT_BASELINE_COMMIT,
+        use_repository_default_evaluators=False,
+    )
+    assert fallback_plan.verification.mode == "foundry_evaluation"
 
     deployment_plan = build_registered_deployment_plan(selection, changed_root=ALIGNED_ROOT, exact_source=PILOT_BASELINE_COMMIT, use_repository_default_evaluators=True)
     assert deployment_plan.repo_agent_id == ALIGNED_ID

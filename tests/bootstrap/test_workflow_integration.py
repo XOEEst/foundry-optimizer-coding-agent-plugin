@@ -180,6 +180,9 @@ def _write_quick_repo(
     *,
     enabled: bool = True,
     profile_exists: bool = True,
+    evaluation_gate_policy: str = "allow_no_evidence",
+    repository_checks: tuple[str, ...] = (),
+    verification_mode: str | None = None,
 ) -> Path:
     root = tmp_path / "quick-repo"
     (root / ".foundry-opt").mkdir(parents=True)
@@ -212,6 +215,22 @@ def _write_quick_repo(
         encoding="utf-8",
     )
     if profile_exists:
+        mode = verification_mode or ("optional" if repository_checks else "off")
+        verification_lines = [
+            "verification:",
+            "  schema_version: 1",
+            f"  mode: '{mode}'",
+            f"  evaluation_gate_policy: '{evaluation_gate_policy}'",
+            "  bundle: null",
+            "  lineage: null",
+        ]
+        if repository_checks:
+            verification_lines.append("  repository_checks:")
+            verification_lines.extend(
+                f'    - "{check}"' for check in repository_checks
+            )
+        else:
+            verification_lines.append("  repository_checks: []")
         (root / "agent" / ".foundry" / "foundry-opt.yaml").write_text(
             "\n".join(
                 (
@@ -259,11 +278,7 @@ def _write_quick_repo(
                     "  environment: foundry-production",
                     "  enabled: true",
                     "  require_aligned_binding: true",
-                    "verification:",
-                    "  schema_version: 1",
-                    "  mode: 'off'",
-                    "  bundle: null",
-                    "  lineage: null",
+                    *verification_lines,
                 )
             ),
             encoding="utf-8",
@@ -355,6 +370,8 @@ def test_registered_deployment_plan_uses_repository_defaults(tmp_path: Path) -> 
     )
     assert plan.repo_agent_id == "example-agent"
     assert plan.default_evaluator_ids == ("azureai://built-in/evaluators/safety",)
+    assert plan.verification.mode == "foundry_evaluation"
+    assert plan.verification.status == "planned"
     assert plan.registry_hash != plan.sidecar_hash
 
 
@@ -364,7 +381,58 @@ def test_registry_selection_supports_enabled_quick_profile(tmp_path: Path) -> No
 
     assert selection.sidecar.schema_version == 2
     assert selection.sidecar.verification.mode == "off"
-    with pytest.raises(BootstrapConfigError, match="activated repository default evaluator bundle"):
+    plan = build_registered_deployment_plan(
+        selection,
+        changed_root="agent",
+        exact_source="c" * 40,
+        use_repository_default_evaluators=True,
+    )
+    assert plan.objective_hash is None
+    assert plan.default_evaluator_ids == ()
+    assert plan.verification.mode == "none"
+    assert plan.verification.unverified_deployment is True
+    assert plan.verification.warning is not None
+    assert plan.verification.warning.code == "deployment-unverified"
+
+
+def test_registered_deployment_plan_falls_back_to_repository_checks(
+    tmp_path: Path,
+) -> None:
+    root = _write_quick_repo(
+        tmp_path,
+        evaluation_gate_policy="allow_repository_checks",
+        repository_checks=("check: CI / unit-tests",),
+    )
+    selection = resolve_registry_selection(root)
+
+    plan = build_registered_deployment_plan(
+        selection,
+        changed_root="agent",
+        exact_source="c" * 40,
+        use_repository_default_evaluators=True,
+    )
+
+    assert plan.objective_hash is None
+    assert plan.default_evaluator_ids == ()
+    assert plan.verification.mode == "repository_checks"
+    assert plan.verification.check_results[0].status == "planned"
+    assert plan.verification.check_results[0].value == "CI / unit-tests"
+    assert plan.verification.evaluator_ids == ()
+
+
+def test_registered_deployment_plan_requires_repository_checks_when_bundle_missing(
+    tmp_path: Path,
+) -> None:
+    root = _write_quick_repo(
+        tmp_path,
+        evaluation_gate_policy="allow_repository_checks",
+    )
+    selection = resolve_registry_selection(root)
+
+    with pytest.raises(
+        BootstrapConfigError,
+        match="trusted repository checks",
+    ):
         build_registered_deployment_plan(
             selection,
             changed_root="agent",

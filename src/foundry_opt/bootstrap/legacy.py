@@ -95,6 +95,7 @@ def import_legacy_single_agent_documents(*, lock_document: str | bytes, policy_d
             deployment=DeploymentSettings(environment='foundry-production', enabled=True, require_aligned_binding=True),
             verification=VerificationSettings(
                 mode='required',
+                evaluation_gate_policy='require_foundry_evaluation',
                 bundle=VerificationBundle(
                     development_dataset=ImmutableDatasetReference(dataset_id=str(development['dataset_id'])),
                     validating_dataset=ImmutableDatasetReference(dataset_id=str(validating['dataset_id'])),

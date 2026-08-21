@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import os
 import subprocess
@@ -33,6 +34,13 @@ from foundry_opt.poc.config import (
     SharedPin,
     load_agent_metadata,
     load_repository_policy,
+)
+from foundry_opt.poc.verification import (
+    DeploymentGuardrail,
+    DeploymentVerification,
+    DeploymentVerificationCheckResult,
+    deployment_unverified_warning,
+    resolve_deployment_verification,
 )
 from foundry_opt.poc.foundry import (
     AzureProjectsEvaluationBackend,
@@ -72,6 +80,7 @@ RELEASE_COMMIT_METADATA_KEY = "foundry_opt_release_commit"
 REPOSITORY_METADATA_KEY = "foundry_opt_repository"
 SOURCE_ROOT_METADATA_KEY = "foundry_opt_source_root"
 SOURCE_TREE_METADATA_KEY = "foundry_opt_source_tree_sha256"
+_UNUSED_DEPLOYMENT_VERIFICATION_TOKEN = "deployment-verification-not-required"
 
 _COMMIT_PATTERN = r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
@@ -123,11 +132,15 @@ class DeploymentSupersededError(DeploymentError):
         self.current_main_commit = current_main_commit
 
 
-class DeploymentGuardrail(_FrozenModel):
-    name: str = Field(min_length=1, max_length=256)
-    score: float | None = Field(default=None, ge=0)
-    required_pass_rate: float = Field(ge=0, le=1)
-    passed: bool
+class DeploymentRepositoryChecksError(DeploymentError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        verification: DeploymentVerification,
+    ) -> None:
+        super().__init__(message)
+        self.verification = verification
 
 
 class DeploymentPreflight(_FrozenModel):
@@ -156,8 +169,9 @@ class DeploymentReceipt(_FrozenModel):
     source_root: str
     source_tree_sha256: str = Field(pattern=_SHA256_PATTERN)
     source_zip_sha256: str = Field(pattern=_SHA256_PATTERN)
-    evaluation_link: str
-    guardrails: tuple[DeploymentGuardrail, ...]
+    evaluation_link: str | None = None
+    guardrails: tuple[DeploymentGuardrail, ...] = ()
+    verification: DeploymentVerification
     draft_cleanup_complete: Literal[True] = True
     route_mode: Literal["service-managed-latest"] = "service-managed-latest"
     route_mutated: Literal[False] = False
@@ -190,6 +204,7 @@ class RegisteredDeploymentSettings:
     selection: RegistrySelection
     policy: RepositoryPolicy
     metadata: AgentMetadata
+    verification: DeploymentVerification
     oidc_config: GitHubActionsOidcConfig
     release_commit: str
     artifact_root: Path
@@ -253,6 +268,8 @@ class DeploymentService:
         repository: str,
         release_commit: str,
         packaged: PackagedSource,
+        repository_root: Path | None = None,
+        verification: DeploymentVerification | None = None,
     ) -> DeploymentReceipt:
         if packaged.commit != release_commit:
             raise DeploymentError(
@@ -275,31 +292,32 @@ class DeploymentService:
             self._metadata,
             self._policy.baseline_model,
         )
-        evidence = self._evaluate_deployment_draft(
-            packaged=packaged,
-            definition=definition,
-            operation_id=operation_id,
+        requested_verification = (
+            self._default_foundry_verification()
+            if verification is None
+            else verification
         )
-        guardrails = self._deployment_guardrails(evidence)
-        failed = tuple(item.name for item in guardrails if not item.passed)
-        if failed:
-            raise DeploymentGuardrailError(
-                "deployment hard guardrails failed: " + ", ".join(failed),
-                evaluation_link=evidence.report_url,
-                guardrails=guardrails,
+        completed_verification, route_change_detail = (
+            self._perform_deployment_verification(
+                repository=repository,
+                release_commit=release_commit,
+                packaged=packaged,
+                repository_root=repository_root,
+                definition=definition,
+                operation_id=operation_id,
+                verification=requested_verification,
             )
-        route_after_draft = self._client.require_service_managed_latest(
+        )
+        route_after_verification = self._client.require_service_managed_latest(
             self._metadata.agent_name,
             deadline_monotonic=self._deadline(),
         )
-        if route_after_draft.latest_version != route_before.latest_version:
-            raise DeploymentError(
-                "Foundry latest regular version changed during draft validation"
-            )
+        if route_after_verification.latest_version != route_before.latest_version:
+            raise DeploymentError(route_change_detail)
         if self._freshness_check is not None:
             self._freshness_check(release_commit)
         matching_latest = self._matching_latest_version(
-            route=route_after_draft,
+            route=route_after_verification,
             packaged=packaged,
         )
         if matching_latest is not None:
@@ -310,8 +328,7 @@ class DeploymentService:
                 route_before=route_before,
                 reference=matching_latest,
                 reconciled=True,
-                evidence=evidence,
-                guardrails=guardrails,
+                verification=completed_verification,
             )
         provenance = {
             RELEASE_COMMIT_METADATA_KEY: release_commit,
@@ -368,9 +385,129 @@ class DeploymentService:
             route_before=route_before,
             reference=active,
             reconciled=published.reconciled,
-            evidence=evidence,
-            guardrails=guardrails,
+            verification=completed_verification,
         )
+
+    def _default_foundry_verification(self) -> DeploymentVerification:
+        contract = self._metadata.development_evaluation
+        return DeploymentVerification(
+            mode="foundry_evaluation",
+            status="planned",
+            evaluation_id=contract.resolved_evaluation_id,
+            dataset_id=contract.dataset_id,
+            evaluator_ids=contract.custom_evaluator_ids,
+            unverified_deployment=False,
+        )
+
+    def _perform_deployment_verification(
+        self,
+        *,
+        repository: str,
+        release_commit: str,
+        packaged: PackagedSource,
+        repository_root: Path | None,
+        definition: HostedDefinition,
+        operation_id: str,
+        verification: DeploymentVerification,
+    ) -> tuple[DeploymentVerification, str]:
+        if verification.mode == "foundry_evaluation":
+            return (
+                self._foundry_deployment_verification(
+                    verification=verification,
+                    packaged=packaged,
+                    definition=definition,
+                    operation_id=operation_id,
+                ),
+                "Foundry latest regular version changed during draft validation",
+            )
+        if verification.mode == "repository_checks":
+            if repository_root is None:
+                raise DeploymentError(
+                    "repository root is required to run deployment repository checks"
+                )
+            return (
+                self._repository_check_verification(
+                    repository_root=repository_root,
+                    repository=repository,
+                    release_commit=release_commit,
+                    verification=verification,
+                ),
+                "Foundry latest regular version changed during deployment verification",
+            )
+        return (
+            verification,
+            "Foundry latest regular version changed during deployment verification",
+        )
+
+    def _foundry_deployment_verification(
+        self,
+        *,
+        verification: DeploymentVerification,
+        packaged: PackagedSource,
+        definition: HostedDefinition,
+        operation_id: str,
+    ) -> DeploymentVerification:
+        evidence = self._evaluate_deployment_draft(
+            packaged=packaged,
+            definition=definition,
+            operation_id=operation_id,
+        )
+        guardrails = self._deployment_guardrails(evidence)
+        failed = tuple(item.name for item in guardrails if not item.passed)
+        if failed:
+            raise DeploymentGuardrailError(
+                "deployment hard guardrails failed: " + ", ".join(failed),
+                evaluation_link=evidence.report_url,
+                guardrails=guardrails,
+            )
+        return verification.model_copy(
+            update={
+                "status": "passed",
+                "evaluation_link": evidence.report_url,
+                "guardrails": guardrails,
+            }
+        )
+
+    def _repository_check_verification(
+        self,
+        *,
+        repository_root: Path,
+        repository: str,
+        release_commit: str,
+        verification: DeploymentVerification,
+    ) -> DeploymentVerification:
+        results = tuple(
+            _evaluate_repository_check(
+                repository_root=repository_root,
+                repository=repository,
+                release_commit=release_commit,
+                check=check,
+                timeout_seconds=max(1, int(math.ceil(self._deadline_seconds))),
+            )
+            for check in verification.check_results
+        )
+        overall_status = _repository_check_status(results)
+        completed = verification.model_copy(
+            update={
+                "status": overall_status,
+                "check_results": results,
+            }
+        )
+        if overall_status != "passed":
+            blocked = ", ".join(
+                f"{item.kind}: {item.value}"
+                for item in results
+                if item.status != "passed"
+            )
+            raise DeploymentRepositoryChecksError(
+                (
+                    "deployment repository checks did not all pass"
+                    if not blocked
+                    else f"deployment repository checks did not all pass: {blocked}"
+                ),
+                verification=completed,
+            )
+        return completed
 
     def _matching_latest_version(
         self,
@@ -413,8 +550,7 @@ class DeploymentService:
         route_before: RouteFingerprint,
         reference: RegularVersionReference,
         reconciled: bool,
-        evidence: EvaluationEvidence,
-        guardrails: tuple[DeploymentGuardrail, ...],
+        verification: DeploymentVerification,
     ) -> DeploymentReceipt:
         return DeploymentReceipt(
             repository=repository,
@@ -428,8 +564,9 @@ class DeploymentService:
             source_root=packaged.source_root,
             source_tree_sha256=packaged.tree_sha256,
             source_zip_sha256=packaged.zip_sha256,
-            evaluation_link=evidence.report_url,
-            guardrails=guardrails,
+            evaluation_link=verification.evaluation_link,
+            guardrails=verification.guardrails,
+            verification=verification,
         )
 
     def _evaluate_deployment_draft(
@@ -710,6 +847,7 @@ def publish_deployment(
             repository=settings.metadata.repository_identity,
             release_commit=settings.release_commit,
             packaged=packaged,
+            repository_root=settings.repository_root,
         )
     finally:
         handle.close()
@@ -735,8 +873,13 @@ def load_registered_deployment_settings(
     sidecar = selection.sidecar
     if not sidecar.deployment.enabled:
         raise RuntimeIntegrationError("selected registered agent deployment is disabled")
+    try:
+        verification = resolve_deployment_verification(profile=sidecar)
+    except ValueError as error:
+        raise RuntimeIntegrationError(str(error)) from error
     if (
-        sidecar.deployment.require_aligned_binding
+        verification.mode == "foundry_evaluation"
+        and sidecar.deployment.require_aligned_binding
         and (
             sidecar.evaluation_lineage is None
             or sidecar.evaluation_lineage.activation_binding is None
@@ -744,10 +887,6 @@ def load_registered_deployment_settings(
     ):
         raise RuntimeIntegrationError(
             "selected registered agent has no receipt-bound aligned activation"
-        )
-    if sidecar.default_evaluator_bundle is None:
-        raise RuntimeIntegrationError(
-            "selected registered agent has no activated repository default evaluator bundle"
         )
 
     registry_path = root / ".foundry-opt" / "registry.yaml"
@@ -898,12 +1037,14 @@ def load_registered_deployment_settings(
         client_id=trusted_client_id,
         client_id_variable=registry.github.client_id_variable,
         oidc_subject_prefix=subject_prefix,
+        verification=verification,
     )
     return RegisteredDeploymentSettings(
         repository_root=root,
         selection=selection,
         policy=policy,
         metadata=metadata,
+        verification=verification,
         oidc_config=oidc_config,
         release_commit=release_commit,
         artifact_root=_deployment_artifact_root(
@@ -965,6 +1106,8 @@ def publish_registered_deployment(
             repository=settings.metadata.repository_identity,
             release_commit=settings.release_commit,
             packaged=packaged,
+            repository_root=settings.repository_root,
+            verification=settings.verification,
         )
     finally:
         try:
@@ -1057,6 +1200,274 @@ def deployment_freshness_check(
     return check
 
 
+def _repository_check_status(
+    results: tuple[DeploymentVerificationCheckResult, ...],
+) -> Literal["passed", "failed", "unverified"]:
+    if any(result.status == "failed" for result in results):
+        return "failed"
+    if any(result.status in {"skipped", "unverified"} for result in results):
+        return "unverified"
+    return "passed"
+
+
+def _evaluate_repository_check(
+    *,
+    repository_root: Path,
+    repository: str,
+    release_commit: str,
+    check: DeploymentVerificationCheckResult,
+    timeout_seconds: int,
+) -> DeploymentVerificationCheckResult:
+    if check.kind == "command":
+        return _run_repository_command_check(
+            repository_root=repository_root,
+            check=check,
+            timeout_seconds=timeout_seconds,
+        )
+    return _read_repository_status_check(
+        repository=repository,
+        release_commit=release_commit,
+        check=check,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def _run_repository_command_check(
+    *,
+    repository_root: Path,
+    check: DeploymentVerificationCheckResult,
+    timeout_seconds: int,
+) -> DeploymentVerificationCheckResult:
+    try:
+        completed = subprocess.run(
+            check.value,
+            shell=True,
+            check=False,
+            capture_output=True,
+            text=True,
+            cwd=repository_root,
+            stdin=subprocess.DEVNULL,
+            timeout=timeout_seconds,
+            env=_git_environment(),
+        )
+    except subprocess.TimeoutExpired:
+        return check.model_copy(
+            update={
+                "status": "failed",
+                "detail": _repository_check_detail("command timed out"),
+            }
+        )
+    except OSError as error:
+        return check.model_copy(
+            update={
+                "status": "failed",
+                "detail": _repository_check_detail(
+                    "command could not run",
+                    str(error),
+                ),
+            }
+        )
+    status: Literal["passed", "failed"] = (
+        "passed" if completed.returncode == 0 else "failed"
+    )
+    if status == "passed":
+        detail = None
+    else:
+        detail = _repository_check_detail(
+            f"command exited with status {completed.returncode}",
+            completed.stderr,
+            completed.stdout,
+        )
+    return check.model_copy(
+        update={
+            "status": status,
+            "detail": detail,
+        }
+    )
+
+
+def _read_repository_status_check(
+    *,
+    repository: str,
+    release_commit: str,
+    check: DeploymentVerificationCheckResult,
+    timeout_seconds: int,
+) -> DeploymentVerificationCheckResult:
+    runs_payload = _github_api_payload(
+        repository=repository,
+        path=f"repos/{repository}/commits/{release_commit}/check-runs?per_page=100",
+        timeout_seconds=timeout_seconds,
+    )
+    statuses_payload = _github_api_payload(
+        repository=repository,
+        path=f"repos/{repository}/commits/{release_commit}/status",
+        timeout_seconds=timeout_seconds,
+    )
+    target = check.value.casefold()
+    runs = runs_payload.get("check_runs")
+    if isinstance(runs, list):
+        matches = [
+            item
+            for item in runs
+            if isinstance(item, dict)
+            and str(item.get("name", "")).casefold() == target
+        ]
+        if matches:
+            latest = _latest_github_check_item(matches)
+            state = str(latest.get("status", "")).casefold()
+            url = _optional_text(latest.get("html_url"))
+            if state != "completed":
+                return check.model_copy(
+                    update={
+                        "status": "unverified",
+                        "detail": _repository_check_detail(
+                            f"GitHub check status is {state or 'unknown'}"
+                        ),
+                        "url": url,
+                    }
+                )
+            conclusion = str(latest.get("conclusion", "")).casefold()
+            status: Literal["passed", "failed", "skipped"]
+            if conclusion == "success":
+                status = "passed"
+                detail = None
+            elif conclusion == "skipped":
+                status = "skipped"
+                detail = _repository_check_detail(
+                    "GitHub check was skipped"
+                )
+            else:
+                status = "failed"
+                detail = _repository_check_detail(
+                    f"GitHub check conclusion is {conclusion or 'unknown'}"
+                )
+            return check.model_copy(
+                update={
+                    "status": status,
+                    "detail": detail,
+                    "url": url,
+                }
+            )
+    statuses = statuses_payload.get("statuses")
+    if isinstance(statuses, list):
+        matches = [
+            item
+            for item in statuses
+            if isinstance(item, dict)
+            and str(item.get("context", "")).casefold() == target
+        ]
+        if matches:
+            latest = _latest_github_check_item(matches)
+            state = str(latest.get("state", "")).casefold()
+            status: Literal["passed", "failed", "unverified"]
+            if state == "success":
+                status = "passed"
+            elif state == "pending":
+                status = "unverified"
+            else:
+                status = "failed"
+            detail = None
+            if status != "passed":
+                detail = _repository_check_detail(
+                    _optional_text(latest.get("description"))
+                    or f"GitHub status is {state or 'unknown'}"
+                )
+            return check.model_copy(
+                update={
+                    "status": status,
+                    "detail": detail,
+                    "url": _optional_text(latest.get("target_url")),
+                }
+            )
+    return check.model_copy(
+        update={
+            "status": "unverified",
+            "detail": _repository_check_detail(
+                "required GitHub check was not found for the exact source commit"
+            ),
+        }
+    )
+
+
+def _github_api_payload(
+    *,
+    repository: str,
+    path: str,
+    timeout_seconds: int,
+) -> dict[str, object]:
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if not token:
+        raise RuntimeIntegrationError(
+            "GitHub token is required to verify deployment repository checks"
+        )
+    environment = _git_environment()
+    environment["GH_TOKEN"] = token
+    try:
+        completed = subprocess.run(
+            ["gh", "api", path],
+            check=False,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=timeout_seconds,
+            env=environment,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeIntegrationError(
+            "GitHub deployment repository-check verification timed out"
+        ) from error
+    except OSError as error:
+        raise RuntimeIntegrationError(
+            "GitHub deployment repository-check verification could not run"
+        ) from error
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise RuntimeIntegrationError(
+            "GitHub deployment repository-check verification failed"
+            + (f": {detail}" if detail else "")
+        )
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimeIntegrationError(
+            "GitHub deployment repository-check verification returned invalid JSON"
+        ) from error
+    if not isinstance(payload, dict):
+        raise RuntimeIntegrationError(
+            "GitHub deployment repository-check verification returned an invalid payload"
+        )
+    return payload
+
+
+def _latest_github_check_item(items: list[dict[str, object]]) -> dict[str, object]:
+    def sort_key(item: dict[str, object]) -> tuple[str, str, str, str]:
+        return (
+            str(item.get("completed_at") or ""),
+            str(item.get("started_at") or ""),
+            str(item.get("updated_at") or ""),
+            str(item.get("id") or ""),
+        )
+
+    return sorted(items, key=sort_key)[-1]
+
+
+def _repository_check_detail(*parts: object) -> str:
+    normalized = [
+        str(part).strip()
+        for part in parts
+        if isinstance(part, str) and part.strip()
+    ]
+    detail = " — ".join(normalized) or "repository check did not pass"
+    return detail[:1024]
+
+
+def _optional_text(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text or None
+
+
 def _registered_repository_policy(
     selection: RegistrySelection,
 ) -> RepositoryPolicy:
@@ -1109,34 +1520,34 @@ def _registered_agent_metadata(
     client_id: str,
     client_id_variable: str,
     oidc_subject_prefix: str,
+    verification: DeploymentVerification,
 ) -> AgentMetadata:
     sidecar = selection.sidecar
-    bundle = sidecar.default_evaluator_bundle
-    development_definition = sidecar.development_definition
-    validating_definition = sidecar.validating_definition
-    development_dataset = sidecar.development_dataset
-    validating_dataset = sidecar.validating_dataset
-    if (
-        bundle is None
-        or development_definition is None
-        or validating_definition is None
-        or development_dataset is None
-        or validating_dataset is None
-    ):
-        raise RuntimeIntegrationError(
-            "registered agent metadata requires an activated repository default evaluator bundle"
-        )
-    evaluator_ids = tuple(
-        dict.fromkeys(
-            (
-                *(
-                    evaluator.reference.evaluator_id
-                    for evaluator in bundle.objective.evaluators
-                ),
-                *(guardrail.evaluator_name for guardrail in sidecar.hard_guardrails),
+    if verification.mode == "foundry_evaluation":
+        development_definition = sidecar.development_definition
+        validating_definition = sidecar.validating_definition
+        development_dataset = sidecar.development_dataset
+        validating_dataset = sidecar.validating_dataset
+        if (
+            development_definition is None
+            or validating_definition is None
+            or development_dataset is None
+            or validating_dataset is None
+        ):
+            raise RuntimeIntegrationError(
+                "registered agent metadata requires an activated repository default evaluator bundle"
             )
-        )
-    )
+        evaluator_ids = verification.evaluator_ids
+        development_evaluation_id = development_definition.definition_id
+        development_dataset_id = development_dataset.dataset_id
+        validating_evaluation_id = validating_definition.definition_id
+        validating_dataset_id = validating_dataset.dataset_id
+    else:
+        evaluator_ids = ()
+        development_evaluation_id = _UNUSED_DEPLOYMENT_VERIFICATION_TOKEN
+        development_dataset_id = _UNUSED_DEPLOYMENT_VERIFICATION_TOKEN
+        validating_evaluation_id = _UNUSED_DEPLOYMENT_VERIFICATION_TOKEN
+        validating_dataset_id = _UNUSED_DEPLOYMENT_VERIFICATION_TOKEN
     deployment_environment = sidecar.deployment.environment
     subject = f"{oidc_subject_prefix}:environment:{deployment_environment}"
     return AgentMetadata.model_validate(
@@ -1212,15 +1623,15 @@ def _registered_agent_metadata(
             "development_evaluation": {
                 "name": "development",
                 "split": "development",
-                "resolved_evaluation_id": development_definition.definition_id,
-                "dataset_id": development_dataset.dataset_id,
+                "resolved_evaluation_id": development_evaluation_id,
+                "dataset_id": development_dataset_id,
                 "custom_evaluator_ids": evaluator_ids,
             },
             "validating_evaluation": {
                 "name": "validating",
                 "split": "validating",
-                "resolved_evaluation_id": validating_definition.definition_id,
-                "dataset_id": validating_dataset.dataset_id,
+                "resolved_evaluation_id": validating_evaluation_id,
+                "dataset_id": validating_dataset_id,
                 "custom_evaluator_ids": evaluator_ids,
             },
         }

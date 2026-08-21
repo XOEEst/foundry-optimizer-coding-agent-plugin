@@ -51,6 +51,7 @@ from foundry_opt.poc.deploy import (
     DeploymentError,
     DeploymentGuardrailError,
     DeploymentPostPublishError,
+    DeploymentRepositoryChecksError,
     DeploymentSupersededError,
     load_deployment_settings,
     load_registered_deployment_settings,
@@ -451,7 +452,9 @@ def deploy_plan(
                 exact_source=exact_source,
                 use_repository_default_evaluators=use_repository_default_evaluators,
             )
-            _echo_json({"status": "planned", **asdict(plan)})
+            payload = asdict(plan)
+            payload["verification"] = plan.verification.model_dump(mode="json")
+            _echo_json({"status": "planned", **payload})
         except _JOB_COMMAND_ERRORS as error:
             _emit_blocked(error)
 
@@ -527,6 +530,18 @@ def deploy_publish(
         if receipt is not None:
             _write_json_document(receipt, payload)
         _echo_json(payload)
+    except DeploymentRepositoryChecksError as error:
+        _echo_json(
+            {
+                "error": (
+                    _redact_text(str(error))
+                    or "deployment repository checks did not all pass"
+                ),
+                "status": "blocked",
+                "verification": error.verification.model_dump(mode="json"),
+            }
+        )
+        raise typer.Exit(code=2)
     except DeploymentPostPublishError as error:
         _echo_json(
             {
@@ -600,6 +615,18 @@ def deploy_publish_registered(
         if receipt is not None:
             _write_json_document(receipt, payload)
         _echo_json(payload)
+    except DeploymentRepositoryChecksError as error:
+        _echo_json(
+            {
+                "error": (
+                    _redact_text(str(error))
+                    or "deployment repository checks did not all pass"
+                ),
+                "status": "blocked",
+                "verification": error.verification.model_dump(mode="json"),
+            }
+        )
+        raise typer.Exit(code=2)
     except DeploymentPostPublishError as error:
         _echo_json(
             {

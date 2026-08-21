@@ -55,6 +55,7 @@ def test_v1_sidecar_parses_into_v2_profile() -> None:
 
     assert sidecar.schema_version == 2
     assert sidecar.verification.mode == 'required'
+    assert sidecar.verification.evaluation_gate_policy == 'require_foundry_evaluation'
     assert sidecar.default_evaluator_bundle is not None
 
 
@@ -88,6 +89,7 @@ def test_actual_template_legacy_import_succeeds() -> None:
     assert proposal.registry.distribution.repository.endswith('foundry-optimizer-coding-agent-plugin.git')
     assert proposal.sidecars[0].development_definition.definition_id == 'eval_development'
     assert proposal.sidecars[0].verification.bundle is not None
+    assert proposal.sidecars[0].verification.evaluation_gate_policy == 'require_foundry_evaluation'
     assert proposal.actions[0].kind == 'unresolved-shared-identity'
 
 

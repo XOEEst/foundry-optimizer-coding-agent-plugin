@@ -7,13 +7,25 @@ from pydantic import Field, model_validator
 from foundry_opt.bootstrap.contracts import (
     BootstrapSidecar,
     EvaluationGatePolicy,
+    HardGuardrail,
+    VerificationBundle,
 )
+from foundry_opt.bootstrap.errors import BootstrapConfigError
 from foundry_opt.models import FrozenModel
 from foundry_opt.poc.config import IssueEvaluatorEntry, OptimizeIssueRequest
 from foundry_opt.verification import VerificationCheckSpec, VerificationDatasetInput
 
 
 VerificationResolutionMode = Literal["foundry_evaluation", "repository_checks", "none"]
+DeploymentVerificationMode = VerificationResolutionMode
+DeploymentVerificationStatus = Literal[
+    "planned",
+    "passed",
+    "failed",
+    "skipped",
+    "unverified",
+]
+DeploymentWarningCode = Literal["deployment-unverified"]
 VerificationProvenance = Literal[
     "issue_dataset",
     "issue_evaluators",
@@ -40,6 +52,111 @@ class FoundryEvaluationPlan(FrozenModel):
             raise ValueError("development_evaluator_ids must not be empty")
         if not self.validating_evaluator_ids:
             raise ValueError("validating_evaluator_ids must not be empty")
+        return self
+
+
+class DeploymentGuardrail(FrozenModel):
+    name: str = Field(min_length=1, max_length=256)
+    score: float | None = Field(default=None, ge=0)
+    required_pass_rate: float = Field(ge=0, le=1)
+    passed: bool
+
+
+class DeploymentVerificationWarning(FrozenModel):
+    code: DeploymentWarningCode
+    message: str = Field(min_length=1, max_length=1024)
+
+
+class DeploymentVerificationCheckResult(FrozenModel):
+    kind: Literal["command", "check"]
+    value: str
+    status: DeploymentVerificationStatus
+    detail: str | None = Field(default=None, max_length=1024)
+    url: str | None = Field(default=None, max_length=2048)
+
+
+class DeploymentVerification(FrozenModel):
+    mode: DeploymentVerificationMode
+    status: DeploymentVerificationStatus
+    evaluation_gate_policy: EvaluationGatePolicy | None = None
+    objective_hash: str | None = None
+    evaluation_id: str | None = None
+    dataset_id: str | None = None
+    evaluator_ids: tuple[str, ...] = ()
+    check_results: tuple[DeploymentVerificationCheckResult, ...] = ()
+    evaluation_link: str | None = None
+    guardrails: tuple[DeploymentGuardrail, ...] = ()
+    unverified_deployment: bool
+    warning: DeploymentVerificationWarning | None = None
+
+    @model_validator(mode="after")
+    def validate_shape(self) -> "DeploymentVerification":
+        if self.mode == "foundry_evaluation":
+            if self.check_results:
+                raise ValueError(
+                    "foundry_evaluation deployment verification cannot carry repository check results"
+                )
+            if self.evaluation_id is None or self.dataset_id is None:
+                raise ValueError(
+                    "foundry_evaluation deployment verification requires evaluation identifiers"
+                )
+            if not self.evaluator_ids:
+                raise ValueError(
+                    "foundry_evaluation deployment verification requires evaluator_ids"
+                )
+            if self.unverified_deployment:
+                raise ValueError(
+                    "foundry_evaluation deployment verification cannot be unverified"
+                )
+            if self.warning is not None:
+                raise ValueError(
+                    "foundry_evaluation deployment verification cannot carry warnings"
+                )
+        elif self.mode == "repository_checks":
+            if (
+                self.objective_hash is not None
+                or self.evaluation_id is not None
+                or self.dataset_id is not None
+                or self.evaluator_ids
+                or self.evaluation_link is not None
+                or self.guardrails
+            ):
+                raise ValueError(
+                    "repository_checks deployment verification cannot carry Foundry evaluation identifiers"
+                )
+            if not self.check_results:
+                raise ValueError(
+                    "repository_checks deployment verification requires check results"
+                )
+            if self.unverified_deployment:
+                raise ValueError(
+                    "repository_checks deployment verification cannot be marked unverified"
+                )
+            if self.warning is not None:
+                raise ValueError(
+                    "repository_checks deployment verification cannot carry warnings"
+                )
+        else:
+            if (
+                self.objective_hash is not None
+                or self.evaluation_id is not None
+                or self.dataset_id is not None
+                or self.evaluator_ids
+                or self.check_results
+                or self.evaluation_link is not None
+                or self.guardrails
+            ):
+                raise ValueError(
+                    "none deployment verification cannot carry evaluation or repository-check evidence"
+                )
+            if not self.unverified_deployment:
+                raise ValueError(
+                    "none deployment verification must be marked unverified"
+                )
+            if self.warning is None:
+                raise ValueError(
+                    "none deployment verification requires an explicit warning"
+                )
         return self
 
 
@@ -305,9 +422,132 @@ def _foundry_defaults(profile: object) -> FoundryEvaluationPlan | None:
     )
 
 
+def deployment_unverified_warning() -> DeploymentVerificationWarning:
+    return DeploymentVerificationWarning(
+        code="deployment-unverified",
+        message=(
+            "exact-source publication is permitted without Foundry evaluation or "
+            "repository check evidence"
+        ),
+    )
+
+
+def deployment_evaluator_ids(
+    *,
+    bundle: VerificationBundle,
+    hard_guardrails: tuple[HardGuardrail, ...],
+) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(
+            (
+                *(
+                    evaluator.reference.evaluator_id
+                    for evaluator in bundle.default_evaluator_bundle.objective.evaluators
+                ),
+                *(guardrail.evaluator_name for guardrail in hard_guardrails),
+            )
+        )
+    )
+
+
+def _usable_deployment_bundle(
+    profile: BootstrapSidecar,
+) -> VerificationBundle | None:
+    bundle = profile.verification.bundle
+    if bundle is None:
+        return None
+    if (
+        profile.deployment.require_aligned_binding
+        and (
+            profile.verification.lineage is None
+            or profile.verification.lineage.activation_binding is None
+        )
+    ):
+        return None
+    return bundle
+
+
+def resolve_deployment_verification(
+    *,
+    profile: BootstrapSidecar,
+) -> DeploymentVerification:
+    policy = profile.verification.evaluation_gate_policy
+    bundle = profile.verification.bundle
+
+    if policy == "require_foundry_evaluation":
+        if bundle is None:
+            raise BootstrapConfigError(
+                "deployment plans require an activated repository default evaluator bundle"
+            )
+        return DeploymentVerification(
+            mode="foundry_evaluation",
+            status="planned",
+            evaluation_gate_policy=policy,
+            objective_hash=bundle.default_evaluator_bundle.objective.objective_hash,
+            evaluation_id=bundle.development_definition.definition_id,
+            dataset_id=bundle.development_dataset.dataset_id,
+            evaluator_ids=deployment_evaluator_ids(
+                bundle=bundle,
+                hard_guardrails=profile.hard_guardrails,
+            ),
+            unverified_deployment=False,
+        )
+
+    usable_bundle = _usable_deployment_bundle(profile)
+    if usable_bundle is not None:
+        return DeploymentVerification(
+            mode="foundry_evaluation",
+            status="planned",
+            evaluation_gate_policy=policy,
+            objective_hash=usable_bundle.default_evaluator_bundle.objective.objective_hash,
+            evaluation_id=usable_bundle.development_definition.definition_id,
+            dataset_id=usable_bundle.development_dataset.dataset_id,
+            evaluator_ids=deployment_evaluator_ids(
+                bundle=usable_bundle,
+                hard_guardrails=profile.hard_guardrails,
+            ),
+            unverified_deployment=False,
+        )
+
+    if policy == "allow_repository_checks":
+        checks = profile.verification.repository_checks
+        if not checks:
+            raise BootstrapConfigError(
+                "deployment plans require trusted repository checks when no usable Foundry evaluation bundle is available"
+            )
+        return DeploymentVerification(
+            mode="repository_checks",
+            status="planned",
+            evaluation_gate_policy=policy,
+            check_results=tuple(
+                DeploymentVerificationCheckResult(
+                    kind=check.kind,
+                    value=check.value,
+                    status="planned",
+                )
+                for check in checks
+            ),
+            unverified_deployment=False,
+        )
+
+    return DeploymentVerification(
+        mode="none",
+        status="unverified",
+        evaluation_gate_policy=policy,
+        unverified_deployment=True,
+        warning=deployment_unverified_warning(),
+    )
+
+
 __all__ = [
     "DefaultVerificationResolver",
     "FoundryEvaluationPlan",
+    "DeploymentGuardrail",
+    "DeploymentVerification",
+    "DeploymentVerificationCheckResult",
+    "DeploymentVerificationMode",
+    "DeploymentVerificationStatus",
+    "DeploymentVerificationWarning",
     "FoundryEvaluationSelection",
     "RepositoryChecksSelection",
     "VerificationProvenance",
@@ -315,5 +555,8 @@ __all__ = [
     "VerificationResolver",
     "verification_mode_allowed",
     "verification_mode_blocker",
+    "deployment_evaluator_ids",
+    "deployment_unverified_warning",
     "resolve_verification",
+    "resolve_deployment_verification",
 ]

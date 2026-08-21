@@ -9,6 +9,10 @@ from pathlib import Path, PurePosixPath
 from foundry_opt.bootstrap.contracts import BootstrapSidecar, RootRegistry
 from foundry_opt.bootstrap.errors import BootstrapConfigError
 from foundry_opt.poc.config import IssueEvaluatorEntry, validate_repository_relative_path
+from foundry_opt.poc.verification import (
+    DeploymentVerification,
+    resolve_deployment_verification,
+)
 from foundry_opt.verification import VerificationCheckSpec, VerificationDatasetInput
 
 
@@ -38,8 +42,9 @@ class DeploymentPlan:
     package_root: str
     registry_hash: str
     sidecar_hash: str
-    objective_hash: str
+    objective_hash: str | None
     default_evaluator_ids: tuple[str, ...]
+    verification: DeploymentVerification
     receipt_inputs: Mapping[str, str]
 
 
@@ -210,13 +215,18 @@ def build_registered_deployment_plan(
     exact_source: str,
     use_repository_default_evaluators: bool,
 ) -> DeploymentPlan:
-    if not use_repository_default_evaluators:
+    if (
+        selection.sidecar.verification.evaluation_gate_policy
+        == "require_foundry_evaluation"
+        and not use_repository_default_evaluators
+    ):
         raise BootstrapConfigError("deployment plans must use the repository default evaluator bundle")
-    active = selection.sidecar.default_evaluator_bundle
-    if active is None:
-        raise BootstrapConfigError(
-            "deployment plans require an activated repository default evaluator bundle"
-        )
+    verification = resolve_deployment_verification(profile=selection.sidecar)
+    active = (
+        selection.sidecar.default_evaluator_bundle
+        if verification.mode == "foundry_evaluation"
+        else None
+    )
     receipt_inputs = {
         "repo_agent_id": selection.repo_agent_id,
         "changed_root": changed_root,
@@ -231,8 +241,18 @@ def build_registered_deployment_plan(
         package_root=selection.sidecar.package_root,
         registry_hash=selection.registry_hash,
         sidecar_hash=selection.sidecar_hash,
-        objective_hash=active.objective.objective_hash,
-        default_evaluator_ids=tuple(item.reference.evaluator_id for item in active.objective.evaluators),
+        objective_hash=(
+            None if active is None else active.objective.objective_hash
+        ),
+        default_evaluator_ids=(
+            ()
+            if active is None
+            else tuple(
+                item.reference.evaluator_id
+                for item in active.objective.evaluators
+            )
+        ),
+        verification=verification,
         receipt_inputs=receipt_inputs,
     )
 

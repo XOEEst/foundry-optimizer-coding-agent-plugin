@@ -29,6 +29,7 @@ from foundry_opt.poc.deploy import (
     publish_registered_deployment,
 )
 from foundry_opt.poc.runtime import RuntimeIntegrationError
+from foundry_opt.verification import VerificationCheckSpec
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -104,8 +105,31 @@ def _evaluated_sidecar() -> BootstrapSidecar:
         update={
             "verification": VerificationSettings(
                 mode="required",
+                evaluation_gate_policy="require_foundry_evaluation",
                 bundle=bundle,
                 lineage=lineage,
+            )
+        }
+    )
+
+
+def _repository_checks_sidecar() -> BootstrapSidecar:
+    profile = BootstrapSidecar.from_document(
+        (TEMPLATE_ROOT / "agent" / ".foundry" / "foundry-opt.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    return profile.model_copy(
+        update={
+            "verification": VerificationSettings(
+                mode="optional",
+                repository_checks=(
+                    VerificationCheckSpec(
+                        kind="command",
+                        value="python -c \"print('deployment-check')\"",
+                    ),
+                ),
+                evaluation_gate_policy="allow_repository_checks",
             )
         }
     )
@@ -126,6 +150,7 @@ def _registered_repository(
     tmp_path: Path,
     *,
     immutable_subject: bool = False,
+    sidecar: BootstrapSidecar | None = None,
 ) -> tuple[Path, str, dict[str, str]]:
     repository = tmp_path / "repo"
     (repository / ".foundry-opt").mkdir(parents=True)
@@ -158,9 +183,10 @@ def _registered_repository(
         yaml.safe_dump(registry, sort_keys=False),
         encoding="utf-8",
     )
+    selected_sidecar = _evaluated_sidecar() if sidecar is None else sidecar
     (repository / "agent" / ".foundry" / "foundry-opt.yaml").write_text(
         yaml.safe_dump(
-            _evaluated_sidecar().model_dump(mode="json"),
+            selected_sidecar.model_dump(mode="json"),
             sort_keys=False,
         ),
         encoding="utf-8",
@@ -259,11 +285,59 @@ def test_registered_settings_project_the_sidecar_contract(tmp_path: Path) -> Non
     assert settings.metadata.repository_identity == "example-org/example-repo"
     assert settings.metadata.repository_id == 123456789
     assert settings.metadata.oidc.tenant_id == TENANT_ID
+    assert settings.verification.mode == "foundry_evaluation"
     assert settings.oidc_config.expected_subject == (
         "repo:example-org/example-repo:environment:foundry-production"
     )
     assert "violence" in settings.metadata.development_evaluation.custom_evaluator_ids
     assert settings.selection.sidecar.default_evaluator_bundle.objective.objective_hash
+
+
+def test_registered_settings_support_repository_checks_without_bundle(
+    tmp_path: Path,
+) -> None:
+    repository, commit, environment = _registered_repository(
+        tmp_path,
+        sidecar=_repository_checks_sidecar(),
+    )
+
+    settings = load_registered_deployment_settings(
+        repository,
+        repo_agent_id="example-agent",
+        exact_source=commit,
+        environment=environment,
+    )
+
+    assert settings.verification.mode == "repository_checks"
+    assert settings.verification.evaluator_ids == ()
+    assert settings.verification.check_results[0].status == "planned"
+    assert settings.metadata.development_evaluation.custom_evaluator_ids == ()
+
+
+def test_registered_settings_allow_unverified_publication_without_bundle(
+    tmp_path: Path,
+) -> None:
+    repository, commit, environment = _registered_repository(
+        tmp_path,
+        sidecar=BootstrapSidecar.from_document(
+            (TEMPLATE_ROOT / "agent" / ".foundry" / "foundry-opt.yaml").read_text(
+                encoding="utf-8"
+            )
+        ),
+    )
+
+    settings = load_registered_deployment_settings(
+        repository,
+        repo_agent_id="example-agent",
+        exact_source=commit,
+        environment=environment,
+    )
+
+    assert settings.verification.mode == "none"
+    assert settings.verification.unverified_deployment is True
+    assert settings.verification.warning is not None
+    assert settings.verification.warning.code == "deployment-unverified"
+    assert settings.metadata.development_evaluation.custom_evaluator_ids == ()
 
 
 def test_registered_settings_reject_client_id_drift(tmp_path: Path) -> None:
@@ -367,11 +441,29 @@ def test_registered_publish_packages_exact_source_and_closes_clients(
             repository: str,
             release_commit: str,
             packaged: object,
+            repository_root: object,
+            verification: object,
         ) -> DeploymentReceipt:
             assert repository == "example-org/example-repo"
             assert release_commit == commit
             assert getattr(packaged, "commit") == commit
             assert getattr(packaged, "source_root") == "agent"
+            assert repository_root == settings.repository_root
+            assert getattr(verification, "mode") == "foundry_evaluation"
+            completed_verification = settings.verification.model_copy(
+                update={
+                    "status": "passed",
+                    "evaluation_link": "https://example.invalid/evaluations/deploy",
+                    "guardrails": (
+                        DeploymentGuardrail(
+                            name="violence",
+                            score=1.0,
+                            required_pass_rate=1.0,
+                            passed=True,
+                        ),
+                    ),
+                }
+            )
             return DeploymentReceipt(
                 repository=repository,
                 release_commit=release_commit,
@@ -385,14 +477,8 @@ def test_registered_publish_packages_exact_source_and_closes_clients(
                 source_tree_sha256=getattr(packaged, "tree_sha256"),
                 source_zip_sha256=getattr(packaged, "zip_sha256"),
                 evaluation_link="https://example.invalid/evaluations/deploy",
-                guardrails=(
-                    DeploymentGuardrail(
-                        name="violence",
-                        score=1.0,
-                        required_pass_rate=1.0,
-                        passed=True,
-                    ),
-                ),
+                guardrails=completed_verification.guardrails,
+                verification=completed_verification,
             )
 
     receipt = publish_registered_deployment(

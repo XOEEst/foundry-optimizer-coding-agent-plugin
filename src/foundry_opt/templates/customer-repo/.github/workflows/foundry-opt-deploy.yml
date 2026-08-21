@@ -171,6 +171,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$GITHUB_REF" = "refs/heads/main"
+          plan="$RUNNER_TEMP/foundry-opt-deployment-plan-${{ matrix.repo_agent_id }}.json"
           foundry-opt deploy plan \
             --repository . \
             --changed-root "${{ matrix.changed_root }}" \
@@ -178,7 +179,25 @@ jobs:
             --sidecar "${{ matrix.config_path }}" \
             --exact-source "$GITHUB_SHA" \
             --check-eligibility \
-            --use-repository-default-evaluators
+            --use-repository-default-evaluators >"$plan"
+          cat "$plan"
+          echo "FOUNDRY_OPT_DEPLOY_PLAN_PATH=$plan" >>"$GITHUB_ENV"
+          PLAN_PATH="$plan" python - <<'PY'
+          import json, os
+          with open(os.environ["PLAN_PATH"], encoding="utf-8") as handle:
+              plan = json.load(handle)
+          verification = plan["verification"]
+          warning = verification.get("warning")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
+              handle.write(f"FOUNDRY_OPT_DEPLOY_VERIFICATION_MODE={verification['mode']}\n")
+              handle.write(
+                  "FOUNDRY_OPT_DEPLOY_UNVERIFIED="
+                  + ("true" if verification.get("unverified_deployment") else "false")
+                  + "\n"
+              )
+          if warning is not None:
+              print(f"::warning title={warning['code']}::{warning['message']}")
+          PY
 
       - name: Evaluate and publish the exact registered agent
         shell: bash
@@ -190,9 +209,32 @@ jobs:
             --repo-agent-id "${{ matrix.repo_agent_id }}" \
             --exact-source "$GITHUB_SHA" \
             --receipt "$receipt"
-          {
-            echo "### Foundry deployment: ${{ matrix.repo_agent_id }}"
-            echo '```json'
-            cat "$receipt"
-            echo '```'
-          } >>"$GITHUB_STEP_SUMMARY"
+          PLAN_PATH="$FOUNDRY_OPT_DEPLOY_PLAN_PATH" RECEIPT_PATH="$receipt" python - <<'PY'
+          import json, os
+          with open(os.environ["PLAN_PATH"], encoding="utf-8") as handle:
+              plan = json.load(handle)
+          with open(os.environ["RECEIPT_PATH"], encoding="utf-8") as handle:
+              receipt = json.load(handle)
+          verification = receipt.get("verification", {})
+          warning = verification.get("warning")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as handle:
+              handle.write(f"### Foundry deployment: {plan['repo_agent_id']}\n\n")
+              handle.write(f"- Changed root: `{plan['changed_root']}`\n")
+              handle.write(
+                  f"- Verification mode: `{verification.get('mode', plan['verification']['mode'])}`\n"
+              )
+              handle.write(
+                  f"- Verification status: `{verification.get('status', plan['verification']['status'])}`\n"
+              )
+              if warning is not None:
+                  handle.write("\n## WARNING: Unverified deployment permitted\n\n")
+                  handle.write(f"{warning['message']}\n\n")
+              handle.write("#### Deployment verification\n")
+              handle.write("```json\n")
+              handle.write(json.dumps(verification, indent=2, sort_keys=True))
+              handle.write("\n```\n")
+              handle.write("#### Deployment receipt\n")
+              handle.write("```json\n")
+              handle.write(json.dumps(receipt, indent=2, sort_keys=True))
+              handle.write("\n```\n")
+          PY

@@ -114,6 +114,10 @@ def test_deploy_workflow_computes_dynamic_noop_matrix() -> None:
     assert "MANUAL_REPO_AGENT_ID" in text
     assert "${{ github.event.inputs.repo_agent_id" not in text
     assert "foundry-opt deploy publish-registered" in text
+    assert "FOUNDRY_OPT_DEPLOY_PLAN_PATH" in text
+    assert "Deployment verification" in text
+    assert "WARNING: Unverified deployment permitted" in text
+    assert "verification.get(\"warning\")" in text
     assert "FOUNDRY_OPT_DEPLOYMENT_CLIENT_ID" in text
     assert "AZURE_TENANT_ID" in text
     assert "AZURE_DEPLOYMENT_CLIENT_ID" not in text
