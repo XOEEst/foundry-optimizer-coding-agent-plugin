@@ -1,7 +1,8 @@
 # Templates
 
-This directory will hold plugin-owned owner artifacts after the bootstrap
-distribution move lands.
+This directory is reserved for small owner-facing prompt and summary fragments
+that ship with the skill.
 
-Do not mirror the existing `src/foundry_opt/templates/` runtime content here
-until the follow-up migration task is complete.
+Provider plans, receipts, schemas, customer source, and mutable operation state
+do not belong here. The shared runtime remains authoritative for all planning
+and mutation behavior.

@@ -1,7 +1,7 @@
 # Bootstrap
 
-This is the shortest owner path from an unprepared repository to a
-usable Foundry Optimizer setup.
+This is the one-click owner path from an agent repository to registered,
+OIDC-connected, and optionally deployed Foundry agents.
 
 The default path uses standard Copilot with the managed repository
 instructions and installed skill. Bootstrap does not add or select a custom
@@ -9,52 +9,89 @@ agent. Normal owners should use the `/foundry-bootstrap` flow; the
 `foundry-opt bootstrap ...` commands below remain as an advanced
 compatibility interface for automation and reviewed source checkouts.
 
-## Decide these things first
+## Start
 
-- Which repository folders are real agents?
-- Which agent should be enabled first if you do not want every
-  discovered candidate managed at once?
-- Which GitHub environments will hold optimizer access and deployment
-  access?
-- Will you adopt an existing Azure identity, or let bootstrap create the
-  reviewed one?
-- Do you want optional default verification now, or later?
+Install the released skill folder or add a local checkout:
 
-## Quick path
+```text
+copilot skill add <path-or-release>/foundry-bootstrap
+```
 
-1. **Choose agents**
-   - Run the discovery review and confirm the selected stable IDs.
-   - Stop if the roots or package boundaries look wrong.
-2. **Apply repository setup**
-   - Register the selected agents.
-   - Add the managed owner files, including the registry, sidecar, issue
-     form, and workflow scaffolding.
-3. **Approve the combined GitHub-to-Azure connection**
-   - Plan once.
-   - Approve once.
-   - Apply once.
-4. **Optionally activate verification**
-   - Reuse or create the repository's default Foundry datasets,
-     evaluators, definitions, and activation runs.
-5. **Check status**
-   - Confirm whether the selected agent is only enabled, fully verified,
-     or already deployable.
+Then open the repository in your coding agent and say:
 
-## Why the connection approval is combined
+```text
+Use /foundry-bootstrap to bootstrap this repository.
+```
 
-Owners approve one connection plan because the GitHub and Azure pieces
-are one trust boundary:
+The skill resumes an interrupted operation automatically when durable state is
+present.
 
-- GitHub environments and Actions request OIDC tokens.
-- Azure identity and RBAC decide what those tokens can do.
+## Guided steps
 
-You should review them together, not as unrelated steps. Internal child
-receipts may still record environment creation, OIDC subject updates,
-variables, or role assignments, but those receipts stay implementation
-detail. Owners do **not** need to approve each child change separately
-or hand-author approval JSON.
+1. **Discovery**
+   - See each candidate's folder, source root, package root, readiness, and
+     current Foundry binding state.
+   - Choose `ignore`, `register disabled`, or `register enabled`.
+2. **Foundry targets**
+   - For each enabled agent, confirm the Foundry project endpoint and agent
+     name.
+   - Bootstrap reuses trusted profile, metadata, `azure.yaml`, azd, or binding
+     evidence values and asks only for missing information.
+3. **Repository approval**
+   - Review registry entries, profiles, instructions, issue forms, workflows,
+     added files, updated files, preserved files, and conflicts.
+   - One approval applies only that reviewed repository plan.
+4. **Connection approval**
+   - Review GitHub environments and variables together with the Azure identity,
+     OIDC subjects, and Foundry User role assignments.
+   - One approval applies the complete GitHub-to-Azure connection.
+5. **Verification choice**
+   - Configure Foundry datasets and evaluators now.
+   - Defer them to a GitHub issue.
+   - Use repository checks.
+   - Start with no evidence and an explicit warning.
+6. **Commit approval**
+   - Review the exact changed paths and commit message.
+   - Bootstrap creates a dedicated local branch and commit. It does not push or
+     merge.
+7. **Deployment approval**
+   - Review the exact commit, Foundry targets, verification mode, warnings, and
+     version action.
+   - A separate approval deploys with the current local Azure login.
+8. **Resource links**
+   - Open the returned GitHub, Azure identity/RBAC, Foundry project/agent, and
+     optional dataset/evaluator links.
 
-## Advanced compatibility command path
+Owners never need to open internal plan JSON, construct hashes, or author
+approval files.
+
+## Why connection approval is combined
+
+GitHub requests OIDC tokens; Azure identity and RBAC determine what those
+tokens can do. They are one trust decision, so the owner reviews them once.
+Separate child receipts remain available for rollback and diagnostics.
+
+## Deployment behavior
+
+- Deployment always packages the exact approved local commit.
+- A new Foundry agent name receives its first regular immutable version.
+- An existing aligned agent reconciles identical code or publishes a new
+  version.
+- An existing diverged agent is deployable only with a visible warning.
+- No explicit version route is set or changed.
+- Operation-owned evaluation drafts are cleaned before publication completes.
+- After merge, the main workflow compares source, package, profile, registry,
+  and target fingerprints. Matching content records a reconciled no-op even if
+  merge changed the commit SHA.
+
+## Evaluation can wait
+
+Datasets and evaluators are not prerequisites for registration, enablement, or
+bootstrap deployment. Start without them when speed matters. Add a GitHub issue
+later that names the desired dataset and evaluators, then enable the provided
+PR or main-branch gate template.
+
+## Advanced compatibility interface
 
 - `foundry-opt bootstrap review discovery`
 - `foundry-opt bootstrap review plan`
@@ -62,7 +99,7 @@ or hand-author approval JSON.
 - `foundry-opt bootstrap connect approve` or `foundry-opt bootstrap connect apply --approve`
 - `foundry-opt bootstrap review status`
 
-Add the evaluation commands only when you want repository-default
+Use evaluation commands only when you intentionally want repository-default
 verification:
 
 - `foundry-opt bootstrap evaluation plan`
@@ -87,18 +124,17 @@ docs and release notes instead of adding runtime deprecation warnings.
 > `foundry-production`, adopt Entra application `foundry-owner-review`,
 > and grant reviewed Foundry User access on the target project.
 
-**Status**
+**Deployment review**
 
-> Connection is complete and rollback-ready. Repository defaults for
-> verification are not activated yet, so deployment remains policy-driven
-> rather than evidence-backed.
+> Deploy `chat-agent` from commit `abc123...` to the reviewed Foundry project.
+> No dataset or evaluator is configured, so the deployment will be marked
+> unverified. No route mutation is planned.
 
 **Resources**
 
-> GitHub now contains the managed environments and Actions. Azure now
-> contains the reviewed identity and RBAC. Foundry still points to the
-> existing project and agent until evaluation onboarding creates default
-> datasets, evaluators, and runs.
+> GitHub contains the managed environments and Actions. Azure contains the
+> reviewed identity and RBAC. Foundry contains the published agent version.
+> Dataset and evaluator links are omitted because verification was deferred.
 
 ## Related detail
 
@@ -107,3 +143,5 @@ docs and release notes instead of adding runtime deprecation warnings.
 - [Evaluation onboarding](../evaluation-onboarding.md)
 - [Identity and RBAC](../identity-rbac.md)
 - [Managed files](../managed-files.md)
+- [Skill owner flow](../../plugins/foundry-bootstrap/references/owner-flow.md)
+- [Recovery](../../plugins/foundry-bootstrap/references/recovery.md)

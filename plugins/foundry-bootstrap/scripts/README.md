@@ -8,6 +8,10 @@ and runtime install/verification launchers:
   runner calls, prints owner markdown separately from the machine envelope, and
   uses the reviewed runtime contract when it must self-install the runtime.
 
+These subcommands are transport between the skill and runner. Owner
+documentation should say "Use `/foundry-bootstrap`", not teach this command
+surface.
+
 - `install-runtime.ps1`
 - `install-runtime.sh`
 

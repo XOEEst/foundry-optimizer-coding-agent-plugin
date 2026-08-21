@@ -8,6 +8,25 @@ description: Guide a first-time owner through the downloadable bootstrap start/r
 Use this skill for the first-time owner bootstrap loop. This downloadable skill
 is the only owner client over `BootstrapRunner`.
 
+## Owner experience
+
+Keep every owner turn short and concrete:
+
+- what agents were discovered and where
+- which agents will be ignored, registered disabled, or registered enabled
+- the Foundry project endpoint and agent name for each enabled agent
+- the GitHub environments and Azure identity/OIDC/RBAC connection
+- optional dataset, evaluator, or repository-check verification
+- the exact local commit and deployment action
+- links to all relevant resources
+
+Evaluation is optional. Do not block registration or enablement because a
+dataset or evaluator is absent. A no-evidence deployment must retain the
+runner's explicit warning.
+
+Never ask the owner to inspect raw JSON, construct hashes, write approval
+files, or learn the low-level bootstrap CLI.
+
 ## Required owner loop
 
 1. Keep the materialized `skill.lock.json` beside this skill so
@@ -44,3 +63,11 @@ is the only owner client over `BootstrapRunner`.
 11. Do not create or switch to a custom agent. Do not use another owner
     client. Do not implement Foundry target resolution, planning, commit
     creation, or deployment logic in this skill.
+12. At final handoff, present the returned resource links grouped as GitHub,
+    Azure, Foundry agents, and optional evaluation resources.
+
+## References
+
+- [Owner flow](references/owner-flow.md)
+- [Recovery](references/recovery.md)
+- [Security](references/security.md)
