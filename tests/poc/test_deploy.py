@@ -31,6 +31,7 @@ from foundry_opt.poc.foundry import (
     Metric,
     RegularVersionReference,
     RouteFingerprint,
+    ServiceError,
 )
 from foundry_opt.poc.source import PackagedSource
 from foundry_opt.poc.runtime import BOOTSTRAP_RECEIPT_ENV, build_oidc_config
@@ -398,6 +399,48 @@ class _Foundry:
         return _route(reference.version)
 
 
+class _MissingFoundry(_Foundry):
+    def require_service_managed_latest(
+        self,
+        agent_name: str,
+        *,
+        deadline_monotonic: float,
+    ) -> RouteFingerprint:
+        del agent_name, deadline_monotonic
+        self.calls.append("route-missing")
+        raise ServiceError("agent was not found", status_code=404)
+
+    def create_regular_version(
+        self,
+        agent_name: str,
+        definition: object,
+        archive_bytes: bytes,
+        *,
+        operation_id: str,
+        provenance: dict[str, str],
+        description: str,
+        deadline_monotonic: float,
+    ) -> RegularVersionReference:
+        del definition, description, deadline_monotonic
+        assert agent_name == "example-agent"
+        assert archive_bytes == self.package.archive_bytes
+        self.calls.append("publish")
+        code_sha256 = hashlib.sha256(archive_bytes).hexdigest()
+        return RegularVersionReference(
+            agent_name=agent_name,
+            version="1",
+            operation_id=operation_id,
+            code_sha256=code_sha256,
+            metadata={
+                **provenance,
+                "foundry_opt_run_id": operation_id,
+                "foundry_opt_release_operation": operation_id,
+                "foundry_opt_source_zip_sha256": code_sha256,
+            },
+            status="creating",
+        )
+
+
 def test_deployment_validates_draft_before_regular_publication() -> None:
     policy, metadata = _configuration()
     foundry = _Foundry()
@@ -422,6 +465,30 @@ def test_deployment_validates_draft_before_regular_publication() -> None:
     assert receipt.verification.status == "passed"
     assert receipt.guardrails[0].passed is True
     assert foundry.calls.index("cleanup") < foundry.calls.index("publish")
+
+
+def test_deployment_can_publish_the_first_version_for_a_missing_agent() -> None:
+    policy, metadata = _configuration()
+    foundry = _MissingFoundry()
+    service = DeploymentService(
+        client=foundry,
+        policy=policy,
+        metadata=metadata,
+        deadline_seconds=30,
+        allow_missing_target=True,
+    )
+
+    receipt = service.publish(
+        repository="example-org/example-agent",
+        release_commit="a" * 40,
+        packaged=foundry.package,
+        verification=_unverified_deployment_verification(),
+    )
+
+    assert receipt.previous_version is None
+    assert receipt.published_version == "1"
+    assert receipt.route_mutated is False
+    assert foundry.calls[:2] == ["route-missing", "route-missing"]
 
 
 def test_deployment_verify_only_runs_foundry_gate_without_publication() -> None:

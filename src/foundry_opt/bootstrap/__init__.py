@@ -12,12 +12,18 @@ from foundry_opt.bootstrap.local_commit import (
     LocalGitCommitCoordinator,
     build_local_commit_context,
 )
+from foundry_opt.bootstrap.local_deploy import (
+    BootstrapLocalDeploymentHandler,
+    LocalDeploymentCoordinator,
+)
 
 __all__ = [
+    "BootstrapLocalDeploymentHandler",
     "BootstrapLocalCommitHandler",
     "BootstrapQuestion",
     "BootstrapRunner",
     "BootstrapTurn",
     "LocalGitCommitCoordinator",
+    "LocalDeploymentCoordinator",
     "build_local_commit_context",
 ]

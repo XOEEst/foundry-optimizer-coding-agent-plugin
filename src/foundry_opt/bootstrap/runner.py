@@ -609,6 +609,33 @@ class BootstrapCommitHandlerProtocol(Protocol):
     ) -> None: ...
 
 
+class BootstrapDeploymentHandlerProtocol(Protocol):
+    def review(
+        self,
+        *,
+        operation: BootstrapRunnerStateEnvelope,
+    ) -> RenderableReviewProtocol: ...
+
+    def approve(
+        self,
+        *,
+        operation: BootstrapRunnerStateEnvelope,
+        approval: BootstrapApprovalRecord,
+    ) -> BootstrapStageOutcome: ...
+
+    def validate_resume(
+        self,
+        *,
+        operation: BootstrapRunnerStateEnvelope,
+    ) -> None: ...
+
+    def build_resource_links(
+        self,
+        *,
+        operation: BootstrapRunnerStateEnvelope,
+    ) -> ResourceLinksReview: ...
+
+
 class LocalFilesystem(FilesystemProtocol):
     def resolve_directory(self, value: str | Path) -> Path:
         target = Path(value).expanduser().resolve()
@@ -779,6 +806,7 @@ class BootstrapRunner:
         target_resolution_handler: FoundryTargetResolutionHandlerProtocol | None = None,
         approval_handlers: Mapping[BootstrapApprovalStep, BootstrapApprovalHandlerProtocol] | None = None,
         commit_handler: BootstrapCommitHandlerProtocol | None = None,
+        deployment_handler: BootstrapDeploymentHandlerProtocol | None = None,
         rollback_handler: BootstrapRollbackHandlerProtocol | None = None,
     ) -> None:
         self._filesystem = filesystem or LocalFilesystem()
@@ -800,6 +828,12 @@ class BootstrapRunner:
         self._commit_handler = commit_handler
         if self._commit_handler is not None and "commit" not in self._approval_handlers:
             self._approval_handlers["commit"] = self._commit_handler
+        self._deployment_handler = deployment_handler
+        if (
+            self._deployment_handler is not None
+            and "deployment" not in self._approval_handlers
+        ):
+            self._approval_handlers["deployment"] = self._deployment_handler
         self._rollback_handler = rollback_handler
 
     def start(self, repository: str | Path) -> BootstrapTurn:
@@ -1006,6 +1040,11 @@ class BootstrapRunner:
             or "local_commit" in envelope.handler_context
         ):
             self._commit_handler.validate_resume(operation=envelope)
+        if self._deployment_handler is not None and (
+            envelope.lifecycle_stage == "deployment_approval"
+            or any(item.step == "deployment" for item in envelope.child_refs)
+        ):
+            self._deployment_handler.validate_resume(operation=envelope)
         return envelope
 
     def _apply_stage_outcome(
@@ -1050,6 +1089,16 @@ class BootstrapRunner:
             extra_links = self._target_resolution_handler.build_resource_links(operation=envelope)
             if extra_links is not None:
                 resource_links = _merge_resource_links(resource_links, extra_links)
+        if self._deployment_handler is not None and (
+            envelope.lifecycle_stage == "deployment_approval"
+            or any(item.step == "deployment" for item in envelope.child_refs)
+        ):
+            resource_links = _merge_resource_links(
+                resource_links,
+                self._deployment_handler.build_resource_links(
+                    operation=envelope
+                ),
+            )
         return BootstrapTurn(
             owner_markdown=self._render_owner_markdown(envelope),
             next_question=self._build_question(envelope),
@@ -1155,6 +1204,8 @@ class BootstrapRunner:
                 BootstrapAvailableAction(name="status"),
             ]
             for child_ref in envelope.child_refs:
+                if child_ref.step == "deployment":
+                    continue
                 rollback = BootstrapAvailableAction(name="rollback", step=child_ref.step)
                 if rollback not in actions:
                     actions.append(rollback)
@@ -1162,6 +1213,8 @@ class BootstrapRunner:
         if stage == "final_handoff":
             actions = [BootstrapAvailableAction(name="status")]
             for child_ref in envelope.child_refs:
+                if child_ref.step == "deployment":
+                    continue
                 actions.append(BootstrapAvailableAction(name="rollback", step=child_ref.step))
             return tuple(actions)
         return (BootstrapAvailableAction(name="status"),)
@@ -1187,6 +1240,18 @@ class BootstrapRunner:
             or any(item.step == "commit" for item in envelope.child_refs)
         ):
             lines.extend(("", self._commit_handler.review(operation=envelope).render_markdown()))
+        if self._deployment_handler is not None and (
+            envelope.lifecycle_stage == "deployment_approval"
+            or any(item.step == "deployment" for item in envelope.child_refs)
+        ):
+            lines.extend(
+                (
+                    "",
+                    self._deployment_handler.review(
+                        operation=envelope
+                    ).render_markdown(),
+                )
+            )
         if envelope.note:
             lines.extend(("", "## Bridge state", f"- {envelope.note}"))
         if envelope.lifecycle_stage == "agent_selection":
@@ -1404,6 +1469,7 @@ __all__ = [
     "BootstrapAvailableAction",
     "BootstrapFoundryTargetRecord",
     "BootstrapCommitHandlerProtocol",
+    "BootstrapDeploymentHandlerProtocol",
     "BootstrapChildReference",
     "BootstrapLifecycleStage",
     "BootstrapQuestion",

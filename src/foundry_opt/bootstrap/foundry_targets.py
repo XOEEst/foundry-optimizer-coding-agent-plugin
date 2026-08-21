@@ -633,7 +633,7 @@ class DefaultFoundryTargetResolutionHandler:
                     agent_name_source=context.agent_name.source,
                     account_resource_id=account_resource_id,
                     latest_agent_version=latest_version,
-                    deployment_ready=False,
+                    deployment_ready=True,
                     detail=(
                         f"latest immutable version is {latest_version}, "
                         f"but reviewed/local evidence expects {expected_version}"
@@ -710,7 +710,7 @@ class DefaultFoundryTargetResolutionHandler:
             return (
                 "existing_diverged",
                 f"latest immutable version {latest_version} diverges from local {', '.join(mismatches)}",
-                False,
+                True,
             )
         binding = self._binding_evidence_for(context.repo_agent_id, context.root)
         if binding is None:

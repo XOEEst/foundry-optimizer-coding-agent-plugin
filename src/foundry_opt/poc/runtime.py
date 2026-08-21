@@ -11,7 +11,7 @@ import time
 import uuid
 from collections.abc import Callable, Mapping
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal, Self
+from typing import Any, Literal, Protocol, Self
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
@@ -22,6 +22,7 @@ from foundry_opt.poc.candidate import CandidateWorkspace, FinalizedCandidate
 from foundry_opt.poc.checks import LocalRepositoryCheckRunner, RepositoryCheckRunnerProtocol
 from foundry_opt.poc.config import (
     AgentMetadata,
+    HostedRuntimeContract,
     ModelDeploymentContract,
     RepositoryPolicy,
     SharedPin,
@@ -676,7 +677,16 @@ def load_runtime_settings(
     )
 
 
-def build_hosted_definition(metadata: AgentMetadata, model: str) -> HostedDefinition:
+class HostedDefinitionMetadataProtocol(Protocol):
+    project_endpoint: str
+    hosted_runtime: HostedRuntimeContract
+    model_deployments: tuple[ModelDeploymentContract, ...]
+
+
+def build_hosted_definition(
+    metadata: HostedDefinitionMetadataProtocol,
+    model: str,
+) -> HostedDefinition:
     deployment = _resolve_model_deployment(metadata, model)
     runtime = metadata.hosted_runtime
     return HostedDefinition(

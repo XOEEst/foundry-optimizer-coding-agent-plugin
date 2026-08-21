@@ -320,7 +320,13 @@ def _load_production_runner_factory(
         _ensure_runtime_env_from_skill_lock(skill_lock_path)
 
     try:
-        from foundry_opt.bootstrap import BootstrapRunner
+        from foundry_opt.bootstrap import (
+            BootstrapLocalCommitHandler,
+            BootstrapLocalDeploymentHandler,
+            BootstrapRunner,
+            LocalDeploymentCoordinator,
+            LocalGitCommitCoordinator,
+        )
         from foundry_opt.bootstrap.runner import FileBootstrapRunnerStateStore
     except (ImportError, ModuleNotFoundError) as exc:
         if os.environ.get(_RUNTIME_READY_ENV) == "1":
@@ -348,10 +354,22 @@ def _load_production_runner_factory(
         raise _ReexecRequested(completed.returncode)
 
     def _factory(private_root: Path) -> _RunnerProtocol:
+        commit_coordinator = LocalGitCommitCoordinator(
+            state_root=private_root / "local-commit",
+        )
         return BootstrapRunner(
             state_store=FileBootstrapRunnerStateStore(
                 state_root=_runner_state_root(private_root),
-            )
+            ),
+            commit_handler=BootstrapLocalCommitHandler(
+                coordinator=commit_coordinator,
+            ),
+            deployment_handler=BootstrapLocalDeploymentHandler(
+                coordinator=LocalDeploymentCoordinator(
+                    commit_coordinator=commit_coordinator,
+                    state_root=private_root / "local-deployment",
+                )
+            ),
         )
 
     return _factory

@@ -9,7 +9,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, TypeVar
+from typing import Literal, Protocol, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
@@ -31,6 +31,9 @@ from foundry_opt.poc.bootstrap import (
 )
 from foundry_opt.poc.config import (
     AgentMetadata,
+    EvaluationContract as ConfigEvaluationContract,
+    HostedRuntimeContract,
+    ModelDeploymentContract,
     RepositoryPolicy,
     SharedPin,
     load_agent_metadata,
@@ -200,6 +203,24 @@ class DeploymentVerificationReceipt(_FrozenModel):
     config_path: str | None = Field(default=None, min_length=1, max_length=512)
 
 
+class DeploymentAgentMetadata(_FrozenModel):
+    project_endpoint: str
+    agent_name: str
+    hosted_runtime: HostedRuntimeContract
+    model_deployments: tuple[ModelDeploymentContract, ...]
+    development_evaluation: ConfigEvaluationContract
+    validating_evaluation: ConfigEvaluationContract
+
+
+class DeploymentAgentMetadataProtocol(Protocol):
+    project_endpoint: str
+    agent_name: str
+    hosted_runtime: HostedRuntimeContract
+    model_deployments: tuple[ModelDeploymentContract, ...]
+    development_evaluation: ConfigEvaluationContract
+    validating_evaluation: ConfigEvaluationContract
+
+
 class DeploymentSettings(_FrozenModel):
     repository_root: Path
     policy: RepositoryPolicy
@@ -254,10 +275,11 @@ class DeploymentService:
         *,
         client: FoundryPocClient,
         policy: RepositoryPolicy,
-        metadata: AgentMetadata,
+        metadata: DeploymentAgentMetadataProtocol,
         deadline_seconds: float,
         monotonic: Callable[[], float] = time.monotonic,
         freshness_check: Callable[[str], None] | None = None,
+        allow_missing_target: bool = False,
     ) -> None:
         self._client = client
         self._policy = policy
@@ -268,6 +290,7 @@ class DeploymentService:
         )
         self._monotonic = monotonic
         self._freshness_check = freshness_check
+        self._allow_missing_target = allow_missing_target
 
     def preflight(
         self,
@@ -277,10 +300,7 @@ class DeploymentService:
         deployment_environment: str,
         deployment_client_id: str,
     ) -> DeploymentPreflight:
-        route = self._client.require_service_managed_latest(
-            self._metadata.agent_name,
-            deadline_monotonic=self._deadline(),
-        )
+        route = self._route_before()
         return DeploymentPreflight(
             repository=repository,
             release_commit=release_commit,
@@ -427,10 +447,7 @@ class DeploymentService:
             raise DeploymentError(
                 "packaged source root does not match repository policy"
             )
-        route_before = self._client.require_service_managed_latest(
-            self._metadata.agent_name,
-            deadline_monotonic=self._deadline(),
-        )
+        route_before = self._route_before()
         operation_id = deployment_operation_id(
             repository=repository,
             agent_name=self._metadata.agent_name,
@@ -456,10 +473,7 @@ class DeploymentService:
                 verification=requested_verification,
             )
         )
-        route_after_verification = self._client.require_service_managed_latest(
-            self._metadata.agent_name,
-            deadline_monotonic=self._deadline(),
-        )
+        route_after_verification = self._route_before()
         if route_after_verification.latest_version != route_before.latest_version:
             raise DeploymentError(route_change_detail)
         return _VerifiedDeployment(
@@ -468,6 +482,33 @@ class DeploymentService:
             operation_id=operation_id,
             verification=completed_verification,
         )
+
+    def _route_before(self) -> RouteFingerprint:
+        try:
+            return self._client.require_service_managed_latest(
+                self._metadata.agent_name,
+                deadline_monotonic=self._deadline(),
+            )
+        except ServiceError as error:
+            if not self._allow_missing_target or error.status_code != 404:
+                raise
+            payload = {
+                "agent_name": self._metadata.agent_name,
+                "state": "missing",
+            }
+            return RouteFingerprint(
+                agent_name=self._metadata.agent_name,
+                latest_version=None,
+                selector=None,
+                endpoint_configuration=None,
+                sha256=hashlib.sha256(
+                    json.dumps(
+                        payload,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
+            )
 
     def _default_foundry_verification(self) -> DeploymentVerification:
         contract = self._metadata.development_evaluation
@@ -1149,7 +1190,7 @@ def _load_registered_settings(
         expected_subject=expected_subject,
         expected_repository_id=str(repository_id),
     )
-    policy = _registered_repository_policy(selection)
+    policy = build_repository_policy_from_registry_selection(selection)
     metadata = _registered_agent_metadata(
         selection,
         repository_identity=repository_identity,
@@ -1677,7 +1718,7 @@ def _optional_text(value: object) -> str | None:
     return text or None
 
 
-def _registered_repository_policy(
+def build_repository_policy_from_registry_selection(
     selection: RegistrySelection,
 ) -> RepositoryPolicy:
     sidecar = selection.sidecar
@@ -1718,6 +1759,85 @@ def _registered_repository_policy(
     )
 
 
+def build_deployment_agent_metadata(
+    selection: RegistrySelection,
+    *,
+    verification: DeploymentVerification,
+) -> DeploymentAgentMetadata:
+    sidecar = selection.sidecar
+    if verification.mode == "foundry_evaluation":
+        development_definition = sidecar.development_definition
+        validating_definition = sidecar.validating_definition
+        development_dataset = sidecar.development_dataset
+        validating_dataset = sidecar.validating_dataset
+        if (
+            development_definition is None
+            or validating_definition is None
+            or development_dataset is None
+            or validating_dataset is None
+        ):
+            raise RuntimeIntegrationError(
+                "deployment metadata requires an activated repository default evaluator bundle"
+            )
+        evaluator_ids = verification.evaluator_ids
+        development_evaluation_id = development_definition.definition_id
+        development_dataset_id = development_dataset.dataset_id
+        validating_evaluation_id = validating_definition.definition_id
+        validating_dataset_id = validating_dataset.dataset_id
+    else:
+        evaluator_ids = ()
+        development_evaluation_id = _UNUSED_DEPLOYMENT_VERIFICATION_TOKEN
+        development_dataset_id = _UNUSED_DEPLOYMENT_VERIFICATION_TOKEN
+        validating_evaluation_id = _UNUSED_DEPLOYMENT_VERIFICATION_TOKEN
+        validating_dataset_id = _UNUSED_DEPLOYMENT_VERIFICATION_TOKEN
+    return DeploymentAgentMetadata.model_validate(
+        {
+            "project_endpoint": sidecar.foundry_project.project_endpoint,
+            "agent_name": sidecar.foundry_project.agent_name,
+            "hosted_runtime": {
+                "kind": "hosted",
+                "runtime": sidecar.runtime.runtime,
+                "entry_point": sidecar.runtime.entrypoint,
+                "dependency_resolution": sidecar.runtime.dependency_resolution,
+                "protocol_name": sidecar.runtime.protocol_name,
+                "protocol_version": sidecar.runtime.protocol_version,
+                "cpu": sidecar.runtime.cpu or "1",
+                "memory": sidecar.runtime.memory or "2Gi",
+                "model_environment_variable": (
+                    sidecar.runtime.model_environment_variable
+                    or "AZURE_AI_MODEL_DEPLOYMENT_NAME"
+                ),
+            },
+            "model_deployments": (
+                {
+                    "alias": sidecar.baseline_model,
+                    "deployment_name": sidecar.baseline_model,
+                    "model_format": "OpenAI",
+                    "model_name": sidecar.baseline_model,
+                    "model_version": "pinned",
+                    "required_capabilities": (
+                        {"name": "responses", "enabled": True},
+                    ),
+                },
+            ),
+            "development_evaluation": {
+                "name": "development",
+                "split": "development",
+                "resolved_evaluation_id": development_evaluation_id,
+                "dataset_id": development_dataset_id,
+                "custom_evaluator_ids": evaluator_ids,
+            },
+            "validating_evaluation": {
+                "name": "validating",
+                "split": "validating",
+                "resolved_evaluation_id": validating_evaluation_id,
+                "dataset_id": validating_dataset_id,
+                "custom_evaluator_ids": evaluator_ids,
+            },
+        }
+    )
+
+
 def _registered_agent_metadata(
     selection: RegistrySelection,
     *,
@@ -1732,31 +1852,10 @@ def _registered_agent_metadata(
     verification: DeploymentVerification,
 ) -> AgentMetadata:
     sidecar = selection.sidecar
-    if verification.mode == "foundry_evaluation":
-        development_definition = sidecar.development_definition
-        validating_definition = sidecar.validating_definition
-        development_dataset = sidecar.development_dataset
-        validating_dataset = sidecar.validating_dataset
-        if (
-            development_definition is None
-            or validating_definition is None
-            or development_dataset is None
-            or validating_dataset is None
-        ):
-            raise RuntimeIntegrationError(
-                "registered agent metadata requires an activated repository default evaluator bundle"
-            )
-        evaluator_ids = verification.evaluator_ids
-        development_evaluation_id = development_definition.definition_id
-        development_dataset_id = development_dataset.dataset_id
-        validating_evaluation_id = validating_definition.definition_id
-        validating_dataset_id = validating_dataset.dataset_id
-    else:
-        evaluator_ids = ()
-        development_evaluation_id = _UNUSED_DEPLOYMENT_VERIFICATION_TOKEN
-        development_dataset_id = _UNUSED_DEPLOYMENT_VERIFICATION_TOKEN
-        validating_evaluation_id = _UNUSED_DEPLOYMENT_VERIFICATION_TOKEN
-        validating_dataset_id = _UNUSED_DEPLOYMENT_VERIFICATION_TOKEN
+    deployment_metadata = build_deployment_agent_metadata(
+        selection,
+        verification=verification,
+    )
     deployment_environment = sidecar.deployment.environment
     subject = f"{oidc_subject_prefix}:environment:{deployment_environment}"
     return AgentMetadata.model_validate(
@@ -1772,20 +1871,9 @@ def _registered_agent_metadata(
             "agent_name": sidecar.foundry_project.agent_name,
             "authentication_method": "oidc",
             "static_credentials_allowed": False,
-            "hosted_runtime": {
-                "kind": "hosted",
-                "runtime": sidecar.runtime.runtime,
-                "entry_point": sidecar.runtime.entrypoint,
-                "dependency_resolution": sidecar.runtime.dependency_resolution,
-                "protocol_name": sidecar.runtime.protocol_name,
-                "protocol_version": sidecar.runtime.protocol_version,
-                "cpu": sidecar.runtime.cpu or "1",
-                "memory": sidecar.runtime.memory or "2Gi",
-                "model_environment_variable": (
-                    sidecar.runtime.model_environment_variable
-                    or "AZURE_AI_MODEL_DEPLOYMENT_NAME"
-                ),
-            },
+            "hosted_runtime": deployment_metadata.hosted_runtime.model_dump(
+                mode="json"
+            ),
             "oidc": {
                 "issuer": "https://token.actions.githubusercontent.com",
                 "audience": "api://AzureADTokenExchange",
@@ -1817,32 +1905,16 @@ def _registered_agent_metadata(
                     },
                 ),
             },
-            "model_deployments": (
-                {
-                    "alias": sidecar.baseline_model,
-                    "deployment_name": sidecar.baseline_model,
-                    "model_format": "OpenAI",
-                    "model_name": sidecar.baseline_model,
-                    "model_version": "pinned",
-                    "required_capabilities": (
-                        {"name": "responses", "enabled": True},
-                    ),
-                },
+            "model_deployments": [
+                item.model_dump(mode="json")
+                for item in deployment_metadata.model_deployments
+            ],
+            "development_evaluation": deployment_metadata.development_evaluation.model_dump(
+                mode="json"
             ),
-            "development_evaluation": {
-                "name": "development",
-                "split": "development",
-                "resolved_evaluation_id": development_evaluation_id,
-                "dataset_id": development_dataset_id,
-                "custom_evaluator_ids": evaluator_ids,
-            },
-            "validating_evaluation": {
-                "name": "validating",
-                "split": "validating",
-                "resolved_evaluation_id": validating_evaluation_id,
-                "dataset_id": validating_dataset_id,
-                "custom_evaluator_ids": evaluator_ids,
-            },
+            "validating_evaluation": deployment_metadata.validating_evaluation.model_dump(
+                mode="json"
+            ),
         }
     )
 

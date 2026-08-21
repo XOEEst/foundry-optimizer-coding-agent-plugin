@@ -523,4 +523,11 @@ def test_existing_diverged_and_existing_unknown_targets_are_recorded(tmp_path: P
         "existing_diverged",
         "existing_unknown",
     }
-    assert all(item.deployment_ready is False for item in records.values())
+    diverged = next(
+        item for item in records.values() if item.state == "existing_diverged"
+    )
+    unknown = next(
+        item for item in records.values() if item.state == "existing_unknown"
+    )
+    assert diverged.deployment_ready is True
+    assert unknown.deployment_ready is False
