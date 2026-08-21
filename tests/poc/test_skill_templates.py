@@ -6,7 +6,8 @@ from pathlib import Path
 import yaml
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-SKILL_TEMPLATE_ROOT = (
+SKILL_TEMPLATE_ROOT = REPOSITORY_ROOT / "plugins" / "foundry-agent-optimizer"
+LEGACY_SKILL_TEMPLATE_ROOT = (
     REPOSITORY_ROOT
     / "src"
     / "foundry_opt"
@@ -62,6 +63,7 @@ def _expected_tenzing_hashes() -> dict[str, str]:
 
 
 def test_every_template_yaml_document_parses() -> None:
+    assert not LEGACY_SKILL_TEMPLATE_ROOT.exists()
     for path in _yaml_paths():
         assert yaml.safe_load(_read(path)) is not None, path
 

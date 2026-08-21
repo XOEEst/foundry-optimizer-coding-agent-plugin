@@ -105,6 +105,8 @@ def test_setup_uses_venv_python_and_offline_unsets_broker() -> None:
     assert "\"$FOUNDRY_OPT_PACKAGE_ROOT/.venv/bin/python\" - <<'PY'" in text
     assert 'python3 -m pip install' in text
     assert '"uv==0.11.6"' in text
+    assert 'FOUNDRY_OPT_SKILL_SOURCE=$shared_root/plugins/foundry-agent-optimizer' in text
+    assert 'src/foundry_opt/templates/skills/foundry-agent-optimizer' not in text
     assert 'unset FOUNDRY_OPT_GITHUB_BINDING' in text
     assert 'unset FOUNDRY_OPT_BROKER_SOCKET' in text
     assert '--head-ref' in text and '--ref-name' in text
@@ -121,6 +123,11 @@ def test_setup_and_validation_allow_missing_inactive_sidecars() -> None:
 
 def test_deploy_workflow_computes_dynamic_noop_matrix() -> None:
     text = _workflow_text(WORKFLOW_ROOT / "foundry-opt-deploy.yml")
+    assert "repos/${GITHUB_REPOSITORY}" in text
+    assert ".default_branch" in text
+    assert 'refs/heads/$default_branch' in text
+    assert 'commits/$default_branch' in text
+    assert 'test "$GITHUB_SHA" = "$default_tip"' in text
     assert 'shared_source_relations' in text
     assert "example-agent" not in text
     assert "matrix = {'include': include}" in text
@@ -141,9 +148,17 @@ def test_deploy_workflow_computes_dynamic_noop_matrix() -> None:
 def test_issue_form_uses_built_in_parser_contract() -> None:
     document = yaml.safe_load(_read(ISSUE_FORM_PATH))
     intro = document["body"][0]["attributes"]["value"]
+    serialized = _read(ISSUE_FORM_PATH)
     assert "Parser support is built into the runtime now" in intro
     assert "final post-merge repin" in intro
     assert "qualitative-only fallback" in intro
+    assert "Optional primary metric" in serialized
+    assert "task_completion" in serialized
+    assert (
+        "azureml://registries/azureml/evaluators/"
+        "builtin.task_completion/versions/19"
+    ) in serialized
+    assert "Leave blank to reuse repository defaults" in serialized
 
 
 def test_semantic_patch_fixture_targets_legacy_workflow_and_applies_cleanly() -> None:

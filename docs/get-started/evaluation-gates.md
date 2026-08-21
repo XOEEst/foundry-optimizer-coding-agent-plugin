@@ -3,6 +3,10 @@
 Treat pull request evaluation and main-branch deployment as separate owner
 controls.
 
+Evaluation is optional during bootstrap. You may register, enable, commit, and
+deploy an agent without a dataset or evaluator bundle. That path is recorded as
+unverified and emits a visible warning; it is never reported as evaluated.
+
 ## Example workflows stay inactive until copied
 
 The repository now ships parseable examples under `examples/github-actions/`.
@@ -79,10 +83,15 @@ gate succeeds.
    - `optional repository checks fallback`
    - `no-evidence / off path permitted by policy`
    - `WARNING: Unverified deployment permitted`
+7. If bootstrap already deployed the same content locally, the workflow
+   compares source, package, profile, registry, and target fingerprints. A
+   complete match is a reconciled no-op even when the merge commit SHA differs
+   from the local bootstrap commit.
 
 ## Recommended owner stance
 
-- Start with the PR gate as informational.
+- It is acceptable to skip evaluation when first bootstrapping a repository.
+- Start with the PR gate as informational when you are ready to add evidence.
 - Turn on the main deployment gate before routine publication.
 - Keep `none` / `unverified` publication paths rare, deliberate, and visibly
   warned.

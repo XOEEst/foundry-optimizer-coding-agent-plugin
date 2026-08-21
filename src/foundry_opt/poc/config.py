@@ -71,6 +71,9 @@ _BUILTIN_EVALUATOR_PREFIX = "azureai://built-in/evaluators/"
 _VERSIONED_EVALUATOR = re.compile(
     r"^azureai://accounts/[^/]+/projects/[^/]+/evaluators/[^/]+/versions/[^/]+$"
 )
+_REGISTRY_EVALUATOR = re.compile(
+    r"^azureml://registries/[^/]+/evaluators/[^/]+/versions/[^/]+$"
+)
 
 
 class _StrictYamlLoader(yaml.SafeLoader):
@@ -1264,6 +1267,7 @@ class OptimizeIssueRequest(FrozenModel):
     repo_agent_id: str | None = None
     explicit_target: str | None = None
     goal: str
+    primary_metric: str | None = None
     observed_failures: tuple[str, ...]
     constraints: tuple[str, ...] = ()
     candidate_budget: int
@@ -1278,6 +1282,13 @@ class OptimizeIssueRequest(FrozenModel):
     @classmethod
     def validate_goal(cls, value: str) -> str:
         return _free_text(value, "goal", limit=MAX_TEXT_LENGTH)
+
+    @field_validator("primary_metric")
+    @classmethod
+    def validate_primary_metric(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _compact_text(value, "primary_metric", limit=128)
 
     @field_validator("repo_agent_id")
     @classmethod
@@ -1485,6 +1496,10 @@ class OptimizeIssueRequest(FrozenModel):
 
     @model_validator(mode="after")
     def validate_safe_document(self) -> Self:
+        if self.primary_metric is not None and not self.issue_evaluators:
+            raise ValueError(
+                "primary_metric requires at least one issue evaluator"
+            )
         if self.repo_agent_id is None and self.explicit_target is None:
             object.__setattr__(self, "repo_agent_id", "default")
         if (self.repo_agent_id is None) == (self.explicit_target is None):
@@ -1546,8 +1561,11 @@ class IssueEvaluatorEntry(FrozenModel):
         if not (
             normalized.startswith(_BUILTIN_EVALUATOR_PREFIX)
             or _VERSIONED_EVALUATOR.fullmatch(normalized)
+            or _REGISTRY_EVALUATOR.fullmatch(normalized)
         ):
-            raise ValueError("evaluator_id must be an exact built-in or versioned evaluator ID")
+            raise ValueError(
+                "evaluator_id must be an exact built-in, registry, or versioned evaluator ID"
+            )
         return normalized
 
     @field_validator("weight")
@@ -1632,6 +1650,8 @@ def apply_issue_request(
     payload["max_candidates"] = issue.candidate_budget
     payload["allowed_models"] = allowed_models
     payload["editable_paths"] = editable_paths
+    if issue.primary_metric is not None:
+        payload["primary_metric"] = issue.primary_metric
     return _validate_model(
         RepositoryPolicy,
         payload,

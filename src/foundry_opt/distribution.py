@@ -32,6 +32,13 @@ GitCommit = Annotated[
 
 MAX_RECEIPT_BYTES: Final = 16 * 1024
 _COMMIT: Final = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+CANONICAL_OPTIMIZER_SKILL_PATH: Final = "plugins/foundry-agent-optimizer"
+LEGACY_OPTIMIZER_SKILL_PATH: Final = (
+    "src/foundry_opt/templates/skills/foundry-agent-optimizer"
+)
+_SKILL_PATH_ALIASES: Final = {
+    LEGACY_OPTIMIZER_SKILL_PATH: CANONICAL_OPTIMIZER_SKILL_PATH,
+}
 
 
 class BootstrapError(POCConfigurationError):
@@ -44,6 +51,17 @@ class BootstrapVerificationError(BootstrapError):
 
 class BootstrapReceiptError(BootstrapError):
     """The bootstrap receipt is missing, malformed, or tampered."""
+
+
+def canonical_optimizer_skill_path(value: str, *, field: str = "skill_path") -> str:
+    normalized = validate_repository_relative_path(value, field=field)
+    return _SKILL_PATH_ALIASES.get(normalized, normalized)
+
+
+def optimizer_skill_paths_match(left: str, right: str) -> bool:
+    return canonical_optimizer_skill_path(left) == canonical_optimizer_skill_path(
+        right
+    )
 
 
 def _canonical_json_bytes(value: object) -> bytes:
@@ -384,7 +402,7 @@ def verify_shared_checkout(
     )
     _resolve_checkout_target(
         resolved_root,
-        pin.skill_path,
+        canonical_optimizer_skill_path(pin.skill_path),
         field="skill_path",
     )
     lock_path = _resolve_checkout_target(
@@ -498,7 +516,7 @@ def build_bootstrap_plan(
     )
     _resolve_plan_target(
         resolved_checkout_root,
-        pin.skill_path,
+        canonical_optimizer_skill_path(pin.skill_path),
         field="skill_path",
     )
     _resolve_plan_target(
@@ -517,7 +535,9 @@ def build_bootstrap_plan(
             lock_path="uv.lock",
             lock_sha256=pin.uv_lock_sha256,
         ),
-        skill_install=UserSkillInstallPlan(skill_path=pin.skill_path),
+        skill_install=UserSkillInstallPlan(
+            skill_path=canonical_optimizer_skill_path(pin.skill_path)
+        ),
         receipt_path=_absolute_path_text(receipt_path, "receipt_path"),
     )
 
@@ -528,11 +548,15 @@ __all__ = [
     "BootstrapReceipt",
     "BootstrapReceiptError",
     "BootstrapVerificationError",
+    "CANONICAL_OPTIMIZER_SKILL_PATH",
     "ExternalCheckoutPlan",
     "FrozenDependencyInstallPlan",
+    "LEGACY_OPTIMIZER_SKILL_PATH",
     "UserSkillInstallPlan",
     "build_bootstrap_plan",
+    "canonical_optimizer_skill_path",
     "load_shared_pin",
+    "optimizer_skill_paths_match",
     "read_bootstrap_receipt",
     "verify_shared_checkout",
     "write_bootstrap_receipt",

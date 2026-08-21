@@ -18,6 +18,13 @@ from foundry_opt.poc.deploy import (
     DeploymentSupersededError,
     DeploymentVerification,
     DeploymentVerificationCheckResult,
+    PACKAGE_FINGERPRINT_METADATA_KEY,
+    PROFILE_FINGERPRINT_METADATA_KEY,
+    REGISTRY_FINGERPRINT_METADATA_KEY,
+    RELEASE_COMMIT_METADATA_KEY,
+    REPO_AGENT_ID_METADATA_KEY,
+    SOURCE_FINGERPRINT_METADATA_KEY,
+    TARGET_FINGERPRINT_METADATA_KEY,
     deployment_operation_id,
     deployment_unverified_warning,
     load_deployment_settings,
@@ -31,9 +38,14 @@ from foundry_opt.poc.foundry import (
     Metric,
     RegularVersionReference,
     RouteFingerprint,
+    ServiceError,
 )
 from foundry_opt.poc.source import PackagedSource
-from foundry_opt.poc.runtime import BOOTSTRAP_RECEIPT_ENV, build_oidc_config
+from foundry_opt.poc.runtime import (
+    BOOTSTRAP_RECEIPT_ENV,
+    RuntimeIntegrationError,
+    build_oidc_config,
+)
 
 
 def _configuration() -> tuple[RepositoryPolicy, AgentMetadata]:
@@ -185,6 +197,17 @@ def _unverified_deployment_verification() -> DeploymentVerification:
     )
 
 
+def _reconciliation_metadata() -> dict[str, str]:
+    return {
+        REPO_AGENT_ID_METADATA_KEY: "example-agent",
+        SOURCE_FINGERPRINT_METADATA_KEY: "1" * 64,
+        PACKAGE_FINGERPRINT_METADATA_KEY: "2" * 64,
+        PROFILE_FINGERPRINT_METADATA_KEY: "3" * 64,
+        REGISTRY_FINGERPRINT_METADATA_KEY: "4" * 64,
+        TARGET_FINGERPRINT_METADATA_KEY: "5" * 64,
+    }
+
+
 class _Foundry:
     def __init__(
         self,
@@ -193,11 +216,13 @@ class _Foundry:
         safety_passed: bool = True,
         cleanup_failure: bool = False,
         matching_latest: bool = False,
+        latest_metadata: dict[str, str] | None = None,
     ) -> None:
         self.safety_score = safety_score
         self.safety_passed = safety_passed
         self.cleanup_failure = cleanup_failure
         self.matching_latest = matching_latest
+        self.latest_metadata = dict(latest_metadata or {})
         self.calls: list[str] = []
         self.package = _package()
         self.draft = DraftReference(
@@ -363,6 +388,7 @@ class _Foundry:
                 "foundry_opt_run_id": operation_id,
                 "foundry_opt_release_operation": operation_id,
                 "foundry_opt_source_zip_sha256": code_sha256,
+                **self.latest_metadata,
             },
             status="active",
         )
@@ -398,6 +424,48 @@ class _Foundry:
         return _route(reference.version)
 
 
+class _MissingFoundry(_Foundry):
+    def require_service_managed_latest(
+        self,
+        agent_name: str,
+        *,
+        deadline_monotonic: float,
+    ) -> RouteFingerprint:
+        del agent_name, deadline_monotonic
+        self.calls.append("route-missing")
+        raise ServiceError("agent was not found", status_code=404)
+
+    def create_regular_version(
+        self,
+        agent_name: str,
+        definition: object,
+        archive_bytes: bytes,
+        *,
+        operation_id: str,
+        provenance: dict[str, str],
+        description: str,
+        deadline_monotonic: float,
+    ) -> RegularVersionReference:
+        del definition, description, deadline_monotonic
+        assert agent_name == "example-agent"
+        assert archive_bytes == self.package.archive_bytes
+        self.calls.append("publish")
+        code_sha256 = hashlib.sha256(archive_bytes).hexdigest()
+        return RegularVersionReference(
+            agent_name=agent_name,
+            version="1",
+            operation_id=operation_id,
+            code_sha256=code_sha256,
+            metadata={
+                **provenance,
+                "foundry_opt_run_id": operation_id,
+                "foundry_opt_release_operation": operation_id,
+                "foundry_opt_source_zip_sha256": code_sha256,
+            },
+            status="creating",
+        )
+
+
 def test_deployment_validates_draft_before_regular_publication() -> None:
     policy, metadata = _configuration()
     foundry = _Foundry()
@@ -422,6 +490,89 @@ def test_deployment_validates_draft_before_regular_publication() -> None:
     assert receipt.verification.status == "passed"
     assert receipt.guardrails[0].passed is True
     assert foundry.calls.index("cleanup") < foundry.calls.index("publish")
+
+
+def test_deployment_can_publish_the_first_version_for_a_missing_agent() -> None:
+    policy, metadata = _configuration()
+    foundry = _MissingFoundry()
+    service = DeploymentService(
+        client=foundry,
+        policy=policy,
+        metadata=metadata,
+        deadline_seconds=30,
+        allow_missing_target=True,
+    )
+
+    receipt = service.publish(
+        repository="example-org/example-agent",
+        release_commit="a" * 40,
+        packaged=foundry.package,
+        verification=_unverified_deployment_verification(),
+    )
+
+    assert receipt.previous_version is None
+    assert receipt.published_version == "1"
+    assert receipt.route_mutated is False
+    assert foundry.calls[:2] == ["route-missing", "route-missing"]
+
+
+def test_deployment_reconciles_matching_fingerprints_across_commit_changes() -> None:
+    policy, metadata = _configuration()
+    reconciliation = _reconciliation_metadata()
+    foundry = _Foundry(
+        matching_latest=True,
+        latest_metadata={
+            RELEASE_COMMIT_METADATA_KEY: "f" * 40,
+            **reconciliation,
+        },
+    )
+    service = DeploymentService(
+        client=foundry,
+        policy=policy,
+        metadata=metadata,
+        deadline_seconds=30,
+    )
+
+    receipt = service.publish(
+        repository="example-org/example-agent",
+        release_commit="a" * 40,
+        packaged=foundry.package,
+        verification=_unverified_deployment_verification(),
+        reconciliation_metadata=reconciliation,
+    )
+
+    assert receipt.reconciled is True
+    assert receipt.reconciliation_metadata == reconciliation
+    assert "publish" not in foundry.calls
+
+
+def test_deployment_publishes_when_profile_fingerprint_changed() -> None:
+    policy, metadata = _configuration()
+    reconciliation = _reconciliation_metadata()
+    foundry = _Foundry(
+        matching_latest=True,
+        latest_metadata={
+            **reconciliation,
+            PROFILE_FINGERPRINT_METADATA_KEY: "9" * 64,
+        },
+    )
+    service = DeploymentService(
+        client=foundry,
+        policy=policy,
+        metadata=metadata,
+        deadline_seconds=30,
+    )
+
+    receipt = service.publish(
+        repository="example-org/example-agent",
+        release_commit="a" * 40,
+        packaged=foundry.package,
+        verification=_unverified_deployment_verification(),
+        reconciliation_metadata=reconciliation,
+    )
+
+    assert receipt.reconciled is False
+    assert "publish" in foundry.calls
 
 
 def test_deployment_verify_only_runs_foundry_gate_without_publication() -> None:
@@ -543,6 +694,54 @@ def test_deployment_rechecks_main_after_draft_validation() -> None:
 
     assert "cleanup" in foundry.calls
     assert "publish" not in foundry.calls
+
+
+def test_deployment_freshness_revalidates_the_true_default_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release_commit = "a" * 40
+    calls: list[list[str]] = []
+
+    def run(arguments: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(arguments)
+        output = "main\n" if arguments[-1] == ".default_branch" else f"{release_commit}\n"
+        return subprocess.CompletedProcess(arguments, 0, output, "")
+
+    monkeypatch.setattr(deploy_module.subprocess, "run", run)
+    check = deploy_module.deployment_freshness_check(
+        repository="example-org/example-agent",
+        branch="main",
+        environment={"GITHUB_ACTIONS": "true", "GH_TOKEN": "token"},
+    )
+
+    assert check is not None
+    check(release_commit)
+    assert calls[0][2] == "repos/example-org/example-agent"
+    assert calls[1][2] == "repos/example-org/example-agent/commits/main"
+
+
+def test_deployment_freshness_rejects_a_changed_default_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        deploy_module.subprocess,
+        "run",
+        lambda arguments, **_kwargs: subprocess.CompletedProcess(
+            arguments,
+            0,
+            "release\n",
+            "",
+        ),
+    )
+    check = deploy_module.deployment_freshness_check(
+        repository="example-org/example-agent",
+        branch="main",
+        environment={"GITHUB_ACTIONS": "true", "GH_TOKEN": "token"},
+    )
+
+    assert check is not None
+    with pytest.raises(RuntimeIntegrationError, match="default branch changed"):
+        check("a" * 40)
 
 
 def test_deployment_reconciles_unchanged_latest_source_without_new_version() -> None:

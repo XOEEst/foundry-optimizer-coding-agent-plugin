@@ -101,6 +101,7 @@ class GitHubPhaseDriver(PhaseDriver):
     ) -> None:
         self._plan_input = plan_input
         self._provider = provider
+        self._checkpoint: Callable[[Mapping[str, object]], None] | None = None
 
     def _resolve_token(self) -> str:
         env = os.environ.get("FOUNDRY_OPT_GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
@@ -114,7 +115,20 @@ class GitHubPhaseDriver(PhaseDriver):
     def _client(self) -> GitHubBootstrapProvider:
         if self._provider is None:
             self._provider = GitHubBootstrapProvider(token=self._resolve_token())
+            setter = getattr(self._provider, "set_checkpoint", None)
+            if callable(setter):
+                setter(self._checkpoint)
         return self._provider
+
+    def set_checkpoint(
+        self,
+        checkpoint: Callable[[Mapping[str, object]], None] | None,
+    ) -> None:
+        self._checkpoint = checkpoint
+        if self._provider is not None:
+            setter = getattr(self._provider, "set_checkpoint", None)
+            if callable(setter):
+                setter(checkpoint)
 
     def live_fingerprints(self, context: Mapping[str, object]) -> Sequence[FingerprintRecord]:
         state = self._client().read_repository_settings(str(context["repository_id"]))
@@ -155,6 +169,7 @@ class AzurePhaseDriver(PhaseDriver):
     ) -> None:
         self._plan_input = plan_input
         self._provider = provider
+        self._checkpoint: Callable[[Mapping[str, object]], None] | None = None
 
     def _token_provider(self, scope: str) -> str:
         for credential in (AzureCliCredential(), DefaultAzureCredential(exclude_interactive_browser_credential=True)):
@@ -170,17 +185,49 @@ class AzurePhaseDriver(PhaseDriver):
             if plan_input and plan_input.azure_phase:
                 roles = {item.alias: item.role_definition_id for item in plan_input.azure_phase.approved_role_assignments}
             self._provider = AzureArmRestProvider(token_provider=self._token_provider, approved_role_definitions=roles)
+            setter = getattr(self._provider, "set_checkpoint", None)
+            if callable(setter):
+                setter(self._checkpoint)
         return self._provider
+
+    def set_checkpoint(
+        self,
+        checkpoint: Callable[[Mapping[str, object]], None] | None,
+    ) -> None:
+        self._checkpoint = checkpoint
+        if self._provider is not None:
+            setter = getattr(self._provider, "set_checkpoint", None)
+            if callable(setter):
+                setter(checkpoint)
+
+    def _phase_plan(
+        self,
+        context: Mapping[str, object],
+        plan_input: BootstrapPlanInput,
+    ) -> BootstrapPlan:
+        return BootstrapPlan.create(
+            operation_id=str(context["operation_id"]),
+            runtime_repository=str(context["runtime_repository"]),
+            runtime_commit=str(context["runtime_commit"]),
+            repository_identity=str(context["repository_id"]),
+            actions=tuple(
+                action
+                for action in build_phase_actions(plan_input)
+                if action.phase == "azure"
+            ),
+        )
 
     def live_fingerprints(self, context: Mapping[str, object]) -> Sequence[FingerprintRecord]:
         plan_input = _contextual_plan_input(context, self._plan_input)
-        azure = plan_input.azure_phase
-        assert azure is not None
-        return (FingerprintRecord(label="azure:config", sha256=_hash_json(azure.model_dump(mode="json"))),)
+        return self._client(plan_input).live_binding_fingerprints(
+            self._phase_plan(context, plan_input)
+        )
 
     def plan(self, context: Mapping[str, object]) -> Sequence[BootstrapAction]:
         plan_input = _contextual_plan_input(context, self._plan_input)
-        return self._client(plan_input).plan_bindings(BootstrapPlan.create(operation_id=str(context["operation_id"]), runtime_repository=str(context["runtime_repository"]), runtime_commit=str(context["runtime_commit"]), repository_identity=str(context["repository_id"]), actions=tuple(action for action in build_phase_actions(plan_input) if action.phase == "azure")))
+        return self._client(plan_input).plan_bindings(
+            self._phase_plan(context, plan_input)
+        )
 
     def apply(self, phase_plan: BootstrapPlan) -> BootstrapReceipt:
         return self._client(self._plan_input).apply_bindings(phase_plan)

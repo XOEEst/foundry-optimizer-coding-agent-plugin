@@ -27,3 +27,18 @@ reviewed commit explicitly and refresh the managed lock.
 Rollback means selecting a previously reviewed commit, not rewriting public
 history. Record the known-good commit and lock hash in the customer repository
 or bootstrap receipt before starting a privileged operation.
+
+## Bootstrap skill release artifact
+
+Build the owner bootstrap release artifact from a checked-out repository with:
+
+```bash
+uv run python tools/build_foundry_bootstrap_skill.py
+```
+
+This command materializes the exact `skill.lock.json` only under `dist/` and
+never updates the checked-in placeholder template. It writes:
+
+- `dist/foundry-bootstrap-skill/foundry-bootstrap/` - installable skill directory
+- `dist/foundry-bootstrap-skill.zip` - deterministic ZIP artifact
+- `dist/foundry-bootstrap-skill.checksums.json` - ZIP and runtime provenance manifest

@@ -7,6 +7,10 @@ from pathlib import Path
 
 import pytest
 
+from foundry_opt.distribution import (
+    CANONICAL_OPTIMIZER_SKILL_PATH,
+    LEGACY_OPTIMIZER_SKILL_PATH,
+)
 from foundry_opt.poc.bootstrap import (
     BootstrapPlan,
     BootstrapReceipt,
@@ -227,3 +231,60 @@ def test_bootstrap_plan_accepts_root_package_path(tmp_path: Path) -> None:
     assert plan.dependency_install.package_path == "."
     assert Path(plan.checkout.checkout_root, plan.dependency_install.package_path).resolve() == checkout.resolve()
     assert plan.skill_install.skill_path == "skills/foundry-agent-optimizer"
+
+
+def test_bootstrap_plan_canonicalizes_legacy_optimizer_skill_path(
+    tmp_path: Path,
+) -> None:
+    checkout = tmp_path / "shared-checkout"
+    (checkout / "src" / "foundry_opt" / "poc").mkdir(parents=True)
+    checkout.joinpath(*CANONICAL_OPTIMIZER_SKILL_PATH.split("/")).mkdir(parents=True)
+    (checkout / "src" / "foundry_opt" / "poc" / "__init__.py").write_text(
+        "",
+        encoding="utf-8",
+        newline="\n",
+    )
+    checkout.joinpath(*CANONICAL_OPTIMIZER_SKILL_PATH.split("/"), "SKILL.md").write_text(
+        "# Shared skill\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    (checkout / "uv.lock").write_text(
+        "version = 1\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    _git(checkout, "init")
+    _git(checkout, "config", "user.name", "Bootstrap Test")
+    _git(checkout, "config", "user.email", "bootstrap@example.invalid")
+    _git(checkout, "config", "core.autocrlf", "false")
+    _git(checkout, "add", ".")
+    _git(checkout, "commit", "-m", "initial")
+    head = _git(checkout, "rev-parse", "HEAD")
+    digest = hashlib.sha256((checkout / "uv.lock").read_bytes()).hexdigest()
+    pin_path = tmp_path / "shared-pin.yaml"
+    pin_path.write_text(
+        "\n".join(
+            (
+                "schema_version: 1",
+                "repository_url: https://github.com/example/foundry-shared.git",
+                f"commit: '{head}'",
+                "package_path: 'src/foundry_opt/poc'",
+                f"skill_path: {LEGACY_OPTIMIZER_SKILL_PATH}",
+                f"uv_lock_sha256: '{digest}'",
+                "",
+            )
+        ),
+        encoding="utf-8",
+        newline="\n",
+    )
+    pin = load_shared_pin(pin_path)
+    receipt = verify_shared_checkout(pin, checkout)
+    plan = build_bootstrap_plan(
+        pin,
+        checkout_root=checkout,
+        receipt_path=tmp_path / "state" / "bootstrap-receipt.json",
+    )
+
+    assert receipt.skill_path == LEGACY_OPTIMIZER_SKILL_PATH
+    assert plan.skill_install.skill_path == CANONICAL_OPTIMIZER_SKILL_PATH

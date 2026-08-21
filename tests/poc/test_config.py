@@ -239,6 +239,60 @@ def test_issue_request_accepts_repo_agent_and_weighted_evaluators() -> None:
     )
 
 
+def test_issue_request_accepts_immutable_azureml_registry_evaluator_id() -> None:
+    issue = OptimizeIssueRequest.from_document(
+        {
+            **_generic_issue_request(),
+            "issue_evaluators": [
+                "azureml://registries/azureml/evaluators/builtin.task_completion/versions/19",
+            ],
+        }
+    )
+
+    assert issue.issue_evaluators == (
+        IssueEvaluatorEntry(
+            evaluator_id="azureml://registries/azureml/evaluators/builtin.task_completion/versions/19",
+        ),
+    )
+
+
+def test_issue_primary_metric_override_narrows_policy_and_is_not_inferred_from_goal() -> None:
+    policy = RepositoryPolicy.from_document(_generic_repository_policy())
+    explicit = OptimizeIssueRequest.from_document(
+        {
+            **_generic_issue_request(),
+            "primary_metric": "task_completion",
+            "issue_evaluators": [
+                "azureml://registries/azureml/evaluators/builtin.task_completion/versions/19",
+            ],
+        }
+    )
+    descriptive_only = OptimizeIssueRequest.from_document(
+        {
+            **_generic_issue_request(),
+            "goal": "Improve task_completion for multi-step requests.",
+        }
+    )
+
+    assert explicit.primary_metric == "task_completion"
+    assert apply_issue_request(policy, explicit).primary_metric == "task_completion"
+    assert descriptive_only.primary_metric is None
+    assert apply_issue_request(policy, descriptive_only).primary_metric == "policy_coverage"
+
+
+def test_issue_primary_metric_override_requires_issue_evaluator() -> None:
+    with pytest.raises(
+        POCConfigurationError,
+        match="primary_metric requires at least one issue evaluator",
+    ):
+        OptimizeIssueRequest.from_document(
+            {
+                **_generic_issue_request(),
+                "primary_metric": "task_completion",
+            }
+        )
+
+
 def test_issue_request_accepts_dataset_checks_and_no_evidence_acknowledgement() -> None:
     issue = OptimizeIssueRequest.from_document(
         {
@@ -267,6 +321,7 @@ def test_issue_request_round_trips_persisted_override_objects() -> None:
     request = OptimizeIssueRequest.from_document(
         {
             **_generic_issue_request(),
+            "primary_metric": "safety",
             "issue_evaluators": [
                 "azureai://built-in/evaluators/safety weight=2",
             ],

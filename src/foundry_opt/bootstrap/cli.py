@@ -1,11 +1,9 @@
-"""Typer command registration for bootstrap operations."""
+"""Advanced compatibility Typer command registration for legacy bootstrap operations."""
 
 from __future__ import annotations
 
 import hashlib
 import json
-import os
-import re
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -30,7 +28,7 @@ from foundry_opt.bootstrap.errors import (
 from foundry_opt.bootstrap.evaluation.activation import finalize_evaluation_activation, read_finalize_journal
 from foundry_opt.bootstrap.evaluation.inventory import assess_agent_inventory
 from foundry_opt.bootstrap.input_contracts import BindingEvidenceInput, BootstrapPlanInput, load_binding_evidence_input, load_bootstrap_plan_input
-from foundry_opt.bootstrap.operation_state import DiscoveredAgentRecord, DiscoveryBlockerRecord, SelectionPlan, default_state_root, read_operation_state
+from foundry_opt.bootstrap.operation_state import DiscoveredAgentRecord, DiscoveryBlockerRecord, SelectionPlan, read_operation_state
 from foundry_opt.bootstrap.orchestrator import BootstrapOrchestrator
 from foundry_opt.bootstrap.owner_cli import build_connection_plan_preview, render_connection_approval, render_connection_status
 from foundry_opt.bootstrap.owner_review import build_discovery_review, build_plan_review, build_resource_links, build_status_review
@@ -41,12 +39,18 @@ from foundry_opt.bootstrap.plan_factory import (
 )
 from foundry_opt.bootstrap.providers.azure import AzureArmRestProvider
 from foundry_opt.bootstrap.receipts import ApprovalRecord, ApplyPhaseName, EvaluationReplacementRecord
-from foundry_opt.distribution import load_shared_pin, verify_shared_checkout, write_bootstrap_receipt
+from foundry_opt.bootstrap.shared import default_state_root, runtime_commit_from_environment, runtime_repository_from_environment
+from foundry_opt.distribution import (
+    CANONICAL_OPTIMIZER_SKILL_PATH,
+    load_shared_pin,
+    verify_shared_checkout,
+    write_bootstrap_receipt,
+)
 from foundry_opt.poc.config import SharedPin
 
 _APPROVAL_HASH_FIELD = "approval_hash"
 _DEFAULT_PACKAGE_PATH = "."
-_DEFAULT_SKILL_PATH = "src/foundry_opt/templates/skills/foundry-agent-optimizer"
+_DEFAULT_SKILL_PATH = CANONICAL_OPTIMIZER_SKILL_PATH
 
 
 def _pin_from_registry(
@@ -99,17 +103,17 @@ def _pin_from_registry(
 
 
 def _runtime_commit() -> str:
-    value = os.environ.get("FOUNDRY_OPT_RUNTIME_COMMIT")
-    if value and re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", value):
-        return value
-    raise BootstrapCliError("runtime-commit-required", "runtime commit must come from verified environment or explicit option", exit_code=BootstrapExitCode.CONFIG)
+    try:
+        return runtime_commit_from_environment()
+    except BootstrapConfigError as exc:
+        raise BootstrapCliError("runtime-commit-required", "runtime commit must come from verified environment or explicit option", exit_code=BootstrapExitCode.CONFIG) from exc
 
 
 def _runtime_repository() -> str:
-    value = os.environ.get("FOUNDRY_OPT_RUNTIME_REPOSITORY")
-    if value:
-        return value
-    raise BootstrapCliError("runtime-repository-required", "runtime repository must come from verified environment or explicit option", exit_code=BootstrapExitCode.CONFIG)
+    try:
+        return runtime_repository_from_environment()
+    except BootstrapConfigError as exc:
+        raise BootstrapCliError("runtime-repository-required", "runtime repository must come from verified environment or explicit option", exit_code=BootstrapExitCode.CONFIG) from exc
 
 
 def _build_orchestrator(
@@ -614,13 +618,16 @@ def _resolve_connection_approval(
 def register_bootstrap_commands(app: typer.Typer) -> None:
     review_app = typer.Typer(
         no_args_is_help=True,
-        help='Render owner-facing bootstrap discovery, plan, and status summaries.',
+        help='Advanced compatibility reviews for the frozen `foundry-opt bootstrap ...` tree. Normal owners should use `/foundry-bootstrap`.',
     )
     connect_app = typer.Typer(
         no_args_is_help=True,
-        help='Plan and apply the GitHub/Azure connection step with owner-friendly text output.',
+        help='Advanced compatibility connection wrappers. Normal owners should use `/foundry-bootstrap`.',
     )
-    evaluation_app = typer.Typer(no_args_is_help=True)
+    evaluation_app = typer.Typer(
+        no_args_is_help=True,
+        help='Advanced compatibility evaluation onboarding commands retained for automation and source checkouts.',
+    )
     app.add_typer(review_app, name="review")
     app.add_typer(connect_app, name="connect")
     app.add_typer(evaluation_app, name="evaluation")

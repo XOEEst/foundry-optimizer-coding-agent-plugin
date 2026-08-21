@@ -9,7 +9,12 @@ body:
         Provide either a stable repoAgentId from `.foundry-opt/registry.yaml` or an
         explicit Foundry target when the repository has not applied the managed
         contract yet. Parser support is built into the runtime now, so these headings and IDs are part of the managed contract. Template pin remains on the pre-repin shared runtime until the final post-merge repin lands. Blank optional sections keep repository defaults; unclear
-        targets or invalid evaluator weights fail preflight before any job starts. Arbitrary issue-supplied evaluator, dataset, or command overrides are honored only when the trusted binding captures write/maintain/admin repository permission for the issue author. Optional verification can use an exact Foundry dataset plus exact evaluator IDs, exact repository commands, or a qualitative-only fallback when no approved evidence is available.
+        targets or invalid evaluator weights fail preflight before any job starts. Arbitrary issue-supplied evaluator, primary metric, dataset, or command overrides are honored only when the trusted binding captures write/maintain/admin repository permission for the issue author. Optional verification can use issue evaluators with repository-default datasets, an exact Foundry development dataset plus issue evaluators, exact repository commands, or a qualitative-only fallback when no approved evidence is available.
+
+        Primary evaluator example:
+        - primary metric: `task_completion`
+        - evaluator ID: `azureml://registries/azureml/evaluators/builtin.task_completion/versions/19`
+        - dataset blank = reuse repository defaults.
 
   - type: input
     id: repo_agent_id
@@ -71,21 +76,27 @@ body:
       description: One policy-approved deployment name per line. Leave blank to use the policy default.
       render: text
 
+  - type: input
+    id: primary_metric
+    attributes:
+      label: Optional primary metric
+      description: Enter the exact metric name produced by an issue evaluator. This narrows baseline, candidate, validating, and decision summaries. Leave blank to use the repository policy metric; the optimization goal remains descriptive prose.
+      placeholder: task_completion
+
   - type: textarea
     id: issue_evaluators
     attributes:
       label: Optional exact evaluator IDs
-      description: One exact evaluator ID per line. Append `weight=<positive>` to override equal weighting. Blank uses the repository default evaluator bundle. Invalid or unclear entries fail preflight.
+      description: One immutable evaluator ID per line. Append `weight=<positive>` to override equal weighting. IDs are merged with repository-default policy and safety evaluators. Blank uses only the repository default evaluator bundle. Invalid or unclear entries fail preflight.
       placeholder: |
-        azureai://accounts/example/projects/example/evaluators/quality/versions/1
-        azureai://built-in/evaluators/safety weight=2
+        azureml://registries/azureml/evaluators/builtin.task_completion/versions/19
       render: text
 
   - type: input
     id: verification_dataset
     attributes:
       label: Optional exact verification dataset ID or URI
-      description: Supply one exact dataset identifier only when you also provide exact evaluator IDs above. Leave blank to keep repository defaults.
+      description: Supply one exact development dataset identifier only when you also provide exact evaluator IDs above. Leave blank to reuse repository defaults for development and validation.
       placeholder: azureai://accounts/example/projects/example/data/validation/versions/1
 
   - type: textarea

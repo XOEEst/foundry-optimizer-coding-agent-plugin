@@ -17,6 +17,7 @@ _FIELD_LABELS = {
     "Changed candidates": "candidate_budget",
     "Optional narrower editable scope": "editable_scope",
     "Optional narrower model set": "candidate_models",
+    "Optional primary metric": "primary_metric",
     "Optional exact evaluator IDs": "issue_evaluators",
     "Optional exact verification dataset ID or URI": "verification_dataset",
     "Optional verification commands or checks": "verification_checks",
@@ -43,6 +44,7 @@ class ParsedIssue(BaseModel):
     candidate_budget: int = Field(ge=1, le=16)
     editable_scope: tuple[str, ...] = ()
     candidate_models: tuple[str, ...] = ()
+    primary_metric: str | None = Field(default=None, min_length=1, max_length=128)
     issue_evaluators: tuple[str, ...] = ()
     verification_dataset: str | None = None
     verification_checks: tuple[str, ...] = ()
@@ -82,6 +84,7 @@ def parse_issue_body(body: str) -> ParsedIssue:
     optional_labels = {
         "Optional narrower editable scope",
         "Optional narrower model set",
+        "Optional primary metric",
         "Optional exact evaluator IDs",
         "Optional exact verification dataset ID or URI",
         "Optional verification commands or checks",
@@ -114,6 +117,7 @@ def parse_issue_body(body: str) -> ParsedIssue:
         candidate_budget=candidate_budget,
         editable_scope=_lines(values["editable_scope"]),
         candidate_models=_lines(values["candidate_models"]),
+        primary_metric=values["primary_metric"].strip() or None,
         issue_evaluators=_lines(values["issue_evaluators"]),
         verification_dataset=values["verification_dataset"].strip() or None,
         verification_checks=_issue_verification_checks(values["verification_checks"]),

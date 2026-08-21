@@ -264,6 +264,239 @@ def test_applying_crash_and_compensation_preserved(tmp_path: Path) -> None:
     assert any(item.state == "compensation_required" for item in state.phase_receipts)
 
 
+def test_in_flight_checkpoint_retry_reconciles_before_reapply(
+    tmp_path: Path,
+) -> None:
+    drivers = _drivers()
+
+    class _CrashCheckpointDriver(_Driver):
+        def __init__(self) -> None:
+            super().__init__(
+                "azure",
+                actions=(_plan_action("az", "azure", target="root"),),
+                live=(
+                    FingerprintRecord(
+                        label="azure:live",
+                        sha256="3" * 64,
+                    ),
+                ),
+            )
+            self.checkpoint = None
+            self.crash = True
+            self.mutated = False
+            self.resumed = False
+            self.reconciled = False
+
+        def set_checkpoint(self, checkpoint) -> None:
+            self.checkpoint = checkpoint
+
+        def live_fingerprints(self, context):
+            if self.mutated:
+                return (
+                    FingerprintRecord(
+                        label="azure:live",
+                        sha256="9" * 64,
+                    ),
+                )
+            return self.live
+
+        def restore_provider_state(self, mapping):
+            self.restored.append(dict(mapping))
+            self.resumed = True
+
+        def apply(self, phase_plan: BootstrapPlan) -> BootstrapReceipt:
+            if self.resumed:
+                self.mutated = False
+                self.reconciled = True
+                self.resumed = False
+            receipt = BootstrapReceipt.create(
+                operation_id=phase_plan.operation_id,
+                runtime_repository=phase_plan.runtime_repository,
+                runtime_commit=phase_plan.runtime_commit,
+                repository_identity=phase_plan.repository_identity,
+                plan_hash=phase_plan.plan_hash,
+                created_actions=("az",),
+                compensation_required_actions=("az",),
+            )
+            self.mutated = True
+            assert self.checkpoint is not None
+            self.checkpoint(
+                {
+                    "checkpoint": True,
+                    "receipt": receipt.model_dump(mode="json"),
+                    "provider_state": {"mutated": True},
+                }
+            )
+            if self.crash:
+                self.crash = False
+                raise SystemExit("simulated process exit")
+            return receipt
+
+        def export_provider_state(self, receipt: BootstrapReceipt):
+            return {"mutated": self.mutated}
+
+    crash_driver = _CrashCheckpointDriver()
+    drivers["azure"] = crash_driver
+    orch, _ = _build_orchestrator(tmp_path, drivers)
+    _, _, planned = _discover_and_plan(
+        tmp_path,
+        orch,
+        op="checkpoint-retry",
+        selected_agents=({"root": ".", "repoAgentId": "root"},),
+    )
+    approval = ApprovalRecord.create(
+        parent_plan_hash=planned.bootstrap_plan.plan_hash,
+        phase="azure",
+        actor="tester",
+        summary="azure",
+    )
+
+    with pytest.raises(SystemExit, match="simulated process exit"):
+        orch.apply_phase(
+            repository_id="org/repo",
+            operation_id="checkpoint-retry",
+            phase="azure",
+            approval=approval,
+            runtime_commit="a" * 40,
+        )
+
+    interrupted = read_operation_state(
+        "org/repo",
+        "checkpoint-retry",
+        state_root=tmp_path / "state",
+    )
+    applying = next(
+        item for item in interrupted.phase_receipts if item.phase == "azure"
+    )
+    assert applying.state == "applying"
+    assert applying.provider_state["checkpoint"] is True
+
+    resumed = orch.apply_phase(
+        repository_id="org/repo",
+        operation_id="checkpoint-retry",
+        phase="azure",
+        approval=approval,
+        runtime_commit="a" * 40,
+    )
+
+    assert resumed.state == "applied"
+    assert crash_driver.reconciled is True
+
+
+def test_complete_checkpoint_failure_preserves_compensation_after_restart(
+    tmp_path: Path,
+) -> None:
+    class _CompleteCheckpointDriver(_Driver):
+        def __init__(self, *, crash: bool) -> None:
+            super().__init__(
+                "azure",
+                actions=(_plan_action("az", "azure", target="root"),),
+                live=(
+                    FingerprintRecord(
+                        label="azure:live",
+                        sha256="3" * 64,
+                    ),
+                ),
+            )
+            self.checkpoint = None
+            self.crash = crash
+            self.mutated = not crash
+            self.resumed = False
+
+        def set_checkpoint(self, checkpoint) -> None:
+            self.checkpoint = checkpoint
+
+        def live_fingerprints(self, context):
+            if self.mutated:
+                return (
+                    FingerprintRecord(
+                        label="azure:live",
+                        sha256="9" * 64,
+                    ),
+                )
+            return self.live
+
+        def restore_provider_state(self, mapping):
+            super().restore_provider_state(mapping)
+            self.resumed = True
+
+        def apply(self, phase_plan: BootstrapPlan) -> BootstrapReceipt:
+            if self.resumed:
+                raise RuntimeError("resumed verification failed")
+            receipt = BootstrapReceipt.create(
+                operation_id=phase_plan.operation_id,
+                runtime_repository=phase_plan.runtime_repository,
+                runtime_commit=phase_plan.runtime_commit,
+                repository_identity=phase_plan.repository_identity,
+                plan_hash=phase_plan.plan_hash,
+                created_actions=("az",),
+                compensation_required_actions=("az",),
+            )
+            self.mutated = True
+            assert self.checkpoint is not None
+            self.checkpoint(
+                {
+                    "checkpoint": True,
+                    "complete": True,
+                    "receipt": receipt.model_dump(mode="json"),
+                    "provider_state": {"mutated": True},
+                }
+            )
+            if self.crash:
+                raise SystemExit("simulated process exit")
+            return receipt
+
+    first_drivers = _drivers()
+    first_drivers["azure"] = _CompleteCheckpointDriver(crash=True)
+    first, _ = _build_orchestrator(tmp_path, first_drivers)
+    _, _, planned = _discover_and_plan(
+        tmp_path,
+        first,
+        op="checkpoint-failure",
+        selected_agents=({"root": ".", "repoAgentId": "root"},),
+    )
+    approval = ApprovalRecord.create(
+        parent_plan_hash=planned.bootstrap_plan.plan_hash,
+        phase="azure",
+        actor="tester",
+        summary="azure",
+    )
+    with pytest.raises(SystemExit, match="simulated process exit"):
+        first.apply_phase(
+            repository_id="org/repo",
+            operation_id="checkpoint-failure",
+            phase="azure",
+            approval=approval,
+            runtime_commit="a" * 40,
+        )
+
+    resumed_driver = _CompleteCheckpointDriver(crash=False)
+    resumed_drivers = _drivers()
+    resumed_drivers["azure"] = resumed_driver
+    restarted, _ = _build_orchestrator(tmp_path, resumed_drivers)
+    failed = restarted.apply_phase(
+        repository_id="org/repo",
+        operation_id="checkpoint-failure",
+        phase="azure",
+        approval=approval,
+        runtime_commit="a" * 40,
+    )
+
+    assert failed.state == "compensation_required"
+    assert failed.receipt.created_actions == ("az",)
+    assert failed.provider_state["checkpoint"] is True
+
+    rolled = restarted.rollback_phase(
+        repository_id="org/repo",
+        operation_id="checkpoint-failure",
+        phase="azure",
+        runtime_commit="a" * 40,
+    )
+
+    assert rolled.state == "rolled_back"
+    assert resumed_driver.rolled_back == [failed.receipt]
+
+
 def test_state_redaction_restart_rollback_and_eligibility(tmp_path: Path) -> None:
     orch, drivers = _build_orchestrator(tmp_path)
     _, _, planned = _discover_and_plan(tmp_path, orch, op="op8", selected_agents=({"root": ".", "repoAgentId": "root"},), replacement=EvaluationReplacementRecord(active_bundle_id="old", candidate_bundle_id="new", preserved_bundle_id="old", lineage_hash="a" * 64, status="planned"))

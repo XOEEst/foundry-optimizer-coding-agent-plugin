@@ -12,7 +12,11 @@ For first-time repository owners, keep bootstrap short and human-first:
 Use plain-language bullet summaries by default. Reserve JSON for automation,
 implementation, or debugging detail.
 
-## CLI entry points
+## Advanced compatibility CLI entry points
+
+Normal owners should use `/foundry-bootstrap`. The commands below remain
+the advanced compatibility surface for reviewed source checkouts and
+automation that still invoke `foundry-opt bootstrap ...`.
 
 Owners can stay on concise text output by default:
 
@@ -29,6 +33,10 @@ Owners can stay on concise text output by default:
 Every owner-facing command renders plain text by default, supports `--markdown`
 for copy/paste into issues or PRs, and supports `--json` for deterministic
 review/connection model output.
+
+Compatibility policy: keep the existing command tree stable without
+runtime deprecation warning noise in CI. Announce any future retirement
+through docs and release notes first.
 
 ## Default owner decisions
 

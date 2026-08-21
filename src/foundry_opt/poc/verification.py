@@ -170,8 +170,8 @@ class FoundryEvaluationSelection(FrozenModel):
     @model_validator(mode="after")
     def validate_shape(self) -> "FoundryEvaluationSelection":
         if self.source == "issue":
-            if self.issue_dataset is None or not self.issue_evaluators:
-                raise ValueError("issue foundry selections require dataset and evaluators")
+            if not self.issue_evaluators:
+                raise ValueError("issue foundry selections require evaluators")
         else:
             if self.issue_dataset is not None or self.issue_evaluators:
                 raise ValueError(
@@ -193,7 +193,10 @@ class FoundryEvaluationSelection(FrozenModel):
 
     @property
     def development_evaluator_ids(self) -> tuple[str, ...]:
-        return self.override_evaluator_ids or self.defaults.development_evaluator_ids
+        return _merge_evaluator_ids(
+            self.defaults.development_evaluator_ids,
+            self.override_evaluator_ids,
+        )
 
     @property
     def validating_dataset_id(self) -> str:
@@ -201,7 +204,10 @@ class FoundryEvaluationSelection(FrozenModel):
 
     @property
     def validating_evaluator_ids(self) -> tuple[str, ...]:
-        return self.override_evaluator_ids or self.defaults.validating_evaluator_ids
+        return _merge_evaluator_ids(
+            self.defaults.validating_evaluator_ids,
+            self.override_evaluator_ids,
+        )
 
 
 class RepositoryChecksSelection(FrozenModel):
@@ -282,7 +288,17 @@ class DefaultVerificationResolver:
         )
 
         if has_issue_foundry_inputs:
-            if issue_dataset is not None and issue_evaluators:
+            if issue_evaluators and defaults is not None:
+                provenance: list[VerificationProvenance] = []
+                if issue_dataset is not None:
+                    provenance.append("issue_dataset")
+                provenance.append("issue_evaluators")
+                if issue_dataset is None:
+                    provenance.append(
+                        "repository_default_bundle"
+                        if verification.bundle is not None
+                        else "runtime_metadata_defaults"
+                    )
                 return VerificationResolution(
                     mode="foundry_evaluation",
                     evaluation_gate_policy=verification.evaluation_gate_policy,
@@ -292,13 +308,13 @@ class DefaultVerificationResolver:
                         issue_dataset=issue_dataset,
                         issue_evaluators=issue_evaluators,
                     ),
-                    provenance=("issue_dataset", "issue_evaluators"),
+                    provenance=tuple(provenance),
                     warnings=tuple(warnings),
                     quantitative_decision_allowed=True,
                 )
             if issue_evaluators:
                 warnings.append(
-                    "issue-supplied evaluators were ignored because no exact verification dataset was provided"
+                    "issue-supplied evaluators were ignored because repository/runtime Foundry defaults were unavailable"
                 )
             if issue_dataset is not None:
                 warnings.append(
@@ -429,6 +445,21 @@ def _foundry_defaults(profile: object) -> FoundryEvaluationPlan | None:
         validating_dataset_id=bundle.validating_dataset.dataset_id,
         validating_evaluator_ids=evaluator_ids,
     )
+
+
+def _merge_evaluator_ids(
+    defaults: tuple[str, ...],
+    issue_overrides: tuple[str, ...],
+) -> tuple[str, ...]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for evaluator_id in (*defaults, *issue_overrides):
+        key = evaluator_id.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(evaluator_id)
+    return tuple(merged)
 
 
 def deployment_unverified_warning() -> DeploymentVerificationWarning:

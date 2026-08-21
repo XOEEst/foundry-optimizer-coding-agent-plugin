@@ -18,6 +18,7 @@ import yaml
 from pydantic import ValidationError
 from typer.testing import CliRunner
 
+from foundry_opt.distribution import CANONICAL_OPTIMIZER_SKILL_PATH
 from foundry_opt.bootstrap.errors import BootstrapConfigError
 from foundry_opt.bootstrap.input_contracts import (
     LEGACY_LOCK_PATH,
@@ -60,8 +61,8 @@ def _git(path: Path, *arguments: str) -> str:
 
 def _runtime_checkout(tmp_path: Path) -> tuple[Path, str, str]:
     checkout = tmp_path / "runtime"
-    (checkout / "src" / "foundry_opt" / "templates" / "skills" / "foundry-agent-optimizer").mkdir(parents=True)
-    (checkout / "src" / "foundry_opt" / "templates" / "skills" / "foundry-agent-optimizer" / "SKILL.md").write_text(
+    (checkout / "plugins" / "foundry-agent-optimizer").mkdir(parents=True)
+    (checkout / "plugins" / "foundry-agent-optimizer" / "SKILL.md").write_text(
         "# skill\n", encoding="utf-8", newline="\n"
     )
     (checkout / "uv.lock").write_text("version = 1\n", encoding="utf-8", newline="\n")
@@ -195,7 +196,9 @@ def test_verify_accepts_the_registry_pin_without_a_legacy_lock(tmp_path: Path) -
     payload = json.loads(result.stdout)
     assert payload["status"] == "verified"
     assert payload["commit"] == commit
-    assert json.loads(receipt.read_text(encoding="utf-8"))["commit"] == commit
+    receipt_payload = json.loads(receipt.read_text(encoding="utf-8"))
+    assert receipt_payload["commit"] == commit
+    assert receipt_payload["skill_path"] == CANONICAL_OPTIMIZER_SKILL_PATH
 
 
 def test_verify_requires_exactly_one_pin_source(tmp_path: Path) -> None:
@@ -254,6 +257,9 @@ def test_verify_still_reads_a_legacy_shared_pin_for_migration(tmp_path: Path) ->
 
     assert result.exit_code == 0, result.stdout
     assert json.loads(result.stdout)["commit"] == commit
+    assert json.loads(receipt.read_text(encoding="utf-8"))["skill_path"] == (
+        "src/foundry_opt/templates/skills/foundry-agent-optimizer"
+    )
 
 
 def test_registry_without_an_exact_pin_fails_closed(tmp_path: Path) -> None:
@@ -290,3 +296,5 @@ def test_setup_workflow_verifies_against_the_registry() -> None:
     assert "bootstrap verify --registry .foundry-opt/registry.yaml --uv-lock-sha256" in setup
     assert LEGACY_LOCK_PATH not in setup
     assert ".foundry-opt/bootstrap.lock.json" in setup
+    assert "FOUNDRY_OPT_SKILL_SOURCE=$shared_root/plugins/foundry-agent-optimizer" in setup
+    assert "src/foundry_opt/templates/skills/foundry-agent-optimizer" not in setup

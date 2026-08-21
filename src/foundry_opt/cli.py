@@ -122,7 +122,10 @@ from foundry_opt.poc.verification import (
 
 
 app = typer.Typer(no_args_is_help=True, pretty_exceptions_enable=False)
-bootstrap_app = typer.Typer(no_args_is_help=True)
+bootstrap_app = typer.Typer(
+    no_args_is_help=True,
+    help="Advanced compatibility interface for the frozen `foundry-opt bootstrap ...` tree. Normal owners should use `/foundry-bootstrap`.",
+)
 broker_app = typer.Typer(no_args_is_help=True)
 issue_app = typer.Typer(no_args_is_help=True)
 job_app = typer.Typer(no_args_is_help=True)
@@ -1887,6 +1890,7 @@ def _issue_request_from_body(body: str) -> OptimizeIssueRequest:
             "candidate_budget": parsed.candidate_budget,
             "model_subset": list(parsed.candidate_models) or None,
             "editable_scope_subset": list(parsed.editable_scope) or None,
+            "primary_metric": parsed.primary_metric,
             "issue_evaluators": list(parsed.issue_evaluators) or None,
             "verification_dataset": parsed.verification_dataset,
             "verification_checks": list(parsed.verification_checks) or None,
@@ -2212,6 +2216,7 @@ def _job_payload(
             "model_subset": (
                 None if request.model_subset is None else list(request.model_subset)
             ),
+            "primary_metric": request.primary_metric,
             "request_sha256": request_digest_sha256,
         },
         "status": "ok",
@@ -2223,6 +2228,7 @@ def _job_payload(
         payload["policy"] = {
             "allowed_models": list(policy.allowed_models),
             "editable_paths": list(policy.editable_paths),
+            "primary_metric": policy.primary_metric,
         }
     return payload
 

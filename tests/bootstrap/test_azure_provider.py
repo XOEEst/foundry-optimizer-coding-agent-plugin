@@ -1,15 +1,23 @@
 from __future__ import annotations
 
 import hashlib
+import json
 
 import httpx
 import pytest
 
-from foundry_opt.bootstrap.contracts import BootstrapAction, BootstrapPlan
+from foundry_opt.bootstrap.canonical import canonical_sha256
+from foundry_opt.bootstrap.contracts import (
+    BootstrapAction,
+    BootstrapPlan,
+    BootstrapReceipt,
+)
 from foundry_opt.bootstrap.providers.azure import (
     AzureArmRestProvider,
     AzureIdentityReference,
+    AzureProviderApplyError,
     AzureProviderError,
+    rollback_failure_details,
 )
 from tests.bootstrap.fakes import AzureTransportRecorder, json_body
 
@@ -139,6 +147,145 @@ def test_real_bearer_header_and_no_token_persistence() -> None:
     assert recorder.requests[0].headers["Authorization"] == "Bearer secret-token"
     assert "secret-token" not in str(state)
     assert "secret-token" not in str(receipt)
+
+
+def test_live_binding_fingerprints_cover_exact_live_identity_fics_and_role() -> None:
+    recorder = AzureTransportRecorder()
+    provider = _provider(recorder)
+    recorder.add(
+        "GET",
+        f"{UAMI_URL}?api-version=2023-01-31",
+        (200, _uami_payload()),
+    )
+    for subject in _subjects():
+        recorder.add(
+            "GET",
+            (
+                f"{UAMI_URL}/federatedIdentityCredentials/"
+                f"{_fic(subject)}?api-version=2024-11-30"
+            ),
+            (200, _fic_payload(subject)),
+        )
+    recorder.add("GET", ROLE_URL, (200, _role_payload()))
+
+    fingerprints = provider.live_binding_fingerprints(
+        _plan(_uami(adopted=True), _role())
+    )
+
+    assert {item.label for item in fingerprints} == {
+        "azure:identity",
+        *{
+            "azure:fic:" + hashlib.sha256(subject.encode()).hexdigest()[:16]
+            for subject in _subjects()
+        },
+        "azure:role:"
+        + canonical_sha256(
+            {
+                "role_key": "FoundryProjectReader",
+                "scope": SCOPE.casefold(),
+                "role_definition_id": ROLE.casefold(),
+            }
+        )[:16],
+    }
+    assert all(subject not in str(fingerprints) for subject in _subjects())
+
+
+def test_live_binding_fingerprint_changes_on_external_role_drift() -> None:
+    recorder = AzureTransportRecorder()
+    provider = _provider(recorder)
+    recorder.add_sequence(
+        "GET",
+        f"{UAMI_URL}?api-version=2023-01-31",
+        [(200, _uami_payload()), (200, _uami_payload())],
+    )
+    for subject in _subjects():
+        recorder.add_sequence(
+            "GET",
+            (
+                f"{UAMI_URL}/federatedIdentityCredentials/"
+                f"{_fic(subject)}?api-version=2024-11-30"
+            ),
+            [(200, _fic_payload(subject)), (200, _fic_payload(subject))],
+        )
+    recorder.add_sequence(
+        "GET",
+        ROLE_URL,
+        [
+            (200, _role_payload()),
+            (
+                200,
+                _role_payload(
+                    condition="external-drift",
+                    condition_version="2.0",
+                ),
+            ),
+        ],
+    )
+
+    plan = _plan(_uami(adopted=True), _role())
+    reviewed = provider.live_binding_fingerprints(plan)
+    current = provider.live_binding_fingerprints(plan)
+
+    assert reviewed != current
+
+
+def test_partial_uami_checkpoint_can_compensate_after_process_exit() -> None:
+    recorder = AzureTransportRecorder()
+    checkpoints: list[dict[str, object]] = []
+
+    def checkpoint(snapshot) -> None:
+        checkpoints.append(json.loads(json.dumps(snapshot)))
+        if len(checkpoints) == 3:
+            raise SystemExit("simulated process exit")
+
+    provider = AzureArmRestProvider(
+        token_provider=lambda scope: "token",
+        transport=recorder.transport(),
+        approved_role_definitions={"FoundryProjectReader": ROLE},
+        checkpoint=checkpoint,
+    )
+    recorder.add(
+        "GET",
+        f"{UAMI_URL}?api-version=2023-01-31",
+        (404, {"error": {}}),
+    )
+    recorder.add(
+        "PUT",
+        f"{UAMI_URL}?api-version=2023-01-31",
+        (201, _uami_payload()),
+    )
+
+    with pytest.raises(SystemExit, match="simulated process exit"):
+        provider.apply_bindings(
+            _plan(_uami(adopted=False, ids=False), _role())
+        )
+
+    checkpoint_state = checkpoints[-1]
+    assert (
+        checkpoint_state["provider_state"]["attempts"][0]["stage"]
+        == "acknowledged"
+    )
+    receipt = BootstrapReceipt.model_validate(checkpoint_state["receipt"])
+    restarted = _provider(recorder)
+    recorder.add(
+        "GET",
+        f"{UAMI_URL}?api-version=2023-01-31",
+        (200, _uami_payload()),
+    )
+    restarted.restore_provider_state(checkpoint_state)
+    recorder.add(
+        "DELETE",
+        f"{UAMI_URL}?api-version=2023-01-31",
+        (204, {}),
+    )
+    restarted.rollback_bindings(receipt)
+    recorder.add(
+        "GET",
+        f"{UAMI_URL}?api-version=2023-01-31",
+        (404, {"error": {}}),
+    )
+
+    assert restarted.verify_rollback(receipt) is True
 
 
 def test_planned_bindings_are_replayable_and_bind_role_approval() -> None:
@@ -398,6 +545,110 @@ def test_entra_fic_delete_uses_graph_credential_id() -> None:
     )
 
 
+def test_entra_partial_fic_checkpoint_resolves_id_before_compensation() -> None:
+    subjects = _subjects()
+    created_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    credentials: list[dict[str, object]] = [
+        {
+            "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "name": "existing",
+            "issuer": "https://token.actions.githubusercontent.com",
+            "subject": subjects[0],
+            "audiences": ["api://AzureADTokenExchange"],
+        }
+    ]
+    checkpoints: list[dict[str, object]] = []
+    deleted: list[str] = []
+
+    def checkpoint(snapshot) -> None:
+        checkpoints.append(json.loads(json.dumps(snapshot)))
+        if len(checkpoints) == 3:
+            raise SystemExit("simulated process exit")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if request.method == "GET" and url == (
+            "https://graph.microsoft.com/v1.0/applications/"
+            f"{APPLICATION_OBJECT_ID}"
+        ):
+            return httpx.Response(
+                200,
+                json={
+                    "id": APPLICATION_OBJECT_ID,
+                    "appId": CLIENT,
+                    "displayName": "existing-app",
+                },
+                request=request,
+            )
+        if request.method == "GET" and request.url.path.endswith(
+            "/servicePrincipals"
+        ):
+            return httpx.Response(
+                200,
+                json={
+                    "value": [
+                        {
+                            "id": PRINCIPAL,
+                            "appOwnerOrganizationId": TENANT,
+                        }
+                    ]
+                },
+                request=request,
+            )
+        if request.method == "GET" and url == GRAPH_FIC_COLLECTION:
+            return httpx.Response(
+                200,
+                json={"value": list(credentials)},
+                request=request,
+            )
+        if request.method == "POST" and url == GRAPH_FIC_COLLECTION:
+            created = {
+                "id": created_id,
+                **dict(json_body(request)),
+            }
+            credentials.append(created)
+            return httpx.Response(201, json=created, request=request)
+        if (
+            request.method == "DELETE"
+            and url == f"{GRAPH_FIC_COLLECTION}/{created_id}"
+        ):
+            deleted.append(url)
+            credentials[:] = [
+                item for item in credentials if item["id"] != created_id
+            ]
+            return httpx.Response(204, request=request)
+        return httpx.Response(
+            404,
+            json={"error": {"code": "not_found"}},
+            request=request,
+        )
+
+    transport = httpx.MockTransport(handler)
+    provider = AzureArmRestProvider(
+        token_provider=lambda scope: "token",
+        transport=transport,
+        checkpoint=checkpoint,
+    )
+    plan = _plan(
+        _entra_action(),
+        *(_fic_action(subject) for subject in subjects),
+    )
+
+    with pytest.raises(SystemExit, match="simulated process exit"):
+        provider.apply_bindings(plan)
+
+    checkpoint_state = checkpoints[-1]
+    receipt = BootstrapReceipt.model_validate(checkpoint_state["receipt"])
+    restarted = AzureArmRestProvider(
+        token_provider=lambda scope: "token",
+        transport=transport,
+    )
+    restarted.restore_provider_state(checkpoint_state)
+    restarted.rollback_bindings(receipt)
+
+    assert deleted == [f"{GRAPH_FIC_COLLECTION}/{created_id}"]
+
+
 def test_restore_reconciles_ambiguous_uami_before_verify_rollback() -> None:
     recorder = AzureTransportRecorder()
     provider = _provider(recorder)
@@ -415,7 +666,6 @@ def test_restore_reconciles_ambiguous_uami_before_verify_rollback() -> None:
     state = dict(exported)
     state["attempts"][0]["disposition"] = "ambiguous"
     state["identity"]["disposition"] = "created"
-    from foundry_opt.bootstrap.canonical import canonical_sha256
     state["state_hash"] = canonical_sha256({k: v for k, v in state.items() if k != "state_hash"})
     restarted = _provider(recorder)
     recorder.add("GET", f"{UAMI_URL}?api-version=2023-01-31", (200, _uami_payload()))
@@ -479,6 +729,104 @@ def test_uami_http_200_change_without_preimage_fails_closed() -> None:
     recorder.add("PUT", f"{UAMI_URL}?api-version=2023-01-31", (200, _uami_payload()))
     with pytest.raises(AzureProviderError):
         provider.apply_bindings(_plan(_uami(adopted=False, ids=False), _role()))
+
+
+def test_fic_http_200_without_preimage_is_not_adopted_or_deleted() -> None:
+    recorder = AzureTransportRecorder()
+    provider = _provider(recorder)
+    recorder.add(
+        "GET",
+        f"{UAMI_URL}?api-version=2023-01-31",
+        (200, _uami_payload()),
+    )
+    subject = _subjects()[0]
+    fic_url = (
+        f"{UAMI_URL}/federatedIdentityCredentials/"
+        f"{_fic(subject)}?api-version=2024-11-30"
+    )
+    recorder.add("GET", fic_url, (404, {"error": {}}))
+    recorder.add("PUT", fic_url, (200, _fic_payload(subject)))
+
+    with pytest.raises(AzureProviderApplyError) as exc:
+        provider.apply_bindings(_plan(_uami(adopted=True), _role()))
+
+    receipt, state = rollback_failure_details(exc.value)
+    assert receipt is not None
+    restarted = _provider(recorder)
+    with pytest.raises(AzureProviderError, match="cannot be adopted"):
+        restarted.restore_provider_state(state)
+    assert all(request.method != "DELETE" for request in recorder.requests)
+
+
+def test_role_http_200_without_preimage_is_not_adopted_or_deleted() -> None:
+    recorder = AzureTransportRecorder()
+    provider = _provider(recorder)
+    recorder.add(
+        "GET",
+        f"{UAMI_URL}?api-version=2023-01-31",
+        (200, _uami_payload()),
+    )
+    for subject in _subjects():
+        recorder.add(
+            "GET",
+            (
+                f"{UAMI_URL}/federatedIdentityCredentials/"
+                f"{_fic(subject)}?api-version=2024-11-30"
+            ),
+            (200, _fic_payload(subject)),
+        )
+    recorder.add("GET", ROLE_URL, (404, {"error": {}}))
+    recorder.add("PUT", ROLE_URL, (200, _role_payload()))
+
+    with pytest.raises(AzureProviderApplyError) as exc:
+        provider.apply_bindings(_plan(_uami(adopted=True), _role()))
+
+    receipt, state = rollback_failure_details(exc.value)
+    assert receipt is not None
+    restarted = _provider(recorder)
+    with pytest.raises(AzureProviderError, match="cannot be adopted"):
+        restarted.restore_provider_state(state)
+    assert all(request.method != "DELETE" for request in recorder.requests)
+
+
+def test_created_role_rollback_refuses_external_drift() -> None:
+    recorder = AzureTransportRecorder()
+    provider = _provider(recorder)
+    recorder.add(
+        "GET",
+        f"{UAMI_URL}?api-version=2023-01-31",
+        (200, _uami_payload()),
+    )
+    for subject in _subjects():
+        recorder.add(
+            "GET",
+            (
+                f"{UAMI_URL}/federatedIdentityCredentials/"
+                f"{_fic(subject)}?api-version=2024-11-30"
+            ),
+            (200, _fic_payload(subject)),
+        )
+    recorder.add("GET", ROLE_URL, (404, {"error": {}}))
+    recorder.add("PUT", ROLE_URL, (201, _role_payload()))
+    receipt = provider.apply_bindings(
+        _plan(_uami(adopted=True), _role())
+    )
+    recorder.add(
+        "GET",
+        ROLE_URL,
+        (
+            200,
+            _role_payload(
+                condition="external-drift",
+                condition_version="2.0",
+            ),
+        ),
+    )
+
+    with pytest.raises(AzureProviderError, match="unexpected conditional"):
+        provider.rollback_bindings(receipt)
+
+    assert all(request.method != "DELETE" for request in recorder.requests)
 
 
 def test_adopted_role_verification_requires_default_condition_fields() -> None:

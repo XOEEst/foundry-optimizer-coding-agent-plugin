@@ -40,6 +40,15 @@ EvaluationDefinitionId = Annotated[str, StringConstraints(pattern=r"^(?:[A-Za-z0
 ApplyPhase = Literal["repository", "github", "azure", "evaluations"]
 OperationStage = Literal["planned", "applying", "verifying", "completed", "failed", "compensation_required"]
 BindingClassification = Literal["bound-aligned", "bound-diverged", "bound-unknown", "ready-unbound", "not-ready"]
+FoundryTargetState = Literal["existing_aligned", "existing_diverged", "existing_unknown", "new_target", "blocked"]
+FoundryTargetSource = Literal[
+    "existing_profile",
+    "agent_metadata",
+    "azure_yaml",
+    "azd_environment",
+    "binding_evidence",
+    "owner_answer",
+]
 EvaluatorProvenance = Literal["reused_existing", "auto_generated_unreviewed", "issue_supplied_existing"]
 IdentityKind = Literal["user_assigned_managed_identity", "entra_application", "unresolved_migration"]
 RuntimeKind = Literal["hosted"]
@@ -229,6 +238,88 @@ class FoundryProjectSettings(BootstrapDocument):
         return _validate_resource_id(value, 'account_resource_id')
 
 
+class ReviewedFoundryTarget(BootstrapDocument):
+    state: FoundryTargetState
+    project_endpoint: str | None = None
+    project_endpoint_source: FoundryTargetSource | None = None
+    agent_name: AgentId | None = None
+    agent_name_source: FoundryTargetSource | None = None
+    account_resource_id: str | None = None
+    latest_agent_version: Annotated[str | None, StringConstraints(min_length=1, max_length=64)] = None
+    deployment_ready: bool = False
+    detail: str | None = None
+
+    @field_validator("project_endpoint")
+    @classmethod
+    def _validate_project_endpoint_field(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _validate_project_endpoint(value, field="project_endpoint")
+
+    @field_validator("account_resource_id")
+    @classmethod
+    def _validate_account_resource_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _validate_resource_id(value, "account_resource_id")
+
+    @model_validator(mode="after")
+    def _validate_target(self) -> Self:
+        if self.project_endpoint is None:
+            if self.project_endpoint_source is not None:
+                raise BootstrapConfigError("project_endpoint_source requires project_endpoint")
+        elif self.project_endpoint_source is None:
+            raise BootstrapConfigError("project_endpoint requires project_endpoint_source")
+        if self.agent_name is None:
+            if self.agent_name_source is not None:
+                raise BootstrapConfigError("agent_name_source requires agent_name")
+        elif self.agent_name_source is None:
+            raise BootstrapConfigError("agent_name requires agent_name_source")
+        if self.state == "blocked":
+            if self.deployment_ready:
+                raise BootstrapConfigError("blocked foundry targets cannot be deployment ready")
+            if not self.detail:
+                raise BootstrapConfigError("blocked foundry targets require detail")
+            return self
+        if self.project_endpoint is None or self.agent_name is None:
+            raise BootstrapConfigError("non-blocked foundry targets require project_endpoint and agent_name")
+        return self
+
+
+def _validate_reviewed_target_matches_project(
+    target: ReviewedFoundryTarget | None,
+    project: FoundryProjectSettings,
+) -> None:
+    if target is None:
+        return
+    if (
+        target.project_endpoint is not None
+        and target.project_endpoint != project.project_endpoint
+    ):
+        raise BootstrapConfigError(
+            "foundry_target project_endpoint must match foundry_project"
+        )
+    if target.agent_name is not None and target.agent_name != project.agent_name:
+        raise BootstrapConfigError(
+            "foundry_target agent_name must match foundry_project"
+        )
+    if (
+        target.account_resource_id is not None
+        and target.account_resource_id != project.account_resource_id
+    ):
+        raise BootstrapConfigError(
+            "foundry_target account_resource_id must match foundry_project"
+        )
+    if (
+        target.latest_agent_version is not None
+        and project.expected_version is not None
+        and target.latest_agent_version != project.expected_version
+    ):
+        raise BootstrapConfigError(
+            "foundry_target latest_agent_version must match foundry_project expected_version"
+        )
+
+
 class DecisionPolicy(BootstrapDocument):
     minimum_aggregate_delta: float
     focused_cases_required: bool
@@ -380,6 +471,7 @@ class SelectedAgentProfile(BootstrapDocument):
     shared_source_relations: tuple[SharedSourceRelation, ...] = ()
     runtime: RuntimeProtocolSettings
     foundry_project: FoundryProjectSettings
+    foundry_target: ReviewedFoundryTarget | None = None
     baseline_model: str
     allowed_models: tuple[str, ...]
     min_candidates: int
@@ -404,6 +496,10 @@ class SelectedAgentProfile(BootstrapDocument):
             raise BootstrapConfigError('max_issue_evaluators must be between 1 and 8')
         if not self.hard_guardrails:
             raise BootstrapConfigError('hard_guardrails must not be empty')
+        _validate_reviewed_target_matches_project(
+            self.foundry_target,
+            self.foundry_project,
+        )
         return self
 
 
@@ -559,6 +655,7 @@ class BootstrapSidecar(FrozenModel):
     shared_source_relations: tuple[SharedSourceRelation, ...] = ()
     runtime: RuntimeProtocolSettings
     foundry_project: FoundryProjectSettings
+    foundry_target: ReviewedFoundryTarget | None = None
     baseline_model: str
     allowed_models: tuple[str, ...]
     min_candidates: int
@@ -634,6 +731,7 @@ class BootstrapSidecar(FrozenModel):
             shared_source_relations=profile.shared_source_relations,
             runtime=profile.runtime,
             foundry_project=profile.foundry_project,
+            foundry_target=profile.foundry_target,
             baseline_model=profile.baseline_model,
             allowed_models=profile.allowed_models,
             min_candidates=profile.min_candidates,
@@ -669,7 +767,41 @@ class BootstrapSidecar(FrozenModel):
             raise BootstrapConfigError('max_issue_evaluators must be between 1 and 8')
         if not self.hard_guardrails:
             raise BootstrapConfigError('hard_guardrails must not be empty')
+        _validate_reviewed_target_matches_project(
+            self.foundry_target,
+            self.foundry_project,
+        )
         return self
+
+    def with_reviewed_foundry_target(
+        self,
+        target: ReviewedFoundryTarget,
+    ) -> 'BootstrapSidecar':
+        project = self.foundry_project
+        if target.state != "blocked":
+            assert target.project_endpoint is not None
+            assert target.agent_name is not None
+            account_resource_id = target.account_resource_id
+            if account_resource_id is None:
+                if (
+                    target.project_endpoint != project.project_endpoint
+                    or target.agent_name != project.agent_name
+                ):
+                    raise BootstrapConfigError(
+                        "reviewed foundry target requires account_resource_id before it can replace the profile target"
+                    )
+                account_resource_id = project.account_resource_id
+            project = FoundryProjectSettings(
+                project_endpoint=target.project_endpoint,
+                account_resource_id=account_resource_id,
+                agent_name=target.agent_name,
+                expected_version=target.latest_agent_version,
+                model_deployment_aliases=project.model_deployment_aliases,
+            )
+        payload = self.model_dump(mode="json")
+        payload["foundry_project"] = project.model_dump(mode="json")
+        payload["foundry_target"] = target.model_dump(mode="json")
+        return BootstrapSidecar.model_validate(payload)
 
     @property
     def default_evaluator_bundle(self) -> DefaultEvaluatorBundle | None:

@@ -231,17 +231,55 @@ def test_connection_compensates_github_after_azure_failure(tmp_path: Path) -> No
 
     receipt = manager.apply(plan, approval)
 
-    assert receipt.overall_state == "failed"
+    assert receipt.overall_state == "rolled_back"
     assert [state.state for state in receipt.phase_states] == [
         "rolled_back",
-        "compensation_required",
+        "rolled_back",
     ]
     assert github.restored == [{"provider": "github", "phase_plan_hash": plan.phase_plan("github").plan.plan_hash}]
     assert [item.receipt_hash for item in github.rolled_back] == [
         receipt.phase_states[0].receipt_hash
     ]
-    assert azure.rolled_back == []
-    assert receipt.phase_states[1].compensation_required_actions == ("azure-fic",)
+    assert azure.restored == [
+        {
+            "provider": "azure",
+            "phase_plan_hash": plan.phase_plan("azure").plan.plan_hash,
+        }
+    ]
+    assert len(azure.rolled_back) == 1
+
+
+def test_connection_export_failure_compensates_instead_of_succeeding(
+    tmp_path: Path,
+) -> None:
+    class _ExportFailureDriver(_Driver):
+        def export_provider_state(self, receipt: BootstrapReceipt):
+            self.exported.append(receipt)
+            raise RuntimeError("export failed")
+
+        def restore_provider_state(self, mapping):
+            assert mapping
+            super().restore_provider_state(mapping)
+
+    github = _ExportFailureDriver(
+        "github",
+        actions=(_action("github-env", "github"),),
+        live=(FingerprintRecord(label="github:live", sha256="1" * 64),),
+        created_actions=("github-env",),
+    )
+    azure = _Driver(
+        "azure",
+        actions=(_action("azure-fic", "azure"),),
+        live=(FingerprintRecord(label="azure:live", sha256="2" * 64),),
+    )
+    manager = _manager(tmp_path, github=github, azure=azure)
+    plan = _plan(manager)
+
+    receipt = manager.apply(plan, _approval(manager, plan))
+
+    assert receipt.overall_state == "rolled_back"
+    assert github.rolled_back
+    assert azure.applied == []
 
 
 def test_connection_rollback_verifies_children_in_reverse_order(tmp_path: Path) -> None:
@@ -390,3 +428,191 @@ def test_connection_resume_reuses_recorded_github_phase_and_finishes_azure(tmp_p
     assert github.applied == []
     assert len(azure.applied) == 1
     assert receipt.overall_state == "applied"
+
+
+def test_connection_retry_reconciles_checkpointed_github_mutation(
+    tmp_path: Path,
+) -> None:
+    class _CrashDriver(_Driver):
+        def __init__(self) -> None:
+            super().__init__(
+                "github",
+                actions=(_action("github-env", "github"),),
+                live=(
+                    FingerprintRecord(
+                        label="github:live",
+                        sha256="d" * 64,
+                    ),
+                ),
+                created_actions=("github-env",),
+                compensation_required_actions=("github-env",),
+            )
+            self.checkpoint = None
+            self.crash = True
+            self.mutated = False
+            self.resumed = False
+            self.reconciled = False
+
+        def set_checkpoint(self, checkpoint) -> None:
+            self.checkpoint = checkpoint
+
+        def live_fingerprints(self, _context):
+            if self.mutated:
+                return (
+                    FingerprintRecord(
+                        label="github:live",
+                        sha256="e" * 64,
+                    ),
+                )
+            return self.live
+
+        def restore_provider_state(self, mapping):
+            super().restore_provider_state(mapping)
+            self.resumed = True
+
+        def apply(self, phase_plan: BootstrapPlan) -> BootstrapReceipt:
+            if self.resumed:
+                self.mutated = False
+                self.reconciled = True
+                self.resumed = False
+            receipt = BootstrapReceipt.create(
+                operation_id=phase_plan.operation_id,
+                runtime_repository=phase_plan.runtime_repository,
+                runtime_commit=phase_plan.runtime_commit,
+                repository_identity=phase_plan.repository_identity,
+                plan_hash=phase_plan.plan_hash,
+                created_actions=("github-env",),
+                compensation_required_actions=("github-env",),
+            )
+            self.mutated = True
+            assert self.checkpoint is not None
+            self.checkpoint(
+                {
+                    "checkpoint": True,
+                    "receipt": receipt.model_dump(mode="json"),
+                    "provider_state": {"mutated": True},
+                }
+            )
+            if self.crash:
+                self.crash = False
+                raise SystemExit("simulated process exit")
+            return receipt
+
+        def export_provider_state(self, receipt: BootstrapReceipt):
+            return {"mutated": self.mutated}
+
+    github = _CrashDriver()
+    azure = _Driver(
+        "azure",
+        actions=(_action("azure-fic", "azure"),),
+        live=(FingerprintRecord(label="azure:live", sha256="f" * 64),),
+        adopted_actions=("azure-fic",),
+    )
+    manager = _manager(tmp_path, github=github, azure=azure)
+    plan = _plan(manager)
+    approval = _approval(manager, plan)
+
+    with pytest.raises(SystemExit, match="simulated process exit"):
+        manager.apply(plan, approval)
+
+    interrupted = read_connection_state(
+        REPOSITORY_ID,
+        "connection-op",
+        state_root=tmp_path / "state",
+    )
+    applying = next(
+        item for item in interrupted.phase_receipts if item.phase == "github"
+    )
+    assert applying.state == "applying"
+    assert applying.provider_state["checkpoint"] is True
+
+    receipt = manager.apply(plan, approval)
+
+    assert receipt.overall_state == "applied"
+    assert github.reconciled is True
+
+
+def test_connection_restart_keeps_complete_checkpoint_for_compensation(
+    tmp_path: Path,
+) -> None:
+    class _CompleteCheckpointDriver(_Driver):
+        def __init__(self, *, crash: bool) -> None:
+            super().__init__(
+                "github",
+                actions=(_action("github-env", "github"),),
+                live=(
+                    FingerprintRecord(
+                        label="github:live",
+                        sha256="a" * 64,
+                    ),
+                ),
+                created_actions=("github-env",),
+                compensation_required_actions=("github-env",),
+            )
+            self.checkpoint = None
+            self.crash = crash
+            self.mutated = not crash
+            self.resumed = False
+
+        def set_checkpoint(self, checkpoint) -> None:
+            self.checkpoint = checkpoint
+
+        def live_fingerprints(self, _context):
+            if self.mutated:
+                return (
+                    FingerprintRecord(
+                        label="github:live",
+                        sha256="b" * 64,
+                    ),
+                )
+            return self.live
+
+        def restore_provider_state(self, mapping):
+            super().restore_provider_state(mapping)
+            self.resumed = True
+
+        def apply(self, phase_plan: BootstrapPlan) -> BootstrapReceipt:
+            if self.resumed:
+                raise RuntimeError("resumed verification failed")
+            receipt = super().apply(phase_plan)
+            self.mutated = True
+            assert self.checkpoint is not None
+            self.checkpoint(
+                {
+                    "checkpoint": True,
+                    "complete": True,
+                    "receipt": receipt.model_dump(mode="json"),
+                    "provider_state": {"mutated": True},
+                }
+            )
+            if self.crash:
+                raise SystemExit("simulated process exit")
+            return receipt
+
+    azure = _Driver(
+        "azure",
+        actions=(_action("azure-fic", "azure"),),
+        live=(FingerprintRecord(label="azure:live", sha256="c" * 64),),
+        adopted_actions=("azure-fic",),
+    )
+    first_github = _CompleteCheckpointDriver(crash=True)
+    first = _manager(tmp_path, github=first_github, azure=azure)
+    plan = _plan(first)
+    approval = _approval(first, plan)
+
+    with pytest.raises(SystemExit, match="simulated process exit"):
+        first.apply(plan, approval)
+
+    resumed_github = _CompleteCheckpointDriver(crash=False)
+    restarted = _manager(
+        tmp_path,
+        github=resumed_github,
+        azure=azure,
+    )
+    receipt = restarted.apply(plan, approval)
+
+    assert receipt.overall_state == "rolled_back"
+    assert receipt.phase_states[0].state == "rolled_back"
+    assert resumed_github.rolled_back
+    assert resumed_github.rolled_back[0].created_actions == ("github-env",)
+    assert azure.applied == []

@@ -26,32 +26,29 @@ If you are new here, read these in order:
 2. [Issues and monitoring](issues-and-monitoring.md)
 3. [Evaluation gates](evaluation-gates.md)
 
-## The owner lifecycle in five words
+## What owners actually decide
 
-- **Discovered** - the tool found an agent-shaped directory and can tell
-  you what it thinks the agent root, source root, and package root are.
-- **Registered** - the repository now records that agent in
-  `.foundry-opt/registry.yaml`.
-- **Enabled** - that registered agent is selected for workflow use.
-  Enabled means "eligible to operate," not "ready to deploy."
-- **Verified** - the repository has approved evidence for deployment or
-  an activated default evaluation bundle that later runs can reuse.
-- **Deployable** - policy, binding, and verification gates all allow a
-  deployment workflow to publish the reviewed agent.
+- Which discovered folders are real agents?
+- Which should be ignored, registered disabled, or registered enabled?
+- What Foundry project endpoint and agent name should each enabled agent use?
+- Which Azure identity should GitHub OIDC use?
+- Should verification be configured now, deferred to an issue, replaced with
+  repository checks, or skipped?
+- Should the reviewed local commit be deployed now?
 
-An agent can be discovered but not registered, registered but disabled,
-or enabled but still not deployable.
+Registration and enablement do not require a dataset or evaluator bundle.
+Verification can be added later without repeating repository bootstrap.
 
 ## Quick path for a first repository
 
-1. Choose the agent or agents you actually want the optimizer to own.
-2. Apply repository bootstrap so the registry, sidecar, issue form, and
-   workflows exist in GitHub.
-3. Approve one combined GitHub-to-Azure connection plan.
-4. Optionally activate default verification so future issues can use the
-   repository's Foundry dataset and evaluator bundle.
-5. Start taking optimization issues and use the status summaries to see
-   what is blocked, verified, or deployable.
+1. Install and invoke `/foundry-bootstrap`.
+2. Select discovered agents and their enabled state.
+3. Confirm the Foundry endpoint and agent name for each enabled agent.
+4. Approve repository setup and the combined GitHub-to-Azure connection.
+5. Choose optional verification.
+6. Approve the exact local commit.
+7. Separately approve immediate deployment from that commit.
+8. Open the returned GitHub, Azure, and Foundry links.
 
 ## What good owner summaries sound like
 
@@ -69,16 +66,15 @@ or enabled but still not deployable.
 
 **Status summary**
 
-> Repository, GitHub, and Azure phases are applied. Evaluation
-> activation is still pending, so the agent is enabled for workflow use
-> but not yet verified as deployable.
+> Repository, GitHub, and Azure setup is complete. Evaluation is deferred, so
+> deployment will carry an explicit no-evidence warning instead of pretending
+> the agent was evaluated.
 
 **Final resource-link summary**
 
-> Review the GitHub environments and Actions run history in the
-> repository, the Azure identity and role assignments in the reviewed
-> subscription, and the Foundry project page for the agent, datasets,
-> evaluators, and evaluation runs created during onboarding.
+> Review the GitHub environments and Actions, the Azure identity and role
+> assignments, and each Foundry project and agent. Dataset and evaluator links
+> appear only when verification was configured.
 
 ## Advanced references
 

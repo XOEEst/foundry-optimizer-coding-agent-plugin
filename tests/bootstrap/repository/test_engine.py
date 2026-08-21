@@ -35,6 +35,28 @@ def test_first_apply_second_noop_creates_no_journal(tmp_path: Path) -> None:
     assert lock2.sidecar_paths == lock1.sidecar_paths
 
 
+def test_rollback_removes_first_managed_registry_and_lock(tmp_path: Path) -> None:
+    payload = _payload(
+        ".foundry-opt/registry.yaml",
+        "distribution: {}\n",
+        template_id="registry",
+    )
+    plan = plan_repository(
+        tmp_path,
+        operation_id="registry-first",
+        runtime_repository="https://github.com/example/runtime.git",
+        runtime_commit="a" * 40,
+        repository_identity="org/repo",
+        payloads=(payload,),
+    )
+    receipt, _ = apply_repository(tmp_path, plan)
+
+    rollback_repository(tmp_path, receipt)
+
+    assert not (tmp_path / ".foundry-opt" / "registry.yaml").exists()
+    assert not (tmp_path / LOCK_PATH).exists()
+
+
 def test_retired_custom_agent_relinquishes_ownership_and_preserves_file(
     tmp_path: Path,
 ) -> None:

@@ -41,6 +41,17 @@ def _repo(tmp_path: Path) -> Path:
     return repo
 
 
+def test_bootstrap_help_marks_legacy_tree_as_advanced_compatibility() -> None:
+    result = runner.invoke(app, ["bootstrap", "--help"])
+
+    assert result.exit_code == 0, result.stdout
+    normalized = " ".join(result.stdout.split())
+    assert "Advanced compatibility interface" in normalized
+    assert "/foundry-bootstrap" in normalized
+    for command in ("discover", "plan", "status", "apply", "review", "connect", "evaluation"):
+        assert command in result.stdout
+
+
 def _repository_root_repo(tmp_path: Path) -> Path:
     repo = tmp_path / "root-repo"
     (repo / ".foundry").mkdir(parents=True)

@@ -4,20 +4,23 @@ import hashlib
 import json
 import math
 import os
+import re
 import subprocess
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, TypeVar
+from typing import Literal, Protocol, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from foundry_opt.bootstrap.canonical import canonical_sha256
 from foundry_opt.bootstrap.contracts import BootstrapLock, RootRegistry
 from foundry_opt.bootstrap.workflow_integration import (
     RegistrySelection,
     resolve_registry_selection,
 )
+from foundry_opt.distribution import optimizer_skill_paths_match
 from foundry_opt.poc.auth import (
     AuthError,
     GitHubActionsOidcConfig,
@@ -30,6 +33,9 @@ from foundry_opt.poc.bootstrap import (
 )
 from foundry_opt.poc.config import (
     AgentMetadata,
+    EvaluationContract as ConfigEvaluationContract,
+    HostedRuntimeContract,
+    ModelDeploymentContract,
     RepositoryPolicy,
     SharedPin,
     load_agent_metadata,
@@ -69,7 +75,13 @@ from foundry_opt.poc.runtime import (
     load_deadline_seconds,
     select_oidc_principal,
 )
-from foundry_opt.poc.source import PackagedSource, package_git_source
+from foundry_opt.poc.source import (
+    PackagedSource,
+    SourcePackagingError,
+    fingerprint_git_root,
+    package_git_source,
+    read_git_file,
+)
 
 
 DEPLOYMENT_ROOT_ENV = "FOUNDRY_OPT_DEPLOY_ROOT"
@@ -80,10 +92,29 @@ RELEASE_COMMIT_METADATA_KEY = "foundry_opt_release_commit"
 REPOSITORY_METADATA_KEY = "foundry_opt_repository"
 SOURCE_ROOT_METADATA_KEY = "foundry_opt_source_root"
 SOURCE_TREE_METADATA_KEY = "foundry_opt_source_tree_sha256"
+SOURCE_FINGERPRINT_METADATA_KEY = "foundry_opt_source_fingerprint"
+PACKAGE_FINGERPRINT_METADATA_KEY = "foundry_opt_package_fingerprint"
+PROFILE_FINGERPRINT_METADATA_KEY = "foundry_opt_profile_fingerprint"
+REGISTRY_FINGERPRINT_METADATA_KEY = "foundry_opt_registry_fingerprint"
+TARGET_FINGERPRINT_METADATA_KEY = "foundry_opt_target_fingerprint"
+REPO_AGENT_ID_METADATA_KEY = "foundry_opt_repo_agent_id"
 _UNUSED_DEPLOYMENT_VERIFICATION_TOKEN = "deployment-verification-not-required"
+_MAX_GITHUB_EVENT_BYTES = 2 * 1024 * 1024
 
 _COMMIT_PATTERN = r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
+_RECONCILIATION_HASH_KEYS = frozenset(
+    {
+        SOURCE_FINGERPRINT_METADATA_KEY,
+        PACKAGE_FINGERPRINT_METADATA_KEY,
+        PROFILE_FINGERPRINT_METADATA_KEY,
+        REGISTRY_FINGERPRINT_METADATA_KEY,
+        TARGET_FINGERPRINT_METADATA_KEY,
+    }
+)
+_RECONCILIATION_KEYS = _RECONCILIATION_HASH_KEYS | {
+    REPO_AGENT_ID_METADATA_KEY
+}
 
 
 class _FrozenModel(BaseModel):
@@ -171,6 +202,7 @@ class DeploymentReceipt(_FrozenModel):
     source_root: str
     source_tree_sha256: str = Field(pattern=_SHA256_PATTERN)
     source_zip_sha256: str = Field(pattern=_SHA256_PATTERN)
+    reconciliation_metadata: Mapping[str, str] = Field(default_factory=dict)
     evaluation_link: str | None = None
     guardrails: tuple[DeploymentGuardrail, ...] = ()
     verification: DeploymentVerification
@@ -197,6 +229,24 @@ class DeploymentVerificationReceipt(_FrozenModel):
     route_mutated: Literal[False] = False
     repo_agent_id: str | None = Field(default=None, min_length=1, max_length=256)
     config_path: str | None = Field(default=None, min_length=1, max_length=512)
+
+
+class DeploymentAgentMetadata(_FrozenModel):
+    project_endpoint: str
+    agent_name: str
+    hosted_runtime: HostedRuntimeContract
+    model_deployments: tuple[ModelDeploymentContract, ...]
+    development_evaluation: ConfigEvaluationContract
+    validating_evaluation: ConfigEvaluationContract
+
+
+class DeploymentAgentMetadataProtocol(Protocol):
+    project_endpoint: str
+    agent_name: str
+    hosted_runtime: HostedRuntimeContract
+    model_deployments: tuple[ModelDeploymentContract, ...]
+    development_evaluation: ConfigEvaluationContract
+    validating_evaluation: ConfigEvaluationContract
 
 
 class DeploymentSettings(_FrozenModel):
@@ -230,6 +280,7 @@ class RegisteredDeploymentSettings:
     release_commit: str
     artifact_root: Path
     deadline_seconds: float
+    reconciliation_metadata: Mapping[str, str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,10 +304,11 @@ class DeploymentService:
         *,
         client: FoundryPocClient,
         policy: RepositoryPolicy,
-        metadata: AgentMetadata,
+        metadata: DeploymentAgentMetadataProtocol,
         deadline_seconds: float,
         monotonic: Callable[[], float] = time.monotonic,
         freshness_check: Callable[[str], None] | None = None,
+        allow_missing_target: bool = False,
     ) -> None:
         self._client = client
         self._policy = policy
@@ -267,6 +319,7 @@ class DeploymentService:
         )
         self._monotonic = monotonic
         self._freshness_check = freshness_check
+        self._allow_missing_target = allow_missing_target
 
     def preflight(
         self,
@@ -276,10 +329,7 @@ class DeploymentService:
         deployment_environment: str,
         deployment_client_id: str,
     ) -> DeploymentPreflight:
-        route = self._client.require_service_managed_latest(
-            self._metadata.agent_name,
-            deadline_monotonic=self._deadline(),
-        )
+        route = self._route_before()
         return DeploymentPreflight(
             repository=repository,
             release_commit=release_commit,
@@ -299,7 +349,11 @@ class DeploymentService:
         packaged: PackagedSource,
         repository_root: Path | None = None,
         verification: DeploymentVerification | None = None,
+        reconciliation_metadata: Mapping[str, str] | None = None,
     ) -> DeploymentReceipt:
+        normalized_reconciliation = _normalize_reconciliation_metadata(
+            reconciliation_metadata
+        )
         verified = self._verify(
             repository=repository,
             release_commit=release_commit,
@@ -312,6 +366,7 @@ class DeploymentService:
         matching_latest = self._matching_latest_version(
             route=verified.route_before,
             packaged=packaged,
+            reconciliation_metadata=normalized_reconciliation,
         )
         if matching_latest is not None:
             return self._receipt(
@@ -322,12 +377,14 @@ class DeploymentService:
                 reference=matching_latest,
                 reconciled=True,
                 verification=verified.verification,
+                reconciliation_metadata=normalized_reconciliation,
             )
         provenance = {
             RELEASE_COMMIT_METADATA_KEY: release_commit,
             REPOSITORY_METADATA_KEY: repository,
             SOURCE_ROOT_METADATA_KEY: packaged.source_root,
             SOURCE_TREE_METADATA_KEY: packaged.tree_sha256,
+            **normalized_reconciliation,
         }
         published = self._client.create_regular_version(
             self._metadata.agent_name,
@@ -379,6 +436,7 @@ class DeploymentService:
             reference=active,
             reconciled=published.reconciled,
             verification=verified.verification,
+            reconciliation_metadata=normalized_reconciliation,
         )
 
     def verify(
@@ -426,10 +484,7 @@ class DeploymentService:
             raise DeploymentError(
                 "packaged source root does not match repository policy"
             )
-        route_before = self._client.require_service_managed_latest(
-            self._metadata.agent_name,
-            deadline_monotonic=self._deadline(),
-        )
+        route_before = self._route_before()
         operation_id = deployment_operation_id(
             repository=repository,
             agent_name=self._metadata.agent_name,
@@ -455,10 +510,7 @@ class DeploymentService:
                 verification=requested_verification,
             )
         )
-        route_after_verification = self._client.require_service_managed_latest(
-            self._metadata.agent_name,
-            deadline_monotonic=self._deadline(),
-        )
+        route_after_verification = self._route_before()
         if route_after_verification.latest_version != route_before.latest_version:
             raise DeploymentError(route_change_detail)
         return _VerifiedDeployment(
@@ -467,6 +519,33 @@ class DeploymentService:
             operation_id=operation_id,
             verification=completed_verification,
         )
+
+    def _route_before(self) -> RouteFingerprint:
+        try:
+            return self._client.require_service_managed_latest(
+                self._metadata.agent_name,
+                deadline_monotonic=self._deadline(),
+            )
+        except ServiceError as error:
+            if not self._allow_missing_target or error.status_code != 404:
+                raise
+            payload = {
+                "agent_name": self._metadata.agent_name,
+                "state": "missing",
+            }
+            return RouteFingerprint(
+                agent_name=self._metadata.agent_name,
+                latest_version=None,
+                selector=None,
+                endpoint_configuration=None,
+                sha256=hashlib.sha256(
+                    json.dumps(
+                        payload,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
+            )
 
     def _default_foundry_verification(self) -> DeploymentVerification:
         contract = self._metadata.development_evaluation
@@ -596,6 +675,7 @@ class DeploymentService:
         *,
         route: RouteFingerprint,
         packaged: PackagedSource,
+        reconciliation_metadata: Mapping[str, str],
     ) -> RegularVersionReference | None:
         if route.latest_version is None:
             return None
@@ -608,6 +688,11 @@ class DeploymentService:
         except ContractError:
             return None
         if reference.code_sha256 != packaged.zip_sha256:
+            return None
+        if any(
+            reference.metadata.get(key) != value
+            for key, value in reconciliation_metadata.items()
+        ):
             return None
         downloaded = self._client.download_regular_version_code(
             reference,
@@ -633,6 +718,7 @@ class DeploymentService:
         reference: RegularVersionReference,
         reconciled: bool,
         verification: DeploymentVerification,
+        reconciliation_metadata: Mapping[str, str],
     ) -> DeploymentReceipt:
         return DeploymentReceipt(
             repository=repository,
@@ -646,6 +732,7 @@ class DeploymentService:
             source_root=packaged.source_root,
             source_tree_sha256=packaged.tree_sha256,
             source_zip_sha256=packaged.zip_sha256,
+            reconciliation_metadata=dict(reconciliation_metadata),
             evaluation_link=verification.evaluation_link,
             guardrails=verification.guardrails,
             verification=verification,
@@ -992,7 +1079,21 @@ def _load_registered_settings(
         )
     root = _repository_root(repository)
     release_commit = _resolve_release_commit(root, exact_source)
-    selection = resolve_registry_selection(root, repo_agent_id=repo_agent_id)
+    live_selection = resolve_registry_selection(root, repo_agent_id=repo_agent_id)
+    try:
+        selection = resolve_registry_selection(
+            root,
+            repo_agent_id=repo_agent_id,
+            content_reader=lambda path: read_git_file(
+                root,
+                commit=release_commit,
+                relative_path=path,
+            ),
+        )
+    except SourcePackagingError as error:
+        raise RuntimeIntegrationError(
+            "registered deployment could not read the exact source contract"
+        ) from error
     sidecar = selection.sidecar
     if not sidecar.deployment.enabled:
         raise RuntimeIntegrationError("selected registered agent deployment is disabled")
@@ -1015,48 +1116,58 @@ def _load_registered_settings(
     registry_path = root / ".foundry-opt" / "registry.yaml"
     sidecar_path = root / selection.config_path
     lock_path = root / ".foundry-opt" / "bootstrap.lock.json"
-    registry_bytes = registry_path.read_bytes()
-    sidecar_bytes = sidecar_path.read_bytes()
+    live_registry_bytes = registry_path.read_bytes()
+    live_sidecar_bytes = sidecar_path.read_bytes()
     try:
-        lock_bytes = lock_path.read_bytes()
+        live_lock_bytes = lock_path.read_bytes()
     except OSError as error:
         raise RuntimeIntegrationError(
             "registered deployment managed lock is missing"
         ) from error
-    if hashlib.sha256(registry_bytes).hexdigest() != selection.registry_hash:
+    if (
+        live_selection.config_path != selection.config_path
+        or hashlib.sha256(live_registry_bytes).hexdigest()
+        != live_selection.registry_hash
+    ):
         raise RuntimeIntegrationError(
             "registered deployment registry changed during selection"
         )
-    if hashlib.sha256(sidecar_bytes).hexdigest() != selection.sidecar_hash:
+    if (
+        hashlib.sha256(live_sidecar_bytes).hexdigest()
+        != live_selection.sidecar_hash
+    ):
         raise RuntimeIntegrationError(
             "registered deployment sidecar changed during selection"
         )
-    if _normalized_text_bytes(registry_bytes) != _normalized_text_bytes(
-        _git_bytes(
-            root,
-            "show",
-            f"{release_commit}:.foundry-opt/registry.yaml",
-        )
+    registry_bytes = read_git_file(
+        root,
+        commit=release_commit,
+        relative_path=".foundry-opt/registry.yaml",
+    )
+    sidecar_bytes = read_git_file(
+        root,
+        commit=release_commit,
+        relative_path=selection.config_path,
+    )
+    lock_bytes = read_git_file(
+        root,
+        commit=release_commit,
+        relative_path=".foundry-opt/bootstrap.lock.json",
+    )
+    if _normalized_text_bytes(live_registry_bytes) != _normalized_text_bytes(
+        registry_bytes
     ):
         raise RuntimeIntegrationError(
             "registered deployment registry does not match the exact source commit"
         )
-    if _normalized_text_bytes(sidecar_bytes) != _normalized_text_bytes(
-        _git_bytes(
-            root,
-            "show",
-            f"{release_commit}:{selection.config_path}",
-        )
+    if _normalized_text_bytes(live_sidecar_bytes) != _normalized_text_bytes(
+        sidecar_bytes
     ):
         raise RuntimeIntegrationError(
             "registered deployment sidecar does not match the exact source commit"
         )
-    if _normalized_text_bytes(lock_bytes) != _normalized_text_bytes(
-        _git_bytes(
-            root,
-            "show",
-            f"{release_commit}:.foundry-opt/bootstrap.lock.json",
-        )
+    if _normalized_text_bytes(live_lock_bytes) != _normalized_text_bytes(
+        lock_bytes
     ):
         raise RuntimeIntegrationError(
             "registered deployment managed lock does not match the exact source commit"
@@ -1076,12 +1187,24 @@ def _load_registered_settings(
             "registered deployment lock and distribution pin do not match"
         )
     managed = {entry.path: entry for entry in lock.managed_files}
-    for path, content in (
-        (".foundry-opt/registry.yaml", registry_bytes),
-        (selection.config_path, sidecar_bytes),
+    for path, live_content, committed_content in (
+        (
+            ".foundry-opt/registry.yaml",
+            live_registry_bytes,
+            registry_bytes,
+        ),
+        (
+            selection.config_path,
+            live_sidecar_bytes,
+            sidecar_bytes,
+        ),
     ):
         entry = managed.get(path)
-        if entry is None or hashlib.sha256(content).hexdigest() != entry.applied_sha256:
+        accepted_hashes = {
+            hashlib.sha256(live_content).hexdigest(),
+            hashlib.sha256(committed_content).hexdigest(),
+        }
+        if entry is None or entry.applied_sha256 not in accepted_hashes:
             raise RuntimeIntegrationError(
                 f"registered deployment managed digest does not match: {path}"
             )
@@ -1119,8 +1242,14 @@ def _load_registered_settings(
         raise RuntimeIntegrationError(
             "GITHUB_REPOSITORY_ID must be a positive integer"
         )
-    default_branch = _registered_branch_context(
+    default_branch = _registered_default_branch(
         env,
+        repository_identity=repository_identity,
+        repository_id=repository_id,
+    )
+    _validate_registered_ref(
+        env,
+        default_branch=default_branch,
         require_exact_branch_ref=require_exact_branch_ref,
     )
 
@@ -1148,7 +1277,7 @@ def _load_registered_settings(
         expected_subject=expected_subject,
         expected_repository_id=str(repository_id),
     )
-    policy = _registered_repository_policy(selection)
+    policy = build_repository_policy_from_registry_selection(selection)
     metadata = _registered_agent_metadata(
         selection,
         repository_identity=repository_identity,
@@ -1178,25 +1307,77 @@ def _load_registered_settings(
             environment=env,
             deadline_seconds=deadline_seconds,
         ),
+        reconciliation_metadata=_registered_reconciliation_metadata(
+            root,
+            selection,
+            release_commit=release_commit,
+        ),
     )
 
 
-def _registered_branch_context(
+def _registered_default_branch(
     environment: Mapping[str, str],
     *,
-    require_exact_branch_ref: bool,
+    repository_identity: str,
+    repository_id: int,
 ) -> str:
-    if require_exact_branch_ref:
-        branch = _required_environment_value(environment, "GITHUB_REF_NAME")
-        if environment.get("GITHUB_REF") != f"refs/heads/{branch}":
-            raise RuntimeIntegrationError(
-                "registered deployment requires an exact branch push ref"
-            )
-        return branch
-    base_branch = environment.get("GITHUB_BASE_REF", "").strip()
-    if base_branch:
-        return base_branch
-    return _required_environment_value(environment, "GITHUB_REF_NAME")
+    event_path = _required_environment_value(environment, "GITHUB_EVENT_PATH")
+    try:
+        data = Path(event_path).read_bytes()
+    except OSError as error:
+        raise RuntimeIntegrationError(
+            "GitHub event payload could not be read"
+        ) from error
+    if len(data) > _MAX_GITHUB_EVENT_BYTES:
+        raise RuntimeIntegrationError("GitHub event payload exceeds the size limit")
+    try:
+        payload = json.loads(data)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeIntegrationError("GitHub event payload is invalid") from error
+    repository = payload.get("repository") if isinstance(payload, Mapping) else None
+    if not isinstance(repository, Mapping):
+        raise RuntimeIntegrationError(
+            "GitHub event payload is missing repository metadata"
+        )
+    full_name = repository.get("full_name")
+    if full_name is not None and str(full_name) != repository_identity:
+        raise RuntimeIntegrationError(
+            "GitHub event repository does not match GITHUB_REPOSITORY"
+        )
+    event_repository_id = repository.get("id")
+    if event_repository_id is not None and str(event_repository_id) != str(
+        repository_id
+    ):
+        raise RuntimeIntegrationError(
+            "GitHub event repository id does not match GITHUB_REPOSITORY_ID"
+        )
+    default_branch = repository.get("default_branch")
+    if (
+        not isinstance(default_branch, str)
+        or not default_branch.strip()
+        or any(ord(character) < 32 for character in default_branch)
+    ):
+        raise RuntimeIntegrationError(
+            "GitHub event repository default branch is invalid"
+        )
+    return default_branch
+
+
+def _validate_registered_ref(
+    environment: Mapping[str, str],
+    *,
+    default_branch: str,
+    require_exact_branch_ref: bool,
+) -> None:
+    if not require_exact_branch_ref:
+        return
+    if (
+        environment.get("GITHUB_REF") != f"refs/heads/{default_branch}"
+        or environment.get("GITHUB_REF_NAME") != default_branch
+    ):
+        raise RuntimeIntegrationError(
+            "registered deployment requires an exact branch push ref for the repository default branch"
+        )
 
 
 _RegisteredOperation = TypeVar("_RegisteredOperation")
@@ -1324,6 +1505,7 @@ def publish_registered_deployment(
             packaged=packaged,
             repository_root=settings.repository_root,
             verification=settings.verification,
+            reconciliation_metadata=settings.reconciliation_metadata,
         ),
     )
 
@@ -1337,6 +1519,76 @@ def deployment_operation_id(
     subject = "\n".join((repository, agent_name, release_commit))
     digest = hashlib.sha256(subject.encode("utf-8")).hexdigest()[:32]
     return f"deploy-{digest}"
+
+
+def _normalize_reconciliation_metadata(
+    value: Mapping[str, str] | None,
+) -> dict[str, str]:
+    if value is None:
+        return {}
+    normalized = {str(key): str(item) for key, item in value.items()}
+    if set(normalized) != _RECONCILIATION_KEYS:
+        raise DeploymentError(
+            "deployment reconciliation metadata must contain the complete fingerprint set"
+        )
+    for key in _RECONCILIATION_HASH_KEYS:
+        if re.fullmatch(_SHA256_PATTERN, normalized[key]) is None:
+            raise DeploymentError(
+                f"deployment reconciliation metadata is invalid for {key}"
+            )
+    repo_agent_id = normalized[REPO_AGENT_ID_METADATA_KEY]
+    if (
+        not repo_agent_id
+        or len(repo_agent_id) > 128
+        or any(ord(character) < 32 for character in repo_agent_id)
+    ):
+        raise DeploymentError(
+            "deployment reconciliation metadata has an invalid repoAgentId"
+        )
+    return normalized
+
+
+def _registered_reconciliation_metadata(
+    repository_root: Path,
+    selection: RegistrySelection,
+    *,
+    release_commit: str,
+) -> dict[str, str]:
+    try:
+        source_fingerprint = fingerprint_git_root(
+            repository_root,
+            commit=release_commit,
+            source_root=selection.sidecar.source_root,
+        )
+        package_fingerprint = fingerprint_git_root(
+            repository_root,
+            commit=release_commit,
+            source_root=selection.sidecar.package_root,
+        )
+    except SourcePackagingError as error:
+        raise RuntimeIntegrationError(
+            "registered deployment could not resolve exact source/package fingerprints"
+        ) from error
+    if selection.sidecar.foundry_target is not None:
+        target_payload: object = selection.sidecar.foundry_target.model_dump(
+            mode="json"
+        )
+    else:
+        target_payload = {
+            "project_endpoint": selection.sidecar.foundry_project.project_endpoint,
+            "account_resource_id": selection.sidecar.foundry_project.account_resource_id,
+            "agent_name": selection.sidecar.foundry_project.agent_name,
+        }
+    return _normalize_reconciliation_metadata(
+        {
+            REPO_AGENT_ID_METADATA_KEY: selection.repo_agent_id,
+            SOURCE_FINGERPRINT_METADATA_KEY: source_fingerprint,
+            PACKAGE_FINGERPRINT_METADATA_KEY: package_fingerprint,
+            PROFILE_FINGERPRINT_METADATA_KEY: selection.sidecar_hash,
+            REGISTRY_FINGERPRINT_METADATA_KEY: selection.registry_hash,
+            TARGET_FINGERPRINT_METADATA_KEY: canonical_sha256(target_payload),
+        }
+    )
 
 
 def _metric_by_name(evidence: EvaluationEvidence, name: str) -> object:
@@ -1362,7 +1614,7 @@ def deployment_freshness_check(
             "GitHub token is required to verify the default branch before publication"
         )
 
-    def check(release_commit: str) -> None:
+    def query(path: str, jq: str) -> str:
         command_environment = os.environ.copy()
         command_environment.update(env)
         command_environment["GH_TOKEN"] = token
@@ -1371,9 +1623,9 @@ def deployment_freshness_check(
                 [
                     "gh",
                     "api",
-                    f"repos/{repository}/commits/{branch}",
+                    path,
                     "--jq",
-                    ".sha",
+                    jq,
                 ],
                 check=False,
                 capture_output=True,
@@ -1394,7 +1646,21 @@ def deployment_freshness_check(
             raise RuntimeIntegrationError(
                 "GitHub default-branch verification failed"
             )
-        current = completed.stdout.strip()
+        return completed.stdout.strip()
+
+    def check(release_commit: str) -> None:
+        current_default = query(
+            f"repos/{repository}",
+            ".default_branch",
+        )
+        if current_default != branch:
+            raise RuntimeIntegrationError(
+                "GitHub repository default branch changed before publication"
+            )
+        current = query(
+            f"repos/{repository}/commits/{current_default}",
+            ".sha",
+        )
         if not _valid_commit(current):
             raise RuntimeIntegrationError(
                 "GitHub default-branch verification returned an invalid commit"
@@ -1676,7 +1942,7 @@ def _optional_text(value: object) -> str | None:
     return text or None
 
 
-def _registered_repository_policy(
+def build_repository_policy_from_registry_selection(
     selection: RegistrySelection,
 ) -> RepositoryPolicy:
     sidecar = selection.sidecar
@@ -1717,6 +1983,85 @@ def _registered_repository_policy(
     )
 
 
+def build_deployment_agent_metadata(
+    selection: RegistrySelection,
+    *,
+    verification: DeploymentVerification,
+) -> DeploymentAgentMetadata:
+    sidecar = selection.sidecar
+    if verification.mode == "foundry_evaluation":
+        development_definition = sidecar.development_definition
+        validating_definition = sidecar.validating_definition
+        development_dataset = sidecar.development_dataset
+        validating_dataset = sidecar.validating_dataset
+        if (
+            development_definition is None
+            or validating_definition is None
+            or development_dataset is None
+            or validating_dataset is None
+        ):
+            raise RuntimeIntegrationError(
+                "deployment metadata requires an activated repository default evaluator bundle"
+            )
+        evaluator_ids = verification.evaluator_ids
+        development_evaluation_id = development_definition.definition_id
+        development_dataset_id = development_dataset.dataset_id
+        validating_evaluation_id = validating_definition.definition_id
+        validating_dataset_id = validating_dataset.dataset_id
+    else:
+        evaluator_ids = ()
+        development_evaluation_id = _UNUSED_DEPLOYMENT_VERIFICATION_TOKEN
+        development_dataset_id = _UNUSED_DEPLOYMENT_VERIFICATION_TOKEN
+        validating_evaluation_id = _UNUSED_DEPLOYMENT_VERIFICATION_TOKEN
+        validating_dataset_id = _UNUSED_DEPLOYMENT_VERIFICATION_TOKEN
+    return DeploymentAgentMetadata.model_validate(
+        {
+            "project_endpoint": sidecar.foundry_project.project_endpoint,
+            "agent_name": sidecar.foundry_project.agent_name,
+            "hosted_runtime": {
+                "kind": "hosted",
+                "runtime": sidecar.runtime.runtime,
+                "entry_point": sidecar.runtime.entrypoint,
+                "dependency_resolution": sidecar.runtime.dependency_resolution,
+                "protocol_name": sidecar.runtime.protocol_name,
+                "protocol_version": sidecar.runtime.protocol_version,
+                "cpu": sidecar.runtime.cpu or "1",
+                "memory": sidecar.runtime.memory or "2Gi",
+                "model_environment_variable": (
+                    sidecar.runtime.model_environment_variable
+                    or "AZURE_AI_MODEL_DEPLOYMENT_NAME"
+                ),
+            },
+            "model_deployments": (
+                {
+                    "alias": sidecar.baseline_model,
+                    "deployment_name": sidecar.baseline_model,
+                    "model_format": "OpenAI",
+                    "model_name": sidecar.baseline_model,
+                    "model_version": "pinned",
+                    "required_capabilities": (
+                        {"name": "responses", "enabled": True},
+                    ),
+                },
+            ),
+            "development_evaluation": {
+                "name": "development",
+                "split": "development",
+                "resolved_evaluation_id": development_evaluation_id,
+                "dataset_id": development_dataset_id,
+                "custom_evaluator_ids": evaluator_ids,
+            },
+            "validating_evaluation": {
+                "name": "validating",
+                "split": "validating",
+                "resolved_evaluation_id": validating_evaluation_id,
+                "dataset_id": validating_dataset_id,
+                "custom_evaluator_ids": evaluator_ids,
+            },
+        }
+    )
+
+
 def _registered_agent_metadata(
     selection: RegistrySelection,
     *,
@@ -1731,31 +2076,10 @@ def _registered_agent_metadata(
     verification: DeploymentVerification,
 ) -> AgentMetadata:
     sidecar = selection.sidecar
-    if verification.mode == "foundry_evaluation":
-        development_definition = sidecar.development_definition
-        validating_definition = sidecar.validating_definition
-        development_dataset = sidecar.development_dataset
-        validating_dataset = sidecar.validating_dataset
-        if (
-            development_definition is None
-            or validating_definition is None
-            or development_dataset is None
-            or validating_dataset is None
-        ):
-            raise RuntimeIntegrationError(
-                "registered agent metadata requires an activated repository default evaluator bundle"
-            )
-        evaluator_ids = verification.evaluator_ids
-        development_evaluation_id = development_definition.definition_id
-        development_dataset_id = development_dataset.dataset_id
-        validating_evaluation_id = validating_definition.definition_id
-        validating_dataset_id = validating_dataset.dataset_id
-    else:
-        evaluator_ids = ()
-        development_evaluation_id = _UNUSED_DEPLOYMENT_VERIFICATION_TOKEN
-        development_dataset_id = _UNUSED_DEPLOYMENT_VERIFICATION_TOKEN
-        validating_evaluation_id = _UNUSED_DEPLOYMENT_VERIFICATION_TOKEN
-        validating_dataset_id = _UNUSED_DEPLOYMENT_VERIFICATION_TOKEN
+    deployment_metadata = build_deployment_agent_metadata(
+        selection,
+        verification=verification,
+    )
     deployment_environment = sidecar.deployment.environment
     subject = f"{oidc_subject_prefix}:environment:{deployment_environment}"
     return AgentMetadata.model_validate(
@@ -1771,20 +2095,9 @@ def _registered_agent_metadata(
             "agent_name": sidecar.foundry_project.agent_name,
             "authentication_method": "oidc",
             "static_credentials_allowed": False,
-            "hosted_runtime": {
-                "kind": "hosted",
-                "runtime": sidecar.runtime.runtime,
-                "entry_point": sidecar.runtime.entrypoint,
-                "dependency_resolution": sidecar.runtime.dependency_resolution,
-                "protocol_name": sidecar.runtime.protocol_name,
-                "protocol_version": sidecar.runtime.protocol_version,
-                "cpu": sidecar.runtime.cpu or "1",
-                "memory": sidecar.runtime.memory or "2Gi",
-                "model_environment_variable": (
-                    sidecar.runtime.model_environment_variable
-                    or "AZURE_AI_MODEL_DEPLOYMENT_NAME"
-                ),
-            },
+            "hosted_runtime": deployment_metadata.hosted_runtime.model_dump(
+                mode="json"
+            ),
             "oidc": {
                 "issuer": "https://token.actions.githubusercontent.com",
                 "audience": "api://AzureADTokenExchange",
@@ -1816,32 +2129,16 @@ def _registered_agent_metadata(
                     },
                 ),
             },
-            "model_deployments": (
-                {
-                    "alias": sidecar.baseline_model,
-                    "deployment_name": sidecar.baseline_model,
-                    "model_format": "OpenAI",
-                    "model_name": sidecar.baseline_model,
-                    "model_version": "pinned",
-                    "required_capabilities": (
-                        {"name": "responses", "enabled": True},
-                    ),
-                },
+            "model_deployments": [
+                item.model_dump(mode="json")
+                for item in deployment_metadata.model_deployments
+            ],
+            "development_evaluation": deployment_metadata.development_evaluation.model_dump(
+                mode="json"
             ),
-            "development_evaluation": {
-                "name": "development",
-                "split": "development",
-                "resolved_evaluation_id": development_evaluation_id,
-                "dataset_id": development_dataset_id,
-                "custom_evaluator_ids": evaluator_ids,
-            },
-            "validating_evaluation": {
-                "name": "validating",
-                "split": "validating",
-                "resolved_evaluation_id": validating_evaluation_id,
-                "dataset_id": validating_dataset_id,
-                "custom_evaluator_ids": evaluator_ids,
-            },
+            "validating_evaluation": deployment_metadata.validating_evaluation.model_dump(
+                mode="json"
+            ),
         }
     )
 
@@ -1994,7 +2291,6 @@ def _validate_bootstrap_receipt(
         (receipt.repository, pin.repository_url, "repository"),
         (receipt.commit, pin.commit, "commit"),
         (receipt.package_path, pin.package_path, "package_path"),
-        (receipt.skill_path, pin.skill_path, "skill_path"),
         (receipt.lock_sha256, pin.uv_lock_sha256, "lock_sha256"),
     )
     for actual, trusted, field in expected:
@@ -2002,6 +2298,10 @@ def _validate_bootstrap_receipt(
             raise RuntimeIntegrationError(
                 f"bootstrap receipt {field} does not match the shared pin"
             )
+    if not optimizer_skill_paths_match(receipt.skill_path, pin.skill_path):
+        raise RuntimeIntegrationError(
+            "bootstrap receipt skill_path does not match the shared pin"
+        )
 
 
 def _validate_repository_environment(

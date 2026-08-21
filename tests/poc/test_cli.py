@@ -461,6 +461,7 @@ class ControllerHarness:
             None if check_results is None else FakeCheckRunner(results=check_results)
         )
         self.settings_seen: list[RuntimeSettings] = []
+        self.verification_resolutions: list[VerificationResolution | None] = []
 
     def builder(
         self,
@@ -469,9 +470,11 @@ class ControllerHarness:
         identity: JobIdentity,
         paths: RuntimePaths,
         settings: RuntimeSettings,
+        verification_resolution: VerificationResolution | None = None,
         **_: Any,
     ) -> OptimizeJobController:
         self.settings_seen.append(settings)
+        self.verification_resolutions.append(verification_resolution)
         workspace = CandidateWorkspace(
             repository,
             paths.workspace_root,
@@ -589,6 +592,7 @@ def _issue_body(
     candidate_budget: int,
     model_lines: tuple[str, ...] = (),
     editable_scope_lines: tuple[str, ...] = (),
+    primary_metric: str | None = None,
     issue_evaluator_lines: tuple[str, ...] = (),
     verification_dataset: str | None = None,
     verification_check_lines: tuple[str, ...] = (),
@@ -624,6 +628,10 @@ Preserve safety.
 ### Optional narrower model set
 
 {models}
+
+### Optional primary metric
+
+{primary_metric or "_No response_"}
 
 ### Optional exact evaluator IDs
 
@@ -845,6 +853,107 @@ def test_job_start_accepts_trusted_write_authority_for_issue_foundry_overrides(
         "issue_dataset",
         "issue_evaluators",
     ]
+
+
+def test_job_start_accepts_authorized_primary_metric_and_reuses_default_datasets(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repository, _, environment = _create_runtime_repository(tmp_path)
+    event = _write_issue_event(
+        tmp_path,
+        body=_issue_body(
+            candidate_budget=1,
+            model_lines=("candidate",),
+            primary_metric="task_completion",
+            issue_evaluator_lines=(
+                "azureml://registries/azureml/evaluators/builtin.task_completion/versions/19",
+            ),
+        ),
+    )
+    environment[cli_module._GITHUB_BINDING_ENV] = str(
+        _write_binding(
+            tmp_path / "binding.json",
+            issue_author_login="octocat",
+            issue_author_permission="maintain",
+        )
+    )
+    harness = ControllerHarness(
+        candidate_results={},
+        validating_results={},
+        cleanup_results={},
+    )
+    monkeypatch.setattr(cli_module, "capture_route_fingerprint", lambda **_: _route())
+    monkeypatch.setattr(cli_module, "build_runtime_controller", harness.builder)
+
+    start = _invoke(
+        ["job", "start", "--repository", str(repository), "--event", str(event)],
+        environment,
+    )
+
+    assert start.exit_code == 0, start.stdout
+    payload = json.loads(start.stdout)
+    assert payload["policy"]["primary_metric"] == "task_completion"
+    assert payload["request"]["primary_metric"] == "task_completion"
+    assert len(payload["request"]["request_sha256"]) == 64
+    persisted_request = json.loads(
+        (
+            Path(environment[cli_module.STATE_ROOT_ENV])
+            / "optimize-7"
+            / cli_module._ISSUE_REQUEST_FILENAME
+        ).read_text(encoding="utf-8")
+    )
+    assert persisted_request["request"]["primary_metric"] == "task_completion"
+    assert (
+        persisted_request["content_sha256"]
+        == payload["request"]["request_sha256"]
+    )
+    assert payload["job"]["verification"]["mode"] == "foundry_evaluation"
+    assert payload["job"]["verification"]["provenance"] == [
+        "issue_evaluators",
+        "runtime_metadata_defaults",
+    ]
+    assert harness.settings_seen[-1].policy.primary_metric == "task_completion"
+    resolution = harness.verification_resolutions[-1]
+    assert resolution is not None
+    assert resolution.foundry_evaluation is not None
+    assert resolution.foundry_evaluation.development_evaluator_ids == (
+        "quality",
+        "safety",
+        "azureml://registries/azureml/evaluators/builtin.task_completion/versions/19",
+    )
+
+
+def test_job_start_rejects_primary_metric_override_without_authority(
+    tmp_path: Path,
+) -> None:
+    repository, _, environment = _create_runtime_repository(tmp_path)
+    event = _write_issue_event(
+        tmp_path,
+        body=_issue_body(
+            candidate_budget=1,
+            model_lines=("candidate",),
+            primary_metric="task_completion",
+            issue_evaluator_lines=(
+                "azureml://registries/azureml/evaluators/builtin.task_completion/versions/19",
+            ),
+        ),
+    )
+    environment[cli_module._GITHUB_BINDING_ENV] = str(
+        _write_binding(
+            tmp_path / "binding.json",
+            issue_author_login="octocat",
+            issue_author_permission="read",
+        )
+    )
+
+    start = _invoke(
+        ["job", "start", "--repository", str(repository), "--event", str(event)],
+        environment,
+    )
+
+    assert start.exit_code == 2, start.stdout
+    assert "write, maintain, or admin" in json.loads(start.stdout)["error"]
 
 
 def test_job_start_accepts_trusted_write_authority_for_issue_command_overrides(
@@ -3238,6 +3347,55 @@ def test_job_resume_succeeds_when_runtime_is_unchanged(
     assert payload["resumed"] is True
     assert payload["job"]["candidate_budget"] == 1
     assert payload["next_action"] == "handoff-candidate"
+
+
+def test_job_resume_rejects_primary_metric_override_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repository, _, environment = _create_runtime_repository(tmp_path)
+    event = _write_issue_event(
+        tmp_path,
+        body=_issue_body(
+            candidate_budget=1,
+            model_lines=("candidate",),
+            primary_metric="task_completion",
+            issue_evaluator_lines=(
+                "azureml://registries/azureml/evaluators/builtin.task_completion/versions/19",
+            ),
+        ),
+    )
+    environment[cli_module._GITHUB_BINDING_ENV] = str(
+        _write_binding(
+            tmp_path / "binding.json",
+            issue_author_login="octocat",
+            issue_author_permission="write",
+        )
+    )
+    harness = ControllerHarness(
+        candidate_results={},
+        validating_results={},
+        cleanup_results={},
+    )
+    monkeypatch.setattr(cli_module, "capture_route_fingerprint", lambda **_: _route())
+    monkeypatch.setattr(cli_module, "build_runtime_controller", harness.builder)
+    started = _invoke(
+        ["job", "start", "--repository", str(repository), "--event", str(event)],
+        environment,
+    )
+    assert started.exit_code == 0, started.stdout
+
+    _replace_text(event, "task_completion", "quality")
+    resumed = _invoke(
+        ["job", "resume", "--repository", str(repository), "--event", str(event)],
+        environment,
+    )
+
+    assert resumed.exit_code == 2, resumed.stdout
+    assert (
+        "persisted optimize-job issue request does not match the current issue body"
+        in json.loads(resumed.stdout)["error"]
+    )
 
 
 @pytest.mark.parametrize(

@@ -1908,6 +1908,141 @@
       "title": "ResolvedWeightedObjective",
       "type": "object"
     },
+    "ReviewedFoundryTarget": {
+      "additionalProperties": false,
+      "properties": {
+        "account_resource_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Account Resource Id"
+        },
+        "agent_name": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Agent Name"
+        },
+        "agent_name_source": {
+          "anyOf": [
+            {
+              "enum": [
+                "existing_profile",
+                "agent_metadata",
+                "azure_yaml",
+                "azd_environment",
+                "binding_evidence",
+                "owner_answer"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Agent Name Source"
+        },
+        "deployment_ready": {
+          "default": false,
+          "title": "Deployment Ready",
+          "type": "boolean"
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "latest_agent_version": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Latest Agent Version"
+        },
+        "project_endpoint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Project Endpoint"
+        },
+        "project_endpoint_source": {
+          "anyOf": [
+            {
+              "enum": [
+                "existing_profile",
+                "agent_metadata",
+                "azure_yaml",
+                "azd_environment",
+                "binding_evidence",
+                "owner_answer"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Project Endpoint Source"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "state": {
+          "enum": [
+            "existing_aligned",
+            "existing_diverged",
+            "existing_unknown",
+            "new_target",
+            "blocked"
+          ],
+          "title": "State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "state"
+      ],
+      "title": "ReviewedFoundryTarget",
+      "type": "object"
+    },
     "RuntimeProtocolSettings": {
       "additionalProperties": false,
       "properties": {
@@ -2070,6 +2205,17 @@
           "default": null,
           "title": "Enabled"
         },
+        "foundry_target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReviewedFoundryTarget"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "profile": {
           "anyOf": [
             {
@@ -2130,6 +2276,17 @@
         },
         "foundry_project": {
           "$ref": "#/$defs/FoundryProjectSettings"
+        },
+        "foundry_target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReviewedFoundryTarget"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "hard_guardrails": {
           "items": {

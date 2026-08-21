@@ -1,8 +1,8 @@
 # Foundry Optimizer Coding Agent
 
-Foundry Optimizer helps repository owners bootstrap a GitHub repository,
-connect it to Azure and Foundry, and run issue-driven optimization for
-Foundry agents.
+Foundry Optimizer gives repository owners one guided path to register,
+connect, and deploy Foundry agents without reading bootstrap JSON or learning
+the low-level command tree.
 
 ## First-time owners start here
 
@@ -14,19 +14,62 @@ Foundry agents.
 These guides explain the owner decisions first. Use the advanced
 references once you need the detailed contracts.
 
+Install the `foundry-bootstrap` skill, open the agent repository in your coding
+agent, and say:
+
+```text
+Use /foundry-bootstrap to bootstrap this repository.
+```
+
+The skill shows one plain-language review or question at a time. It discovers
+agent folders, records which agents should be registered and enabled, resolves
+each enabled agent's Foundry project endpoint and agent name, prepares GitHub
+OIDC and Azure access, creates a reviewed local commit, and asks separately
+before deploying that exact commit.
+
+Evaluation is optional. Owners can start with no evidence, repository checks,
+or a later issue that supplies a dataset and evaluators.
+
+## Owner decisions
+
+Owners review only these decisions:
+
+- Which discovered agents should be ignored, registered disabled, or
+  registered enabled?
+- Which Foundry project endpoint and agent name should each enabled agent use?
+- Should the reviewed repository changes be applied?
+- Should GitHub environments be connected to the reviewed Azure identity?
+- Should verification be configured now, deferred, or skipped?
+- Should the exact local bootstrap commit be created?
+- Should that exact commit be deployed now with the current Azure login?
+
+The final summary links to the GitHub repository and environments, Azure
+identity and role assignments, Foundry projects and agents, and any configured
+datasets or evaluators.
+
+## Compatibility policy
+
+- Use `/foundry-bootstrap` for normal owner bootstraps.
+- Keep `foundry-opt bootstrap ...` names, arguments, exit codes, JSON
+  payloads, receipts, and workflows stable while compatibility is
+  retained.
+- Record future retirement or breaking changes in docs and release
+  notes instead of emitting runtime warning noise in CI.
+
 ## What this repository covers
 
 - repository discovery and bootstrap
 - GitHub environments and Actions for optimization and deployment
 - Azure OIDC identity and least-privilege RBAC
-- Foundry evaluation onboarding, datasets, evaluators, and runs
+- optional Foundry evaluation onboarding, datasets, evaluators, and runs
 - issue-driven optimization with explicit receipts and deployment gates
 
 ## Status
 
-Pre-release. Until the recommended branch protection policy is enabled,
-treat privileged bootstrap, optimization, validation, and deployment
-workflows as reviewed-commit operations rather than floating `main`.
+Pre-release. Bootstrap deploys only from an exact reviewed local commit. A
+later main-branch workflow reconciles matching source, package, profile,
+registry, and target fingerprints instead of publishing a duplicate version
+because merge changed the commit SHA.
 
 See [Distribution and pinning](docs/distribution.md) and
 [Recommended branch protection](docs/branch-protection.md).

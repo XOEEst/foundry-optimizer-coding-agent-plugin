@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from foundry_opt.bootstrap.contracts import BootstrapPlan
+from foundry_opt.bootstrap.contracts import BootstrapPlan, FingerprintRecord
 from foundry_opt.bootstrap.drivers import AzurePhaseDriver
 from foundry_opt.bootstrap.errors import BootstrapConfigError
 from foundry_opt.bootstrap.input_contracts import (
@@ -256,6 +256,57 @@ def test_entra_application_and_immutable_subjects_round_trip_through_driver() ->
         f"{prefix}:environment:copilot",
         f"{prefix}:environment:foundry-production",
     )
+
+
+def test_azure_driver_live_fingerprints_use_provider_inventory() -> None:
+    plan_input = _plan_input(
+        {
+            "identity_kind": "user_assigned_managed_identity",
+            "existing_resource_id": _resource_id("reviewed-identity"),
+            "create_if_missing": True,
+        }
+    )
+
+    class InventoryProvider:
+        def __init__(self) -> None:
+            self.plans: list[BootstrapPlan] = []
+
+        def live_binding_fingerprints(self, plan: BootstrapPlan):
+            self.plans.append(plan)
+            return (
+                FingerprintRecord(
+                    label="azure:identity",
+                    sha256="1" * 64,
+                ),
+                FingerprintRecord(
+                    label="azure:fic:reviewed",
+                    sha256="2" * 64,
+                ),
+                FingerprintRecord(
+                    label="azure:role:reviewed",
+                    sha256="3" * 64,
+                ),
+            )
+
+    provider = InventoryProvider()
+    driver = AzurePhaseDriver(plan_input=plan_input, provider=provider)
+
+    fingerprints = driver.live_fingerprints(
+        {
+            "operation_id": "live-inventory",
+            "runtime_repository": "https://github.com/org/runtime.git",
+            "runtime_commit": "a" * 40,
+            "repository_id": "org/repo",
+        }
+    )
+
+    assert [item.label for item in fingerprints] == [
+        "azure:identity",
+        "azure:fic:reviewed",
+        "azure:role:reviewed",
+    ]
+    assert provider.plans
+    assert all(action.phase == "azure" for action in provider.plans[0].actions)
 
 
 def test_non_managed_identity_resource_ids_fail_closed() -> None:

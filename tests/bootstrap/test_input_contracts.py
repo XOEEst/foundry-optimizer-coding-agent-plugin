@@ -12,7 +12,7 @@ from foundry_opt.bootstrap.canonical import canonical_sha256
 from foundry_opt.bootstrap.errors import BootstrapConfigError
 from foundry_opt.bootstrap.evaluation.execution import EvaluationOnboardingRequest
 from foundry_opt.bootstrap.input_contracts import BootstrapPlanInput, TrustedTemplateManifest, load_bootstrap_plan_input
-from tests.bootstrap.fakes.evaluation_contract import build_contract
+from tests.bootstrap.fakes.evaluation_contract import build_contract, build_sidecar_policy
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 MANIFEST_PATH = REPOSITORY_ROOT / 'src' / 'foundry_opt' / 'templates' / 'customer-repo' / '.foundry-opt' / 'managed-payloads.manifest.yaml'
@@ -211,6 +211,63 @@ def test_selected_agent_separates_discovery_root_from_managed_root() -> None:
     assert selected_agent.root == "agent"
     assert plan_input.binding_evidence is not None
     assert plan_input.binding_evidence.agents[0].root == "."
+
+
+def test_selected_foundry_target_is_persisted_over_the_reviewed_profile() -> None:
+    payload = _sample_payload()
+    profile = build_sidecar_policy(root="agent").model_dump(mode="json")
+    profile.pop("path", None)
+    profile.pop("source_root", None)
+    profile.pop("editable_paths", None)
+    payload["repository"]["selected_agents"][0]["profile"] = profile
+    payload["repository"]["selected_agents"][0]["foundry_target"] = {
+        "state": "existing_aligned",
+        "project_endpoint": payload["evaluations_phase"]["agents"][0]["project_endpoint"],
+        "project_endpoint_source": "owner_answer",
+        "agent_name": payload["evaluations_phase"]["agents"][0]["agent_name"],
+        "agent_name_source": "owner_answer",
+        "account_resource_id": payload["evaluations_phase"]["agents"][0]["account_resource_id"],
+        "latest_agent_version": payload["evaluations_phase"]["agents"][0]["agent_version"],
+        "deployment_ready": True,
+        "detail": "reviewed target",
+    }
+
+    plan_input = BootstrapPlanInput.model_validate(payload)
+    rendered = plan_input.repository.selected_agents[0].profile_document
+
+    assert (
+        plan_input.repository.selected_agents[0].foundry_target is not None
+        and plan_input.repository.selected_agents[0].foundry_target.state == "existing_aligned"
+    )
+    assert rendered is not None
+    assert rendered.foundry_target is not None
+    assert rendered.foundry_target.state == "existing_aligned"
+    assert rendered.foundry_project.expected_version == "1.2.3"
+
+    payload["repository"]["selected_agents"][0]["foundry_target"]["project_endpoint"] = (
+        "https://other.services.ai.azure.com/api/projects/other"
+    )
+    with pytest.raises(
+        ValidationError,
+        match="evaluation project_endpoint must match selected foundry_target",
+    ):
+        BootstrapPlanInput.model_validate(payload)
+
+
+def test_blocked_foundry_target_can_remain_selected_when_deployment_is_not_ready() -> None:
+    payload = _sample_payload()
+    payload["repository"]["selected_agents"][0]["enabled"] = True
+    payload["repository"]["selected_agents"][0]["foundry_target"] = {
+        "state": "blocked",
+        "deployment_ready": False,
+        "detail": "owner must review the target",
+    }
+
+    plan_input = BootstrapPlanInput.model_validate(payload)
+
+    assert plan_input.repository.selected_agents[0].enabled is True
+    assert plan_input.repository.selected_agents[0].foundry_target is not None
+    assert plan_input.repository.selected_agents[0].foundry_target.state == "blocked"
 
 
 def test_offline_and_github_resolution_rules_fail_closed() -> None:

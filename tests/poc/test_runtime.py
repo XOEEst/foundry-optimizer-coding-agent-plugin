@@ -836,8 +836,7 @@ def test_controller_foundry_operations_uses_issue_supplied_verification_resoluti
             issue_dataset=VerificationDatasetInput(dataset_id_or_uri="dataset-issue"),
             issue_evaluators=(
                 IssueEvaluatorEntry(
-                    evaluator_id="azureai://built-in/evaluators/safety",
-                    weight=2.0,
+                    evaluator_id="azureml://registries/azureml/evaluators/builtin.task_completion/versions/19",
                 ),
             ),
         ),
@@ -891,10 +890,96 @@ def test_controller_foundry_operations_uses_issue_supplied_verification_resoluti
         "dataset-validating",
     ]
     assert [contract.evaluator_ids for contract in foundry.evaluation_contracts] == [
-        ("azureai://built-in/evaluators/safety",),
-        ("azureai://built-in/evaluators/safety",),
-        ("azureai://built-in/evaluators/safety",),
+        (
+            "quality",
+            "safety",
+            "azureml://registries/azureml/evaluators/builtin.task_completion/versions/19",
+        ),
+        (
+            "quality",
+            "safety",
+            "azureml://registries/azureml/evaluators/builtin.task_completion/versions/19",
+        ),
+        (
+            "quality",
+            "safety",
+            "azureml://registries/azureml/evaluators/builtin.task_completion/versions/19",
+        ),
     ]
+
+
+def test_controller_uses_overridden_primary_metric_for_summaries(
+    tmp_path: Path,
+) -> None:
+    repository, base_commit, environment = _create_runtime_repository(tmp_path)
+    paths = load_runtime_paths(repository, environment=environment, job_id="job-7")
+    settings = load_runtime_settings(paths, environment=environment, base_commit=base_commit)
+    policy = settings.policy.model_copy(update={"primary_metric": "task_completion"})
+    identity = build_job_identity(
+        settings=settings.model_copy(update={"policy": policy}),
+        issue_number=7,
+        job_id="job-7",
+        route_fingerprint=_route(),
+    )
+    foundry = _FakeFoundryClient(
+        route=_route(),
+        evaluations={
+            ("draft-1", "eval-development"): EvaluationEvidence(
+                reference=EvaluationReference(
+                    evaluation_id="eval-development",
+                    run_id="run-baseline",
+                    dataset_id="dataset-development",
+                    agent_name="travel-agent",
+                    agent_version="draft-1",
+                    evaluator_ids=("quality", "task_completion", "safety"),
+                ),
+                metrics=(
+                    Metric(
+                        name="quality",
+                        score=0.9,
+                        passed=True,
+                        focused_cases=4,
+                        passed_cases=4,
+                        failed_cases=0,
+                    ),
+                    Metric(
+                        name="task_completion",
+                        score=0.5,
+                        passed=False,
+                        focused_cases=4,
+                        passed_cases=2,
+                        failed_cases=2,
+                    ),
+                    Metric(
+                        name="safety",
+                        score=1.0,
+                        passed=True,
+                        focused_cases=4,
+                        passed_cases=4,
+                        failed_cases=0,
+                    ),
+                ),
+                total_cases=4,
+                passed_cases=2,
+                failed_cases=2,
+                report_url="https://example.invalid/baseline",
+            ),
+        },
+    )
+    operations = ControllerFoundryOperations(
+        repository=repository,
+        source_root=policy.source_root,
+        policy=policy,
+        metadata=settings.metadata,
+        client=foundry,
+        artifact_state_path=paths.job_root,
+        route_fingerprint=_route(),
+    )
+
+    baseline = operations.evaluate_baseline(identity)
+
+    assert baseline.evaluation is not None
+    assert baseline.evaluation.primary_score == 0.5
 
 
 def test_controller_foundry_operations_candidate_verification_failure_blocks_new_drafts(

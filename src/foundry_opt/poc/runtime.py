@@ -11,16 +11,18 @@ import time
 import uuid
 from collections.abc import Callable, Mapping
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal, Self
+from typing import Any, Literal, Protocol, Self
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
+from foundry_opt.distribution import optimizer_skill_paths_match
 from foundry_opt.poc.auth import AuthError, GitHubActionsOidcConfig, build_client_assertion_credential
 from foundry_opt.poc.bootstrap import BootstrapReceipt, load_shared_pin, read_bootstrap_receipt
 from foundry_opt.poc.candidate import CandidateWorkspace, FinalizedCandidate
 from foundry_opt.poc.checks import LocalRepositoryCheckRunner, RepositoryCheckRunnerProtocol
 from foundry_opt.poc.config import (
     AgentMetadata,
+    HostedRuntimeContract,
     ModelDeploymentContract,
     RepositoryPolicy,
     SharedPin,
@@ -675,7 +677,16 @@ def load_runtime_settings(
     )
 
 
-def build_hosted_definition(metadata: AgentMetadata, model: str) -> HostedDefinition:
+class HostedDefinitionMetadataProtocol(Protocol):
+    project_endpoint: str
+    hosted_runtime: HostedRuntimeContract
+    model_deployments: tuple[ModelDeploymentContract, ...]
+
+
+def build_hosted_definition(
+    metadata: HostedDefinitionMetadataProtocol,
+    model: str,
+) -> HostedDefinition:
     deployment = _resolve_model_deployment(metadata, model)
     runtime = metadata.hosted_runtime
     return HostedDefinition(
@@ -1897,7 +1908,7 @@ def _validate_bootstrap_receipt(pin: SharedPin, receipt: BootstrapReceipt) -> No
         raise RuntimeIntegrationError("bootstrap receipt commit does not match the shared pin")
     if receipt.package_path != pin.package_path:
         raise RuntimeIntegrationError("bootstrap receipt package_path does not match the shared pin")
-    if receipt.skill_path != pin.skill_path:
+    if not optimizer_skill_paths_match(receipt.skill_path, pin.skill_path):
         raise RuntimeIntegrationError("bootstrap receipt skill_path does not match the shared pin")
     if receipt.lock_sha256 != pin.uv_lock_sha256:
         raise RuntimeIntegrationError("bootstrap receipt lock_sha256 does not match the shared pin")
