@@ -18,6 +18,13 @@ from foundry_opt.poc.deploy import (
     DeploymentSupersededError,
     DeploymentVerification,
     DeploymentVerificationCheckResult,
+    PACKAGE_FINGERPRINT_METADATA_KEY,
+    PROFILE_FINGERPRINT_METADATA_KEY,
+    REGISTRY_FINGERPRINT_METADATA_KEY,
+    RELEASE_COMMIT_METADATA_KEY,
+    REPO_AGENT_ID_METADATA_KEY,
+    SOURCE_FINGERPRINT_METADATA_KEY,
+    TARGET_FINGERPRINT_METADATA_KEY,
     deployment_operation_id,
     deployment_unverified_warning,
     load_deployment_settings,
@@ -186,6 +193,17 @@ def _unverified_deployment_verification() -> DeploymentVerification:
     )
 
 
+def _reconciliation_metadata() -> dict[str, str]:
+    return {
+        REPO_AGENT_ID_METADATA_KEY: "example-agent",
+        SOURCE_FINGERPRINT_METADATA_KEY: "1" * 64,
+        PACKAGE_FINGERPRINT_METADATA_KEY: "2" * 64,
+        PROFILE_FINGERPRINT_METADATA_KEY: "3" * 64,
+        REGISTRY_FINGERPRINT_METADATA_KEY: "4" * 64,
+        TARGET_FINGERPRINT_METADATA_KEY: "5" * 64,
+    }
+
+
 class _Foundry:
     def __init__(
         self,
@@ -194,11 +212,13 @@ class _Foundry:
         safety_passed: bool = True,
         cleanup_failure: bool = False,
         matching_latest: bool = False,
+        latest_metadata: dict[str, str] | None = None,
     ) -> None:
         self.safety_score = safety_score
         self.safety_passed = safety_passed
         self.cleanup_failure = cleanup_failure
         self.matching_latest = matching_latest
+        self.latest_metadata = dict(latest_metadata or {})
         self.calls: list[str] = []
         self.package = _package()
         self.draft = DraftReference(
@@ -364,6 +384,7 @@ class _Foundry:
                 "foundry_opt_run_id": operation_id,
                 "foundry_opt_release_operation": operation_id,
                 "foundry_opt_source_zip_sha256": code_sha256,
+                **self.latest_metadata,
             },
             status="active",
         )
@@ -489,6 +510,65 @@ def test_deployment_can_publish_the_first_version_for_a_missing_agent() -> None:
     assert receipt.published_version == "1"
     assert receipt.route_mutated is False
     assert foundry.calls[:2] == ["route-missing", "route-missing"]
+
+
+def test_deployment_reconciles_matching_fingerprints_across_commit_changes() -> None:
+    policy, metadata = _configuration()
+    reconciliation = _reconciliation_metadata()
+    foundry = _Foundry(
+        matching_latest=True,
+        latest_metadata={
+            RELEASE_COMMIT_METADATA_KEY: "f" * 40,
+            **reconciliation,
+        },
+    )
+    service = DeploymentService(
+        client=foundry,
+        policy=policy,
+        metadata=metadata,
+        deadline_seconds=30,
+    )
+
+    receipt = service.publish(
+        repository="example-org/example-agent",
+        release_commit="a" * 40,
+        packaged=foundry.package,
+        verification=_unverified_deployment_verification(),
+        reconciliation_metadata=reconciliation,
+    )
+
+    assert receipt.reconciled is True
+    assert receipt.reconciliation_metadata == reconciliation
+    assert "publish" not in foundry.calls
+
+
+def test_deployment_publishes_when_profile_fingerprint_changed() -> None:
+    policy, metadata = _configuration()
+    reconciliation = _reconciliation_metadata()
+    foundry = _Foundry(
+        matching_latest=True,
+        latest_metadata={
+            **reconciliation,
+            PROFILE_FINGERPRINT_METADATA_KEY: "9" * 64,
+        },
+    )
+    service = DeploymentService(
+        client=foundry,
+        policy=policy,
+        metadata=metadata,
+        deadline_seconds=30,
+    )
+
+    receipt = service.publish(
+        repository="example-org/example-agent",
+        release_commit="a" * 40,
+        packaged=foundry.package,
+        verification=_unverified_deployment_verification(),
+        reconciliation_metadata=reconciliation,
+    )
+
+    assert receipt.reconciled is False
+    assert "publish" in foundry.calls
 
 
 def test_deployment_verify_only_runs_foundry_gate_without_publication() -> None:

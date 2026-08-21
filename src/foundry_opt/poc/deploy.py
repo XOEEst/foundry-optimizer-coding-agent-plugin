@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import subprocess
 import time
 from collections.abc import Callable, Mapping
@@ -13,7 +14,9 @@ from typing import Literal, Protocol, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from foundry_opt.bootstrap.canonical import canonical_sha256
 from foundry_opt.bootstrap.contracts import BootstrapLock, RootRegistry
+from foundry_opt.bootstrap.discovery import discover_repository_agents
 from foundry_opt.bootstrap.workflow_integration import (
     RegistrySelection,
     resolve_registry_selection,
@@ -84,10 +87,28 @@ RELEASE_COMMIT_METADATA_KEY = "foundry_opt_release_commit"
 REPOSITORY_METADATA_KEY = "foundry_opt_repository"
 SOURCE_ROOT_METADATA_KEY = "foundry_opt_source_root"
 SOURCE_TREE_METADATA_KEY = "foundry_opt_source_tree_sha256"
+SOURCE_FINGERPRINT_METADATA_KEY = "foundry_opt_source_fingerprint"
+PACKAGE_FINGERPRINT_METADATA_KEY = "foundry_opt_package_fingerprint"
+PROFILE_FINGERPRINT_METADATA_KEY = "foundry_opt_profile_fingerprint"
+REGISTRY_FINGERPRINT_METADATA_KEY = "foundry_opt_registry_fingerprint"
+TARGET_FINGERPRINT_METADATA_KEY = "foundry_opt_target_fingerprint"
+REPO_AGENT_ID_METADATA_KEY = "foundry_opt_repo_agent_id"
 _UNUSED_DEPLOYMENT_VERIFICATION_TOKEN = "deployment-verification-not-required"
 
 _COMMIT_PATTERN = r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
+_RECONCILIATION_HASH_KEYS = frozenset(
+    {
+        SOURCE_FINGERPRINT_METADATA_KEY,
+        PACKAGE_FINGERPRINT_METADATA_KEY,
+        PROFILE_FINGERPRINT_METADATA_KEY,
+        REGISTRY_FINGERPRINT_METADATA_KEY,
+        TARGET_FINGERPRINT_METADATA_KEY,
+    }
+)
+_RECONCILIATION_KEYS = _RECONCILIATION_HASH_KEYS | {
+    REPO_AGENT_ID_METADATA_KEY
+}
 
 
 class _FrozenModel(BaseModel):
@@ -175,6 +196,7 @@ class DeploymentReceipt(_FrozenModel):
     source_root: str
     source_tree_sha256: str = Field(pattern=_SHA256_PATTERN)
     source_zip_sha256: str = Field(pattern=_SHA256_PATTERN)
+    reconciliation_metadata: Mapping[str, str] = Field(default_factory=dict)
     evaluation_link: str | None = None
     guardrails: tuple[DeploymentGuardrail, ...] = ()
     verification: DeploymentVerification
@@ -252,6 +274,7 @@ class RegisteredDeploymentSettings:
     release_commit: str
     artifact_root: Path
     deadline_seconds: float
+    reconciliation_metadata: Mapping[str, str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -320,7 +343,11 @@ class DeploymentService:
         packaged: PackagedSource,
         repository_root: Path | None = None,
         verification: DeploymentVerification | None = None,
+        reconciliation_metadata: Mapping[str, str] | None = None,
     ) -> DeploymentReceipt:
+        normalized_reconciliation = _normalize_reconciliation_metadata(
+            reconciliation_metadata
+        )
         verified = self._verify(
             repository=repository,
             release_commit=release_commit,
@@ -333,6 +360,7 @@ class DeploymentService:
         matching_latest = self._matching_latest_version(
             route=verified.route_before,
             packaged=packaged,
+            reconciliation_metadata=normalized_reconciliation,
         )
         if matching_latest is not None:
             return self._receipt(
@@ -343,12 +371,14 @@ class DeploymentService:
                 reference=matching_latest,
                 reconciled=True,
                 verification=verified.verification,
+                reconciliation_metadata=normalized_reconciliation,
             )
         provenance = {
             RELEASE_COMMIT_METADATA_KEY: release_commit,
             REPOSITORY_METADATA_KEY: repository,
             SOURCE_ROOT_METADATA_KEY: packaged.source_root,
             SOURCE_TREE_METADATA_KEY: packaged.tree_sha256,
+            **normalized_reconciliation,
         }
         published = self._client.create_regular_version(
             self._metadata.agent_name,
@@ -400,6 +430,7 @@ class DeploymentService:
             reference=active,
             reconciled=published.reconciled,
             verification=verified.verification,
+            reconciliation_metadata=normalized_reconciliation,
         )
 
     def verify(
@@ -638,6 +669,7 @@ class DeploymentService:
         *,
         route: RouteFingerprint,
         packaged: PackagedSource,
+        reconciliation_metadata: Mapping[str, str],
     ) -> RegularVersionReference | None:
         if route.latest_version is None:
             return None
@@ -650,6 +682,11 @@ class DeploymentService:
         except ContractError:
             return None
         if reference.code_sha256 != packaged.zip_sha256:
+            return None
+        if any(
+            reference.metadata.get(key) != value
+            for key, value in reconciliation_metadata.items()
+        ):
             return None
         downloaded = self._client.download_regular_version_code(
             reference,
@@ -675,6 +712,7 @@ class DeploymentService:
         reference: RegularVersionReference,
         reconciled: bool,
         verification: DeploymentVerification,
+        reconciliation_metadata: Mapping[str, str],
     ) -> DeploymentReceipt:
         return DeploymentReceipt(
             repository=repository,
@@ -688,6 +726,7 @@ class DeploymentService:
             source_root=packaged.source_root,
             source_tree_sha256=packaged.tree_sha256,
             source_zip_sha256=packaged.zip_sha256,
+            reconciliation_metadata=dict(reconciliation_metadata),
             evaluation_link=verification.evaluation_link,
             guardrails=verification.guardrails,
             verification=verification,
@@ -1220,6 +1259,10 @@ def _load_registered_settings(
             environment=env,
             deadline_seconds=deadline_seconds,
         ),
+        reconciliation_metadata=_registered_reconciliation_metadata(
+            root,
+            selection,
+        ),
     )
 
 
@@ -1366,6 +1409,7 @@ def publish_registered_deployment(
             packaged=packaged,
             repository_root=settings.repository_root,
             verification=settings.verification,
+            reconciliation_metadata=settings.reconciliation_metadata,
         ),
     )
 
@@ -1379,6 +1423,85 @@ def deployment_operation_id(
     subject = "\n".join((repository, agent_name, release_commit))
     digest = hashlib.sha256(subject.encode("utf-8")).hexdigest()[:32]
     return f"deploy-{digest}"
+
+
+def _normalize_reconciliation_metadata(
+    value: Mapping[str, str] | None,
+) -> dict[str, str]:
+    if value is None:
+        return {}
+    normalized = {str(key): str(item) for key, item in value.items()}
+    if set(normalized) != _RECONCILIATION_KEYS:
+        raise DeploymentError(
+            "deployment reconciliation metadata must contain the complete fingerprint set"
+        )
+    for key in _RECONCILIATION_HASH_KEYS:
+        if re.fullmatch(_SHA256_PATTERN, normalized[key]) is None:
+            raise DeploymentError(
+                f"deployment reconciliation metadata is invalid for {key}"
+            )
+    repo_agent_id = normalized[REPO_AGENT_ID_METADATA_KEY]
+    if (
+        not repo_agent_id
+        or len(repo_agent_id) > 128
+        or any(ord(character) < 32 for character in repo_agent_id)
+    ):
+        raise DeploymentError(
+            "deployment reconciliation metadata has an invalid repoAgentId"
+        )
+    return normalized
+
+
+def _registered_reconciliation_metadata(
+    repository_root: Path,
+    selection: RegistrySelection,
+) -> dict[str, str]:
+    discovery = discover_repository_agents(
+        repository_root,
+        selected_agents=(
+            {
+                "root": selection.root,
+                "repoAgentId": selection.repo_agent_id,
+            },
+        ),
+    )
+    matches = [
+        item
+        for item in discovery.agents
+        if item.repoAgentId.casefold() == selection.repo_agent_id.casefold()
+    ]
+    if len(matches) != 1:
+        raise RuntimeIntegrationError(
+            "registered deployment could not resolve exact source/package fingerprints"
+        )
+    discovered = matches[0]
+    if (
+        discovered.sourceRoot != selection.sidecar.source_root
+        or discovered.packageRoot != selection.sidecar.package_root
+    ):
+        raise RuntimeIntegrationError(
+            "registered deployment discovery does not match the selected profile roots"
+        )
+    if selection.sidecar.foundry_target is not None:
+        target_payload: object = selection.sidecar.foundry_target.model_dump(
+            mode="json"
+        )
+    else:
+        target_payload = {
+            "project_endpoint": selection.sidecar.foundry_project.project_endpoint,
+            "account_resource_id": selection.sidecar.foundry_project.account_resource_id,
+            "agent_name": selection.sidecar.foundry_project.agent_name,
+        }
+    return _normalize_reconciliation_metadata(
+        {
+            REPO_AGENT_ID_METADATA_KEY: selection.repo_agent_id,
+            SOURCE_FINGERPRINT_METADATA_KEY: discovered.sourceFingerprint,
+            PACKAGE_FINGERPRINT_METADATA_KEY: discovered.packageFingerprint,
+            PROFILE_FINGERPRINT_METADATA_KEY: selection.sidecar_hash,
+            REGISTRY_FINGERPRINT_METADATA_KEY: selection.registry_hash,
+            TARGET_FINGERPRINT_METADATA_KEY: canonical_sha256(target_payload),
+        }
+    )
 
 
 def _metric_by_name(evidence: EvaluationEvidence, name: str) -> object:

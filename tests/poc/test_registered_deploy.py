@@ -26,6 +26,12 @@ from foundry_opt.poc.deploy import (
     DeploymentGuardrail,
     DeploymentReceipt,
     DeploymentVerificationReceipt,
+    PACKAGE_FINGERPRINT_METADATA_KEY,
+    PROFILE_FINGERPRINT_METADATA_KEY,
+    REGISTRY_FINGERPRINT_METADATA_KEY,
+    REPO_AGENT_ID_METADATA_KEY,
+    SOURCE_FINGERPRINT_METADATA_KEY,
+    TARGET_FINGERPRINT_METADATA_KEY,
     load_registered_deployment_settings,
     load_registered_verification_settings,
     publish_registered_deployment,
@@ -318,6 +324,15 @@ def test_registered_settings_support_repository_checks_without_bundle(
     assert settings.verification.evaluator_ids == ()
     assert settings.verification.check_results[0].status == "planned"
     assert settings.metadata.development_evaluation.custom_evaluator_ids == ()
+    assert settings.reconciliation_metadata[REPO_AGENT_ID_METADATA_KEY] == "example-agent"
+    for key in (
+        SOURCE_FINGERPRINT_METADATA_KEY,
+        PACKAGE_FINGERPRINT_METADATA_KEY,
+        PROFILE_FINGERPRINT_METADATA_KEY,
+        REGISTRY_FINGERPRINT_METADATA_KEY,
+        TARGET_FINGERPRINT_METADATA_KEY,
+    ):
+        assert len(settings.reconciliation_metadata[key]) == 64
 
 
 def test_registered_settings_support_repository_checks_when_allow_no_evidence(
@@ -515,6 +530,7 @@ def test_registered_publish_packages_exact_source_and_closes_clients(
             packaged: object,
             repository_root: object,
             verification: object,
+            reconciliation_metadata: object,
         ) -> DeploymentReceipt:
             assert repository == "example-org/example-repo"
             assert release_commit == commit
@@ -522,6 +538,7 @@ def test_registered_publish_packages_exact_source_and_closes_clients(
             assert getattr(packaged, "source_root") == "agent"
             assert repository_root == settings.repository_root
             assert getattr(verification, "mode") == "foundry_evaluation"
+            assert reconciliation_metadata == settings.reconciliation_metadata
             completed_verification = settings.verification.model_copy(
                 update={
                     "status": "passed",
@@ -548,6 +565,7 @@ def test_registered_publish_packages_exact_source_and_closes_clients(
                 source_root="agent",
                 source_tree_sha256=getattr(packaged, "tree_sha256"),
                 source_zip_sha256=getattr(packaged, "zip_sha256"),
+                reconciliation_metadata=settings.reconciliation_metadata,
                 evaluation_link="https://example.invalid/evaluations/deploy",
                 guardrails=completed_verification.guardrails,
                 verification=completed_verification,

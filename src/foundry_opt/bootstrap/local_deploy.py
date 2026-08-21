@@ -37,6 +37,12 @@ from foundry_opt.poc.config import validate_repository_relative_path
 from foundry_opt.poc.deploy import (
     DeploymentReceipt,
     DeploymentService,
+    PACKAGE_FINGERPRINT_METADATA_KEY,
+    PROFILE_FINGERPRINT_METADATA_KEY,
+    REGISTRY_FINGERPRINT_METADATA_KEY,
+    REPO_AGENT_ID_METADATA_KEY,
+    SOURCE_FINGERPRINT_METADATA_KEY,
+    TARGET_FINGERPRINT_METADATA_KEY,
     build_deployment_agent_metadata,
     build_repository_policy_from_registry_selection,
 )
@@ -469,6 +475,14 @@ class DefaultLocalDeploymentAdapter(LocalDeploymentAdapterProtocol):
                 packaged=packaged,
                 repository_root=repository_root,
                 verification=verification,
+                reconciliation_metadata={
+                    REPO_AGENT_ID_METADATA_KEY: plan.repo_agent_id,
+                    SOURCE_FINGERPRINT_METADATA_KEY: plan.source_sha256,
+                    PACKAGE_FINGERPRINT_METADATA_KEY: plan.package_sha256,
+                    PROFILE_FINGERPRINT_METADATA_KEY: plan.profile_sha256,
+                    REGISTRY_FINGERPRINT_METADATA_KEY: plan.registry_sha256,
+                    TARGET_FINGERPRINT_METADATA_KEY: plan.target_sha256,
+                },
             )
         finally:
             if client is not None:
