@@ -9,6 +9,23 @@ agent. Normal owners should use the `/foundry-bootstrap` flow; the
 `foundry-opt bootstrap ...` commands below remain as an advanced
 compatibility interface for automation and reviewed source checkouts.
 
+## Before you start
+
+- Open the Git repository that owns the agent source.
+- Authenticate GitHub CLI for the repository operations you intend to approve.
+- Authenticate Azure CLI to a tenant and subscription that can access the
+  target Foundry project.
+- Keep unrelated working-tree changes out of the bootstrap commit. Bootstrap
+  preserves customer files but refuses to hide unrelated dirty paths inside
+  its reviewed commit.
+- Have the Foundry project endpoint available when repository metadata cannot
+  identify it. The skill resolves the backing Azure account with the current
+  login; owners do not construct or enter an ARM resource ID.
+
+An existing agent, dataset, or evaluator is not required. Agents may be
+registered disabled, verification may be deferred, and the first regular
+version may be created by the separately approved deployment step.
+
 ## Start
 
 Install the released skill folder or add a local checkout:
@@ -143,6 +160,9 @@ docs and release notes instead of adding runtime deprecation warnings.
 
 - [Overview](overview.md)
 - [Issues and monitoring](issues-and-monitoring.md)
+- [Skill and runtime seam](../architecture/skill-runtime-seam.md)
+- [Repository contract](../reference/repository-contract.md)
+- [Evidence, state, and receipts](../reference/evidence-state-and-receipts.md)
 - [Evaluation onboarding](../evaluation-onboarding.md)
 - [Identity and RBAC](../identity-rbac.md)
 - [Managed files](../managed-files.md)

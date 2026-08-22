@@ -50,6 +50,10 @@ jobs:
         shell: bash
         run: uv run python tools/check_public_tree.py
 
+      - name: Check documentation
+        shell: bash
+        run: uv run python tools/check_docs.py
+
       - name: Build bootstrap skill release artifacts
         shell: bash
         run: uv run python tools/build_foundry_bootstrap_skill.py

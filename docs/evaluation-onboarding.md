@@ -299,3 +299,10 @@ Alignment is proven with reviewed binding evidence — see
 [Binding evidence](binding-evidence.md). When the plan input carries evidence,
 `bootstrap evaluation plan` re-derives each classification and refuses a contract that claims
 a different one.
+
+## Related architecture
+
+- [Optimize job](architecture/optimize-job.md)
+- [Repository contract](reference/repository-contract.md)
+- [Evidence, state, and receipts](reference/evidence-state-and-receipts.md)
+- [ADR 0015: Skill-first bootstrap and optional verification](decisions/0015-skill-first-bootstrap-and-optional-verification.md)

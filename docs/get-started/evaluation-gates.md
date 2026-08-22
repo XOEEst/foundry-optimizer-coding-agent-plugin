@@ -101,6 +101,8 @@ gate succeeds.
 ## Related detail
 
 - [Issues and monitoring](issues-and-monitoring.md)
+- [Run an optimization](../guides/run-an-optimization.md)
+- [Operate deployments](../guides/operate-deployments.md)
 - [Evaluation onboarding](../evaluation-onboarding.md)
 - [Recommended branch protection](../branch-protection.md)
 - [Identity and RBAC](../identity-rbac.md)

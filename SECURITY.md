@@ -19,3 +19,6 @@ responses, traces, or evaluation dataset rows.
 - Treat issue content, candidate edits, and remote service responses as
   untrusted until validated.
 - Keep optimization draft-only and deployment route-read-only.
+
+See [Trust model](docs/architecture/trust-model.md) for the complete
+repository, skill, runtime, identity, and receipt trust seams.

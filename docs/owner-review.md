@@ -6,11 +6,20 @@ bootstrap discovery, planning, status, and resource links.
 For first-time repository owners, keep bootstrap short and human-first:
 
 1. choose agents
-2. review repository setup
-3. connect GitHub to Azure
+2. resolve enabled agents' Foundry targets
+3. review repository setup
+4. connect GitHub to Azure
+5. choose optional verification
+6. review the exact local commit and deployment separately
 
 Use plain-language bullet summaries by default. Reserve JSON for automation,
 implementation, or debugging detail.
+
+The installed skill crosses one small runtime interface: `start`, `answer`,
+`approve`, `status`, and `rollback`. Repository inspection, Azure account
+lookup, and minimal prompting stay in the skill; deterministic validation,
+state transitions, mutations, receipts, and compensation stay behind the
+runtime interface.
 
 ## Advanced compatibility CLI entry points
 
@@ -51,8 +60,12 @@ through docs and release notes first.
   combined approval covering GitHub environments, variables, branch policy,
   Azure identity adoption/creation, exactly two federated OIDC subjects, and
   approved RBAC assignments.
+- **Verification** — owners may configure Foundry evaluation, defer it, use
+  repository checks, or proceed with an explicit no-evidence warning.
+- **Commit and deployment** — the skill reviews the exact local commit and
+  exact-source deployment as separate approvals.
 - **Handoff** — `bootstrap resources` is the final owner handoff for GitHub,
-  Azure, and Foundry links after apply/activation.
+  Azure, Foundry, and optional evaluation links.
 
 ## Review builders
 
@@ -78,3 +91,9 @@ Owners never need to author approval JSON by hand. Exact plan, runtime, and
 approval hash checks still come from `GitHubAzureConnectionManager`.
 Internal child receipts remain implementation detail; the owner approves one
 combined connection decision.
+
+## Related architecture
+
+- [Skill and runtime seam](architecture/skill-runtime-seam.md)
+- [Evidence, state, and receipts](reference/evidence-state-and-receipts.md)
+- [ADR 0015: Skill-first bootstrap and optional verification](decisions/0015-skill-first-bootstrap-and-optional-verification.md)

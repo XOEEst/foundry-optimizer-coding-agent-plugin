@@ -8,7 +8,7 @@ repository stays customer-owned: existing workflows, instructions, skills, `AGEN
 
 The trusted manifest
 (`src/foundry_opt/templates/customer-repo/.foundry-opt/managed-payloads.manifest.yaml`) pins
-exactly these eight payloads. A plan input must carry the manifest id, version, and hash, and
+exactly these seven payloads. A plan input must carry the manifest id, version, and hash, and
 the manifest is refused if the set differs.
 
 | Template id | Destination | Ownership |
@@ -81,3 +81,9 @@ fails closed.
 Deployment and validation treat `.foundry-opt/**` (registry, sidecar lock) and
 `.github/workflows/**` as shared-contract changes that expand to every eligible agent. The
 legacy lock path is no longer part of that contract.
+
+## Related architecture
+
+- [Repository contract](reference/repository-contract.md)
+- [Skill and runtime seam](architecture/skill-runtime-seam.md)
+- [Trust model](architecture/trust-model.md)
