@@ -7,7 +7,6 @@ import re
 from typing import Protocol
 from urllib.parse import quote, urlparse
 
-import httpx
 import yaml
 from azure.identity import AzureCliCredential, ChainedTokenCredential, DefaultAzureCredential
 
@@ -23,7 +22,11 @@ from foundry_opt.bootstrap.runner import (
 
 _PROJECT_ENDPOINT_RE = re.compile(r"^https://[^\s]+/api/projects/[^\s/]+/?$")
 _AGENT_NAME_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
-_FIELD_NAMES = ("project_endpoint", "agent_name")
+_ACCOUNT_RESOURCE_ID_RE = re.compile(
+    r"^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/"
+    r"Microsoft\.CognitiveServices/accounts/[^/]+$",
+    re.IGNORECASE,
+)
 _SOURCE_LABELS: Mapping[str, str] = {
     "existing_profile": "existing v2 profile",
     "agent_metadata": ".foundry/agent-metadata*.yaml",
@@ -32,8 +35,6 @@ _SOURCE_LABELS: Mapping[str, str] = {
     "binding_evidence": "reviewed binding evidence",
     "owner_answer": "owner answer",
 }
-_ARM_SUBSCRIPTIONS_API = "2022-12-01"
-_COGNITIVE_ACCOUNTS_API = "2024-10-01"
 
 
 def _validate_project_endpoint(value: str) -> str:
@@ -46,6 +47,30 @@ def _validate_agent_name(value: str) -> str:
     if _AGENT_NAME_RE.fullmatch(value) is None:
         raise BootstrapConfigError("agent_name must be a safe Foundry agent identifier")
     return value
+
+
+def _validate_account_resource_id(
+    value: str,
+    *,
+    project_endpoint: str | None = None,
+) -> str:
+    normalized = value.rstrip("/")
+    if _ACCOUNT_RESOURCE_ID_RE.fullmatch(normalized) is None:
+        raise BootstrapConfigError(
+            "account_resource_id must identify a Microsoft.CognitiveServices account"
+        )
+    if project_endpoint is not None:
+        hostname = urlparse(project_endpoint).hostname or ""
+        endpoint_account = hostname.split(".", 1)[0]
+        resource_account = normalized.rsplit("/", 1)[-1]
+        if (
+            endpoint_account
+            and endpoint_account.casefold() != resource_account.casefold()
+        ):
+            raise BootstrapConfigError(
+                "account_resource_id account must match the Foundry project endpoint"
+            )
+    return normalized
 
 
 def normalized_foundry_target_key(
@@ -73,6 +98,7 @@ class _TargetSeed:
     detail: str
     project_endpoint: _FieldValue | None = None
     agent_name: _FieldValue | None = None
+    account_resource_id: _FieldValue | None = None
     expected_version: str | None = None
 
 
@@ -83,6 +109,7 @@ class _PendingQuestion:
     missing_fields: tuple[str, ...]
     project_endpoint: _FieldValue | None
     agent_name: _FieldValue | None
+    account_resource_id: _FieldValue | None
     blocked_detail: str | None = None
 
 
@@ -96,6 +123,7 @@ class _LocalTargetContext:
     package_fingerprint: str
     project_endpoint: _FieldValue | None
     agent_name: _FieldValue | None
+    account_resource_id: _FieldValue | None
     expected_version: str | None
     blocked_detail: str | None
 
@@ -106,6 +134,8 @@ class _LocalTargetContext:
             missing.append("project_endpoint")
         if self.agent_name is None:
             missing.append("agent_name")
+        if self.account_resource_id is None:
+            missing.append("account_resource_id")
         return tuple(missing)
 
 
@@ -127,10 +157,6 @@ class FoundryTargetInventoryAdapterProtocol(Protocol):
         source_root: str,
         package_root: str,
     ) -> Mapping[str, object]: ...
-
-
-class AzureTargetInventoryAdapterProtocol(Protocol):
-    def resolve_account_resource_id(self, project_endpoint: str) -> str | None: ...
 
 
 def build_local_user_credential() -> ChainedTokenCredential:
@@ -185,83 +211,15 @@ class DefaultFoundryTargetInventoryAdapter(FoundryTargetInventoryAdapterProtocol
         )
 
 
-class DefaultAzureTargetInventoryAdapter(AzureTargetInventoryAdapterProtocol):
-    def __init__(self, *, credential: object | None = None, timeout: float = 10.0) -> None:
-        self._credential = credential or build_local_user_credential()
-        self._client = httpx.Client(
-            follow_redirects=False,
-            timeout=timeout,
-            trust_env=False,
-        )
-        self._cache: dict[str, str | None] = {}
-
-    def resolve_account_resource_id(self, project_endpoint: str) -> str | None:
-        cached = self._cache.get(project_endpoint)
-        if project_endpoint in self._cache:
-            return cached
-        hostname = urlparse(project_endpoint).hostname or ""
-        account_name = hostname.split(".", 1)[0]
-        if not account_name:
-            self._cache[project_endpoint] = None
-            return None
-        token = self._credential.get_token("https://management.azure.com/.default").token
-        headers = {
-            "Accept": "application/json",
-            "Authorization": f"Bearer {token}",
-        }
-        matches: set[str] = set()
-        try:
-            subscriptions_response = self._client.get(
-                "https://management.azure.com/subscriptions",
-                params={"api-version": _ARM_SUBSCRIPTIONS_API},
-                headers=headers,
-            )
-            subscriptions_response.raise_for_status()
-            subscriptions = subscriptions_response.json().get("value", ())
-            if not isinstance(subscriptions, Sequence):
-                subscriptions = ()
-            for entry in subscriptions:
-                if not isinstance(entry, Mapping):
-                    continue
-                subscription_id = str(entry.get("subscriptionId") or "")
-                if not subscription_id:
-                    continue
-                accounts_response = self._client.get(
-                    f"https://management.azure.com/subscriptions/{quote(subscription_id, safe='')}/providers/Microsoft.CognitiveServices/accounts",
-                    params={"api-version": _COGNITIVE_ACCOUNTS_API},
-                    headers=headers,
-                )
-                accounts_response.raise_for_status()
-                accounts = accounts_response.json().get("value", ())
-                if not isinstance(accounts, Sequence):
-                    continue
-                for account in accounts:
-                    if not isinstance(account, Mapping):
-                        continue
-                    if str(account.get("name") or "").casefold() != account_name.casefold():
-                        continue
-                    resource_id = account.get("id")
-                    if isinstance(resource_id, str) and resource_id.startswith("/subscriptions/"):
-                        matches.add(resource_id)
-        except Exception:
-            self._cache[project_endpoint] = None
-            return None
-        resolved = next(iter(matches)) if len(matches) == 1 else None
-        self._cache[project_endpoint] = resolved
-        return resolved
-
-
 class DefaultFoundryTargetResolutionHandler:
     def __init__(
         self,
         *,
         foundry_inventory: FoundryTargetInventoryAdapterProtocol | None = None,
-        azure_inventory: AzureTargetInventoryAdapterProtocol | None = None,
         binding_evidence_by_root: Mapping[str, Mapping[str, object]] | None = None,
         binding_evidence_by_agent: Mapping[str, Mapping[str, object]] | None = None,
     ) -> None:
         self._foundry_inventory = foundry_inventory or DefaultFoundryTargetInventoryAdapter()
-        self._azure_inventory = azure_inventory or DefaultAzureTargetInventoryAdapter()
         self._binding_evidence_by_root = {
             str(key).casefold(): dict(value)
             for key, value in (binding_evidence_by_root or {}).items()
@@ -280,7 +238,7 @@ class DefaultFoundryTargetResolutionHandler:
         if self._next_pending_question(operation, records) is not None:
             return BootstrapStageOutcome(
                 stage="foundry_target_resolution",
-                note="Resolve the remaining reviewed Foundry target endpoint/agent-name inputs.",
+                note="Resolve the remaining reviewed Foundry target inputs.",
                 foundry_targets=records,
             )
         blocked = [
@@ -334,7 +292,11 @@ class DefaultFoundryTargetResolutionHandler:
                 raise BootstrapApplyError(
                     "Foundry target retry cannot be combined with corrected fields"
                 )
-            unsupported = set(payload) - {"project_endpoint", "agent_name"}
+            unsupported = set(payload) - {
+                "project_endpoint",
+                "agent_name",
+                "account_resource_id",
+            }
             if unsupported:
                 raise BootstrapApplyError(
                     "unsupported Foundry target field: "
@@ -359,26 +321,44 @@ class DefaultFoundryTargetResolutionHandler:
                             else None
                         ),
                     ),
+                    (
+                        "account_resource_id",
+                        (
+                            question.account_resource_id.value
+                            if question.account_resource_id is not None
+                            else None
+                        ),
+                    ),
                 )
                 if value is not None
             }
             merged.update(payload)
-            missing = {"project_endpoint", "agent_name"} - set(merged)
+            missing = {
+                "project_endpoint",
+                "agent_name",
+                "account_resource_id",
+            } - set(merged)
             if missing:
                 raise BootstrapApplyError(
                     "blocked Foundry target correction must provide: "
                     + ", ".join(sorted(missing))
                 )
+            project_endpoint = _validate_project_endpoint(
+                merged["project_endpoint"]
+            )
             return {
-                "project_endpoint": _validate_project_endpoint(
-                    merged["project_endpoint"]
-                ),
+                "project_endpoint": project_endpoint,
                 "agent_name": _validate_agent_name(merged["agent_name"]),
+                "account_resource_id": _validate_account_resource_id(
+                    merged["account_resource_id"],
+                    project_endpoint=project_endpoint,
+                ),
             }
         if isinstance(answer, str):
             if len(question.missing_fields) != 1:
                 raise BootstrapApplyError(
-                    "Foundry target question accepts one field at a time"
+                    "Foundry target question requires named fields when multiple "
+                    "values are unresolved"
                 )
             payload = {question.missing_fields[0]: answer}
         elif isinstance(answer, Mapping):
@@ -387,20 +367,32 @@ class DefaultFoundryTargetResolutionHandler:
             raise BootstrapApplyError("foundry target answer must be a mapping or string")
         expected = set(question.missing_fields)
         actual = set(payload)
-        allowed = {"project_endpoint", "agent_name"}
+        allowed = {"project_endpoint", "agent_name", "account_resource_id"}
         if not expected.issubset(actual) or not actual.issubset(allowed):
             raise BootstrapApplyError(
                 "foundry target answer must include these fields: "
                 + ", ".join(sorted(expected))
             )
         normalized: dict[str, str] = {}
-        for key, value in payload.items():
-            if key == "project_endpoint":
-                normalized[key] = _validate_project_endpoint(value)
-            elif key == "agent_name":
-                normalized[key] = _validate_agent_name(value)
-            else:
-                raise BootstrapApplyError(f"unsupported foundry target field: {key}")
+        project_endpoint = (
+            question.project_endpoint.value
+            if question.project_endpoint is not None
+            else None
+        )
+        if "project_endpoint" in payload:
+            project_endpoint = _validate_project_endpoint(
+                payload["project_endpoint"]
+            )
+            normalized["project_endpoint"] = project_endpoint
+        if "agent_name" in payload:
+            normalized["agent_name"] = _validate_agent_name(
+                payload["agent_name"]
+            )
+        if "account_resource_id" in payload:
+            normalized["account_resource_id"] = _validate_account_resource_id(
+                payload["account_resource_id"],
+                project_endpoint=project_endpoint,
+            )
         return normalized
 
     def build_question(
@@ -431,6 +423,8 @@ class DefaultFoundryTargetResolutionHandler:
                 f"- agent_name: `{pending.agent_name.value}` "
                 f"(from {_human_source(pending.agent_name.source)})"
             )
+        if pending.account_resource_id is not None:
+            lines.append("- Azure account: resolved")
         if pending.blocked_detail is not None:
             if pending.missing_fields:
                 lines.append(
@@ -443,20 +437,41 @@ class DefaultFoundryTargetResolutionHandler:
                 lines.append("- Provide the remaining field through the skill bridge.")
             else:
                 lines.append(
-                    "- Retry after correcting Azure access, or provide a corrected "
-                    "project endpoint and/or agent name."
+                    "- Retry after correcting Foundry access, or provide corrected "
+                    "target fields."
                 )
         else:
-            lines.append(
-                "- Still needed: "
-                + ", ".join(f"`{field}`" for field in pending.missing_fields)
+            owner_fields = tuple(
+                field
+                for field in pending.missing_fields
+                if field != "account_resource_id"
             )
-            lines.append("- Provide the requested value or values through the skill bridge.")
+            if owner_fields:
+                lines.append(
+                    "- Search the repository first; ask the owner only if these remain "
+                    "unresolved: "
+                    + ", ".join(f"`{field}`" for field in owner_fields)
+                )
+            if "account_resource_id" in pending.missing_fields:
+                lines.extend(
+                    (
+                        "- Azure account lookup is still needed for this endpoint.",
+                        "- Use the current Azure login and coding-agent Azure tools to "
+                        "resolve the exact Microsoft.CognitiveServices account.",
+                        "- Ask the owner to correct or choose Azure access only if the "
+                        "tool lookup returns no unique account.",
+                    )
+                )
+            else:
+                lines.append(
+                    "- Provide the requested value or values through the skill bridge."
+                )
         return BootstrapQuestion(
             question_id=question_id,
             kind="foundry_target",
             title=f"Resolve the Foundry target for {pending.repo_agent_id}",
             details_markdown="\n".join(lines),
+            required_fields=pending.missing_fields,
         )
 
     def render_owner_markdown(
@@ -511,7 +526,15 @@ class DefaultFoundryTargetResolutionHandler:
                         f"({_human_source(pending.agent_name.source)})"
                     )
                 lines.append(
-                    "  - Missing: " + ", ".join(sorted(pending.missing_fields))
+                    "  - Still needed: "
+                    + ", ".join(
+                        (
+                            "Azure account lookup"
+                            if field == "account_resource_id"
+                            else field
+                        )
+                        for field in sorted(pending.missing_fields)
+                    )
                 )
             else:
                 lines.append(f"- {repo_agent_id}: waiting for earlier target resolution")
@@ -570,32 +593,9 @@ class DefaultFoundryTargetResolutionHandler:
     ) -> BootstrapStageOutcome:
         normalized = self.persisted_answer_value(operation=operation, answer=answer)
         pending = self._require_pending_question(operation, operation.foundry_targets)
-        merged = {
-            key: value
-            for key, value in (
-                (
-                    "project_endpoint",
-                    (
-                        pending.project_endpoint.value
-                        if pending.project_endpoint is not None
-                        else None
-                    ),
-                ),
-                (
-                    "agent_name",
-                    (
-                        pending.agent_name.value
-                        if pending.agent_name is not None
-                        else None
-                    ),
-                ),
-            )
-            if value is not None
-        }
-        merged.update(normalized)
         records = self._prepare_records(
             operation,
-            owner_overrides={pending.repo_agent_id.casefold(): merged},
+            owner_overrides={pending.repo_agent_id.casefold(): normalized},
         )
         if not any(
             item.repo_agent_id.casefold() == pending.repo_agent_id.casefold()
@@ -604,7 +604,7 @@ class DefaultFoundryTargetResolutionHandler:
             context = self._local_context(
                 operation,
                 repo_agent_id=pending.repo_agent_id,
-                owner_overrides=merged,
+                owner_overrides=normalized,
             )
             if context is None:
                 raise BootstrapApplyError(
@@ -713,6 +713,7 @@ class DefaultFoundryTargetResolutionHandler:
                 continue
             assert context.project_endpoint is not None
             assert context.agent_name is not None
+            assert context.account_resource_id is not None
             target_key = normalized_foundry_target_key(
                 context.project_endpoint.value,
                 context.agent_name.value,
@@ -758,6 +759,7 @@ class DefaultFoundryTargetResolutionHandler:
                         for field, value in (
                             ("project_endpoint", target.project_endpoint),
                             ("agent_name", target.agent_name),
+                            ("account_resource_id", target.account_resource_id),
                         )
                         if value is None
                     ),
@@ -785,6 +787,15 @@ class DefaultFoundryTargetResolutionHandler:
                         )
                         else None
                     ),
+                    account_resource_id=(
+                        _FieldValue(
+                            target.account_resource_id,
+                            "owner_answer",
+                            "blocked target",
+                        )
+                        if target.account_resource_id is not None
+                        else None
+                    ),
                     blocked_detail=target.detail,
                 )
             context = self._local_context(
@@ -797,9 +808,10 @@ class DefaultFoundryTargetResolutionHandler:
                 return _PendingQuestion(
                     repo_agent_id=context.repo_agent_id,
                     root=context.root,
-                    missing_fields=(context.missing_fields[0],),
+                    missing_fields=context.missing_fields,
                     project_endpoint=context.project_endpoint,
                     agent_name=context.agent_name,
+                    account_resource_id=context.account_resource_id,
                 )
         return None
 
@@ -826,24 +838,14 @@ class DefaultFoundryTargetResolutionHandler:
     def _classify_target(self, context: _LocalTargetContext) -> BootstrapFoundryTargetRecord:
         assert context.project_endpoint is not None
         assert context.agent_name is not None
-        account_resource_id: str | None = None
+        assert context.account_resource_id is not None
+        account_resource_id = context.account_resource_id.value
         try:
             inventory = self._foundry_inventory.inspect_project(context.project_endpoint.value)
-            account_resource_id = self._azure_inventory.resolve_account_resource_id(
-                context.project_endpoint.value
-            )
         except Exception as exc:
             return self._blocked_record(
                 context,
                 detail=f"project inventory failed: {str(exc).strip() or type(exc).__name__}",
-            )
-        if account_resource_id is None:
-            return self._blocked_record(
-                context,
-                detail=(
-                    "project access succeeded, but the Azure account resource id "
-                    "could not be resolved with the current login"
-                ),
             )
         latest_version = inventory.agent_latest_versions.get(context.agent_name.value.casefold())
         if latest_version in (None, ""):
@@ -1052,6 +1054,22 @@ class DefaultFoundryTargetResolutionHandler:
             seeds.insert(0, owner_seed)
         project_endpoint = next((item.project_endpoint for item in seeds if item.project_endpoint is not None), None)
         agent_name = next((item.agent_name for item in seeds if item.agent_name is not None), None)
+        account_resource_id = next(
+            (
+                item.account_resource_id
+                for item in seeds
+                if item.account_resource_id is not None
+            ),
+            None,
+        )
+        if project_endpoint is not None and account_resource_id is not None:
+            try:
+                _validate_account_resource_id(
+                    account_resource_id.value,
+                    project_endpoint=project_endpoint.value,
+                )
+            except BootstrapConfigError:
+                account_resource_id = None
         expected_version = next((item.expected_version for item in seeds if item.expected_version), None)
         if (
             owner_seed is not None
@@ -1068,6 +1086,7 @@ class DefaultFoundryTargetResolutionHandler:
             package_fingerprint=discovered.package_fingerprint,
             project_endpoint=project_endpoint,
             agent_name=agent_name,
+            account_resource_id=account_resource_id,
             expected_version=expected_version,
             blocked_detail=blocked_detail,
         )
@@ -1100,6 +1119,11 @@ class DefaultFoundryTargetResolutionHandler:
                     source="existing_profile",
                     detail=detail,
                 ),
+                account_resource_id=_FieldValue(
+                    value=project.account_resource_id,
+                    source="existing_profile",
+                    detail=detail,
+                ),
                 expected_version=project.expected_version,
             ),
             None,
@@ -1120,6 +1144,7 @@ class DefaultFoundryTargetResolutionHandler:
             return None, None
         endpoints: set[str] = set()
         names: set[str] = set()
+        account_resource_ids: set[str] = set()
         versions: set[str] = set()
         for path in files:
             try:
@@ -1140,6 +1165,23 @@ class DefaultFoundryTargetResolutionHandler:
                     names.add(_validate_agent_name(str(name)))
                 except Exception as exc:
                     return None, f"{path.relative_to(root_path).as_posix()} has an invalid agent_name: {exc}"
+            account_resource_id = payload.get(
+                "foundry_account_resource_id",
+                payload.get("account_resource_id"),
+            )
+            if account_resource_id is not None:
+                try:
+                    account_resource_ids.add(
+                        _validate_account_resource_id(
+                            str(account_resource_id),
+                            project_endpoint=str(endpoint) if endpoint is not None else None,
+                        )
+                    )
+                except Exception as exc:
+                    return None, (
+                        f"{path.relative_to(root_path).as_posix()} has an invalid "
+                        f"foundry_account_resource_id: {exc}"
+                    )
             version = payload.get("expected_version")
             if version is not None:
                 versions.add(str(version))
@@ -1147,6 +1189,8 @@ class DefaultFoundryTargetResolutionHandler:
             return None, "agent metadata declares conflicting project_endpoint values"
         if len(names) > 1:
             return None, "agent metadata declares conflicting agent_name values"
+        if len(account_resource_ids) > 1:
+            return None, "agent metadata declares conflicting foundry_account_resource_id values"
         if len(versions) > 1:
             return None, "agent metadata declares conflicting expected_version values"
         detail = ", ".join(path.relative_to(root_path).as_posix() for path in files)
@@ -1161,6 +1205,15 @@ class DefaultFoundryTargetResolutionHandler:
                 agent_name=(
                     _FieldValue(next(iter(names)), "agent_metadata", detail)
                     if names
+                    else None
+                ),
+                account_resource_id=(
+                    _FieldValue(
+                        next(iter(account_resource_ids)),
+                        "agent_metadata",
+                        detail,
+                    )
+                    if account_resource_ids
                     else None
                 ),
                 expected_version=next(iter(versions)) if versions else None,
@@ -1178,12 +1231,18 @@ class DefaultFoundryTargetResolutionHandler:
             return None, None
         endpoint_values: set[str] = set()
         name_values: set[str] = set()
+        account_resource_id_values: set[str] = set()
         azure_yaml = repository_root / "azure.yaml"
         if azure_yaml.is_file():
             try:
                 payload = yaml.safe_load(azure_yaml.read_text(encoding="utf-8")) or {}
                 if isinstance(payload, Mapping):
-                    self._collect_named_values(payload, endpoint_values, name_values)
+                    self._collect_named_values(
+                        payload,
+                        endpoint_values,
+                        name_values,
+                        account_resource_id_values,
+                    )
             except Exception:
                 return None, None
         azure_dir = repository_root / ".azure"
@@ -1200,10 +1259,16 @@ class DefaultFoundryTargetResolutionHandler:
                             endpoint_values.add(value.strip())
                         elif key == "AZURE_AI_AGENT_NAME":
                             name_values.add(value.strip())
+                        elif key in {
+                            "AZURE_AI_FOUNDRY_ACCOUNT_RESOURCE_ID",
+                            "AZURE_FOUNDRY_ACCOUNT_RESOURCE_ID",
+                        }:
+                            account_resource_id_values.add(value.strip())
                 except OSError:
                     return None, None
         endpoint = None
         agent_name = None
+        account_resource_id = None
         if len(endpoint_values) == 1:
             try:
                 endpoint = _validate_project_endpoint(next(iter(endpoint_values)))
@@ -1214,7 +1279,15 @@ class DefaultFoundryTargetResolutionHandler:
                 agent_name = _validate_agent_name(next(iter(name_values)))
             except Exception:
                 agent_name = None
-        if endpoint is None and agent_name is None:
+        if len(account_resource_id_values) == 1:
+            try:
+                account_resource_id = _validate_account_resource_id(
+                    next(iter(account_resource_id_values)),
+                    project_endpoint=endpoint,
+                )
+            except Exception:
+                account_resource_id = None
+        if endpoint is None and agent_name is None and account_resource_id is None:
             return None, None
         detail = "azure.yaml/azd values"
         return (
@@ -1228,6 +1301,15 @@ class DefaultFoundryTargetResolutionHandler:
                 agent_name=(
                     _FieldValue(agent_name, "azd_environment", detail)
                     if agent_name is not None
+                    else None
+                ),
+                account_resource_id=(
+                    _FieldValue(
+                        account_resource_id,
+                        "azd_environment",
+                        detail,
+                    )
+                    if account_resource_id is not None
                     else None
                 ),
             ),
@@ -1245,6 +1327,10 @@ class DefaultFoundryTargetResolutionHandler:
         detail = "reviewed binding evidence"
         endpoint = payload.get("project_endpoint")
         agent_name = payload.get("agent_name")
+        account_resource_id = payload.get(
+            "account_resource_id",
+            payload.get("foundry_account_resource_id"),
+        )
         version = payload.get("agent_version") or payload.get("expected_version") or payload.get("version")
         try:
             normalized_endpoint = (
@@ -1262,6 +1348,20 @@ class DefaultFoundryTargetResolutionHandler:
             )
         except Exception as exc:
             return None, f"reviewed binding evidence has an invalid agent_name: {exc}"
+        try:
+            normalized_account_resource_id = (
+                _validate_account_resource_id(
+                    str(account_resource_id),
+                    project_endpoint=normalized_endpoint,
+                )
+                if account_resource_id is not None
+                else None
+            )
+        except Exception as exc:
+            return None, (
+                "reviewed binding evidence has an invalid account_resource_id: "
+                f"{exc}"
+            )
         return (
             _TargetSeed(
                 detail=detail,
@@ -1273,6 +1373,15 @@ class DefaultFoundryTargetResolutionHandler:
                 agent_name=(
                     _FieldValue(normalized_name, "binding_evidence", detail)
                     if normalized_name is not None
+                    else None
+                ),
+                account_resource_id=(
+                    _FieldValue(
+                        normalized_account_resource_id,
+                        "binding_evidence",
+                        detail,
+                    )
+                    if normalized_account_resource_id is not None
                     else None
                 ),
                 expected_version=str(version) if version is not None else None,
@@ -1289,6 +1398,7 @@ class DefaultFoundryTargetResolutionHandler:
         detail = "owner answer"
         endpoint = owner_values.get("project_endpoint")
         agent_name = owner_values.get("agent_name")
+        account_resource_id = owner_values.get("account_resource_id")
         return (
             _TargetSeed(
                 detail=detail,
@@ -1300,6 +1410,15 @@ class DefaultFoundryTargetResolutionHandler:
                 agent_name=(
                     _FieldValue(agent_name, "owner_answer", detail)
                     if agent_name is not None
+                    else None
+                ),
+                account_resource_id=(
+                    _FieldValue(
+                        account_resource_id,
+                        "owner_answer",
+                        "coding-agent Azure lookup",
+                    )
+                    if account_resource_id is not None
                     else None
                 ),
             ),
@@ -1321,6 +1440,7 @@ class DefaultFoundryTargetResolutionHandler:
         payload: Mapping[str, object],
         endpoint_values: set[str],
         name_values: set[str],
+        account_resource_id_values: set[str],
     ) -> None:
         for key, value in payload.items():
             lowered = str(key).casefold()
@@ -1329,6 +1449,7 @@ class DefaultFoundryTargetResolutionHandler:
                     value,
                     endpoint_values,
                     name_values,
+                    account_resource_id_values,
                 )
                 continue
             if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
@@ -1338,6 +1459,7 @@ class DefaultFoundryTargetResolutionHandler:
                             item,
                             endpoint_values,
                             name_values,
+                            account_resource_id_values,
                         )
                 continue
             if value is None:
@@ -1349,6 +1471,12 @@ class DefaultFoundryTargetResolutionHandler:
                 endpoint_values.add(text)
             elif lowered in {"agent_name", "azure_ai_agent_name"}:
                 name_values.add(text)
+            elif lowered in {
+                "foundry_account_resource_id",
+                "azure_ai_foundry_account_resource_id",
+                "azure_foundry_account_resource_id",
+            }:
+                account_resource_id_values.add(text)
 
     @staticmethod
     def _blocked_record(
@@ -1381,6 +1509,11 @@ class DefaultFoundryTargetResolutionHandler:
                     if context.agent_name is not None
                     else None
                 ),
+                account_resource_id=(
+                    context.account_resource_id.value
+                    if context.account_resource_id is not None
+                    else None
+                ),
                 deployment_ready=False,
                 detail=detail,
             ),
@@ -1388,8 +1521,6 @@ class DefaultFoundryTargetResolutionHandler:
 
 
 __all__ = [
-    "AzureTargetInventoryAdapterProtocol",
-    "DefaultAzureTargetInventoryAdapter",
     "DefaultFoundryTargetInventoryAdapter",
     "DefaultFoundryTargetResolutionHandler",
     "FoundryProjectInventory",

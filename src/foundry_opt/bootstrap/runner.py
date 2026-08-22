@@ -182,6 +182,7 @@ class BootstrapQuestion(FrozenModel):
     kind: BootstrapQuestionKind
     title: str
     details_markdown: str
+    required_fields: tuple[str, ...] = ()
     allow_multiple: bool = False
     choices: tuple[BootstrapQuestionChoice, ...] = ()
 

@@ -42,36 +42,62 @@ files, or learn the low-level bootstrap CLI.
    owner.
 4. Keep the `<<<FOUNDRY_BOOTSTRAP_TURN>>>` envelope for yourself. Never paste
    or expose its raw JSON to the owner.
-5. If `next_question` is present, ask the owner exactly
-   `next_question.title` plus `next_question.details_markdown`. If
-   `next_question.choices` are present, present those exact choices.
-6. Pass the owner response back to the script instead of inventing planning or
-   provider logic:
+5. Inspect `next_question` before asking the owner:
+   - for any question other than `foundry_target`, ask exactly
+     `next_question.title` plus `next_question.details_markdown` and present
+     any exact choices
+   - for `foundry_target`, first resolve as many `required_fields` as possible
+     with repository and Azure tools; do not expose the machine-only field
+     names or ask the owner for an Azure resource ID
+6. Resolve a `foundry_target` question in this order:
+   - if `project_endpoint` is required, search the selected agent root and
+     repository metadata, including existing profiles, `.foundry` metadata,
+     `azure.yaml`, and azd environment values; ask the owner for the Foundry
+     project endpoint only when no unique value can be established
+   - if `agent_name` is required, search the same repository evidence; ask the
+     owner only when no unique deployed agent name can be established
+   - once the project endpoint is known, derive the exact Foundry account name
+     from its hostname
+   - if `account_resource_id` is required, use Azure resource lookup tools with
+     the owner's current login, preferring Azure MCP or Azure Resource Graph,
+     and query `Microsoft.CognitiveServices/accounts` for that exact name
+   - accept an account only when one unique matching resource is found and its
+     name matches the endpoint; pass its immutable ARM resource ID with
+     `--account-resource-id "<resource-id>"`
+   - if no unique account is visible, explain which endpoint/account was
+     searched and ask the owner to correct the Azure tenant/subscription login
+     or choose among the matching subscriptions, then repeat the lookup
+   Collect every required field before invoking `answer`. Never ask the owner
+   to discover or type an ARM resource ID.
+7. Pass the owner response or tool-resolved target data back to the script
+   instead of inventing deterministic validation, planning, or provider
+   mutation logic:
    - choice question:
      `python scripts/bootstrap.py answer --operation-id <id> --question-id <question-id> --choice <value> [--choice <value> ...]`
    - free-text question:
      `python scripts/bootstrap.py answer --operation-id <id> --question-id <question-id> --response "<owner response>"`
    - Foundry target question:
-     `python scripts/bootstrap.py answer --operation-id <id> --question-id <question-id> [--project-endpoint "<endpoint>"] [--agent-name "<name>"]`
-   - blocked Foundry target after correcting Azure access:
+     `python scripts/bootstrap.py answer --operation-id <id> --question-id <question-id> [--project-endpoint "<endpoint>"] [--agent-name "<name>"] [--account-resource-id "<resource-id>"]`
+   - blocked Foundry project inventory after correcting data-plane access:
      `python scripts/bootstrap.py answer --operation-id <id> --question-id <question-id> --retry`
    Supply every Foundry target field named by the question. Never encode an
    owner answer as JSON.
-7. When `available_actions` includes `approve`, request that exact approval
+8. When `available_actions` includes `approve`, request that exact approval
    from the owner and record it with
    `python scripts/bootstrap.py approve --operation-id <id> --step <repository|connection|commit|deployment> --actor "<owner>" --summary "<approved scope>"`.
-8. Use `python scripts/bootstrap.py status --operation-id <id>` to resume
+9. Use `python scripts/bootstrap.py status --operation-id <id>` to resume
    after interruptions, refresh stale questions, or recover the current bridge
    state.
-9. Use `python scripts/bootstrap.py rollback --operation-id <id> --step <repository|connection|commit|deployment>`
+10. Use `python scripts/bootstrap.py rollback --operation-id <id> --step <repository|connection|commit|deployment>`
    only when the returned `available_actions` list includes that rollback step.
-10. If `next_question` is `null`, do not invent a new question. Show the fresh
+11. If `next_question` is `null`, do not invent a new question. Show the fresh
     owner markdown, stop on blocked/final states, or use the returned recovery
     actions.
-11. Do not create or switch to a custom agent. Do not use another owner
-    client. Do not implement Foundry target resolution, planning, commit
-    creation, or deployment logic in this skill.
-12. At final handoff, present the returned resource links grouped as GitHub,
+12. Do not create or switch to a custom agent. Do not use another owner
+    client. Keep target validation and classification, lifecycle state,
+    planning, mutation, commit creation, deployment, receipts, and rollback in
+    the runtime.
+13. At final handoff, present the returned resource links grouped as GitHub,
     Azure, Foundry agents, and optional evaluation resources.
 
 ## References

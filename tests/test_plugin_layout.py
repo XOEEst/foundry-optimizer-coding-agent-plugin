@@ -120,12 +120,15 @@ def test_bootstrap_skill_frontmatter_and_owner_contract_describes_canonical_laun
     assert "Never paste or expose its raw JSON to the owner" in normalized
     assert "--project-endpoint" in normalized
     assert "--agent-name" in normalized
+    assert "--account-resource-id" in normalized
+    assert "resolve as many `required_fields` as possible" in normalized
+    assert "Never ask the owner to discover or type an ARM resource ID." in normalized
     assert "--retry" in normalized
     assert "--response-json" not in normalized
     assert "status --operation-id <id>" in normalized
     assert "rollback --operation-id <id>" in normalized
     assert "Do not create or switch to a custom agent." in normalized
-    assert "Do not implement Foundry target resolution" in normalized
+    assert "Keep target validation and classification" in normalized
 
 
 def test_plugin_tree_contains_only_allowed_boundary_files() -> None:

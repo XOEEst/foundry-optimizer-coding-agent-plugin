@@ -34,6 +34,7 @@ class _Question:
     kind: str
     title: str
     details_markdown: str
+    required_fields: tuple[str, ...] = ()
     allow_multiple: bool = False
     choices: tuple[_Choice, ...] = ()
 
@@ -162,6 +163,7 @@ def _status_turn() -> _Turn:
             kind="foundry_target",
             title="Resolve the reviewed Foundry target",
             details_markdown="Provide the reviewed Foundry target.",
+            required_fields=("account_resource_id",),
         ),
         available_actions=(
             _Action(name="answer"),
@@ -269,6 +271,9 @@ def test_answer_uses_choice_arguments_with_fake_runner() -> None:
     )
     assert machine_turn["state"] == "foundry_target_resolution"
     assert machine_turn["next_question"]["kind"] == "foundry_target"
+    assert machine_turn["next_question"]["required_fields"] == [
+        "account_resource_id"
+    ]
 
 
 def test_approve_passes_exact_owner_approval_details() -> None:
@@ -379,6 +384,12 @@ def test_answer_uses_dedicated_foundry_target_flags() -> None:
             "https://example.services.ai.azure.com/api/projects/example",
             "--agent-name",
             "example-agent",
+            "--account-resource-id",
+            (
+                "/subscriptions/11111111-1111-1111-1111-111111111111/"
+                "resourceGroups/example-rg/providers/"
+                "Microsoft.CognitiveServices/accounts/example"
+            ),
         ],
         runner_factory=lambda _: runner,
         stdout=stdout,
@@ -395,6 +406,11 @@ def test_answer_uses_dedicated_foundry_target_flags() -> None:
             {
                 "project_endpoint": "https://example.services.ai.azure.com/api/projects/example",
                 "agent_name": "example-agent",
+                "account_resource_id": (
+                    "/subscriptions/11111111-1111-1111-1111-111111111111/"
+                    "resourceGroups/example-rg/providers/"
+                    "Microsoft.CognitiveServices/accounts/example"
+                ),
             },
         )
     ]

@@ -15,12 +15,19 @@ JSON, hashes, provider state, or receipt payloads during the normal path.
    - Folder, source root, package root, readiness, and current binding state.
    - Choose `ignore`, `register disabled`, or `register enabled`.
 2. **Foundry targets**
-   - Confirm a Foundry project endpoint and agent name for each enabled agent.
+   - Detect the Foundry project endpoint and agent name from repository
+     metadata when possible; ask the owner only for values that remain missing.
    - Values already proven by a profile, metadata, `azure.yaml`, azd, or
      binding evidence are reused.
-   - If Azure account resolution is blocked, correct either target field or
-     retry after fixing the current Azure login. Bootstrap does not advance to
-     repository review until the enabled target is renderable and resolved.
+   - The coding agent resolves the backing Azure account with Azure tools and
+     the owner's current login. Owners are not asked to discover ARM resource
+     IDs.
+   - If no unique Azure account is visible, the owner is prompted to correct
+     the tenant/subscription login or choose the matching subscription.
+     Bootstrap does not advance until the enabled target is resolved.
+   - The skill submits the complete resolved target through `answer`; the
+     runtime validates the endpoint, agent name, account match, and Foundry
+     project access before continuing.
 3. **Repository changes**
    - Registry, profiles, instructions, issue form, workflows, preserved files,
      and conflicts.
