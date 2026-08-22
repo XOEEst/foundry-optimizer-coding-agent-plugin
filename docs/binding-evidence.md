@@ -170,3 +170,9 @@ approval into the new runtime.
 A project that publishes no downloadable code archive, or an agent version that does not match
 the requested version, produces an error instead of a weaker classification. In that case an
 explicit `reviewed_operator_attestation` document is the supported v1 path.
+
+## Related architecture
+
+- [Trust model](architecture/trust-model.md)
+- [Repository contract](reference/repository-contract.md)
+- [Operate deployments](guides/operate-deployments.md)

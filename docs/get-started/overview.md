@@ -78,6 +78,11 @@ Verification can be added later without repeating repository bootstrap.
 
 ## Advanced references
 
+- [Documentation index](../README.md)
+- [System architecture](../architecture/system-overview.md)
+- [Skill and runtime seam](../architecture/skill-runtime-seam.md)
+- [Architecture decisions](../decisions/README.md)
+- [Repository contract](../reference/repository-contract.md)
 - [Identity and RBAC](../identity-rbac.md)
 - [Binding evidence](../binding-evidence.md)
 - [Managed files](../managed-files.md)

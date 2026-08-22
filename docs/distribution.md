@@ -18,9 +18,28 @@ Every operation must:
 6. reuse the recorded commit when resuming
 
 Customer templates and generated bootstrap plans use this exact-pin contract.
-The current reviewed customer runtime is
-`770ad878f0658e9368b042d9a7f6732e49ff0200`; later upgrades must select a new
-reviewed commit explicitly and refresh the managed lock.
+Do not encode a repository-wide "current" SHA in documentation. The reviewed
+commit is operation-specific and is recorded in the generated registry,
+managed lock, skill package manifest, and receipts.
+
+## Using the latest main branch
+
+The latest `main` files are appropriate for development, review, and building
+a new local skill package:
+
+```powershell
+git clone https://github.com/XOEEst/foundry-optimizer-coding-agent-plugin.git
+Set-Location foundry-optimizer-coding-agent-plugin
+git switch main
+git pull --ff-only origin main
+uv run python tools\build_foundry_bootstrap_skill.py
+copilot skill add .\dist\foundry-bootstrap-skill\foundry-bootstrap
+```
+
+The build resolves the checked-out `main` revision to an exact commit and
+embeds that commit in the generated skill lock and checksum manifest. Once an
+operation starts, resume and privileged execution use that recorded commit
+rather than resolving `main` again.
 
 ## Rollback
 
@@ -42,3 +61,7 @@ never updates the checked-in placeholder template. It writes:
 - `dist/foundry-bootstrap-skill/foundry-bootstrap/` - installable skill directory
 - `dist/foundry-bootstrap-skill.zip` - deterministic ZIP artifact
 - `dist/foundry-bootstrap-skill.checksums.json` - ZIP and runtime provenance manifest
+
+See [Skill and runtime seam](architecture/skill-runtime-seam.md) for why the
+skill can adaptively discover context while privileged runtime work stays
+commit-pinned and deterministic.

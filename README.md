@@ -10,6 +10,7 @@ the low-level command tree.
 - [Bootstrap](docs/get-started/bootstrap.md)
 - [Issues and monitoring](docs/get-started/issues-and-monitoring.md)
 - [Evaluation gates](docs/get-started/evaluation-gates.md)
+- [Complete documentation index](docs/README.md)
 
 These guides explain the owner decisions first. Use the advanced
 references once you need the detailed contracts.
@@ -76,6 +77,12 @@ See [Distribution and pinning](docs/distribution.md) and
 
 ## Advanced references
 
+- [System architecture](docs/architecture/system-overview.md)
+- [Skill and runtime seam](docs/architecture/skill-runtime-seam.md)
+- [Architecture decisions](docs/decisions/README.md)
+- [Repository contract](docs/reference/repository-contract.md)
+- [CLI reference](docs/reference/cli.md)
+- [Evidence, state, and receipts](docs/reference/evidence-state-and-receipts.md)
 - [Identity and RBAC](docs/identity-rbac.md)
 - [Binding evidence](docs/binding-evidence.md)
 - [Managed files](docs/managed-files.md)

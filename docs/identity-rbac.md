@@ -117,3 +117,10 @@ separate identities is preserved.
 Bootstrap adds or adopts only the reviewed least-privilege assignments. It does not silently
 remove broader role assignments that already exist on the identity; owners should review those
 legacy assignments separately before considering the identity least-privilege.
+
+## Related architecture
+
+- [Trust model](architecture/trust-model.md)
+- [Repository contract](reference/repository-contract.md)
+- [ADR 0013: Immutable GitHub OIDC and enterprise-policy gating](decisions/0013-immutable-github-oidc-and-enterprise-policy.md)
+- [ADR 0016: Shared identity with environment federation](decisions/0016-shared-identity-with-environment-federation.md)

@@ -1,5 +1,9 @@
 # Retained bootstrap pilot
 
+> **Illustrative development evidence.** This page records one retained pilot
+> and does not override the current architecture, repository contract, or
+> accepted ADRs.
+
 The public synthetic pilot repository is
 [`XOEEst/foundry-bootstrap-pilot`](https://github.com/XOEEst/foundry-bootstrap-pilot).
 It retains one active aligned root, one inactive bound-unknown fixture, and one

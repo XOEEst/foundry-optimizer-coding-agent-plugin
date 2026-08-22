@@ -16,3 +16,7 @@ Enable these settings before allowing customer workflows to resolve floating
 
 Until these controls are active, use an explicit reviewed commit for every
 privileged bootstrap, optimize, validation, and deployment workflow.
+
+See [Distribution and pinning](distribution.md) and
+[Trust model](architecture/trust-model.md) for the exact-commit contract that
+applies before these protections are enabled.
