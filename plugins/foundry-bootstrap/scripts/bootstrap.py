@@ -136,6 +136,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Reviewed deployed Foundry agent name for a target question.",
     )
     answer.add_argument(
+        "--account-resource-id",
+        help=(
+            "Azure resource ID resolved by the coding agent for the Foundry "
+            "account backing the reviewed project endpoint."
+        ),
+    )
+    answer.add_argument(
         "--retry",
         action="store_true",
         help="Retry the current blocked Foundry target after correcting access.",
@@ -422,6 +429,7 @@ def _coerce_answer(args: argparse.Namespace) -> object:
         for key, value in (
             ("project_endpoint", args.project_endpoint),
             ("agent_name", args.agent_name),
+            ("account_resource_id", args.account_resource_id),
         )
         if value is not None
     }
@@ -437,7 +445,8 @@ def _coerce_answer(args: argparse.Namespace) -> object:
     if modes != 1:
         raise RuntimeError(
             "answer requires exactly one response mode: --choice, --response, "
-            "--project-endpoint/--agent-name, --retry, --yes, or --no"
+            "--project-endpoint/--agent-name/--account-resource-id, --retry, "
+            "--yes, or --no"
         )
     if args.choices:
         return list(args.choices)

@@ -29,10 +29,7 @@ from foundry_opt.bootstrap.runner import (
     FileBootstrapRunnerStateStore,
 )
 from tests.bootstrap.test_connection_setup import _Drivers, _Inventory
-from tests.bootstrap.test_foundry_targets import (
-    _FakeAzureInventory,
-    _FakeFoundryInventory,
-)
+from tests.bootstrap.test_foundry_targets import _FakeFoundryInventory
 from tests.bootstrap.test_local_deploy import _DeploymentAdapter
 from tests.bootstrap.test_repository_setup import (
     ACCOUNT_RESOURCE_ID,
@@ -67,9 +64,6 @@ def test_skill_runner_completes_one_click_bootstrap_with_approved_seams(
         target_resolution_handler=DefaultFoundryTargetResolutionHandler(
             foundry_inventory=_FakeFoundryInventory(
                 latest_versions={PROJECT_ENDPOINT: {}}
-            ),
-            azure_inventory=_FakeAzureInventory(
-                {PROJECT_ENDPOINT: ACCOUNT_RESOURCE_ID}
             ),
         ),
         repository_handler=BootstrapRepositorySetupHandler(
@@ -116,6 +110,7 @@ def test_skill_runner_completes_one_click_bootstrap_with_approved_seams(
         {
             "project_endpoint": PROJECT_ENDPOINT,
             "agent_name": "example-agent",
+            "account_resource_id": ACCOUNT_RESOURCE_ID,
         },
     )
     assert turn.state == "verification_policy"
@@ -224,14 +219,12 @@ def test_registered_disabled_agent_needs_no_target_connection_or_deployment(
         state_root=tmp_path / "commit-state"
     )
     foundry_inventory = _FakeFoundryInventory(latest_versions={})
-    azure_inventory = _FakeAzureInventory({})
     runner = BootstrapRunner(
         state_store=FileBootstrapRunnerStateStore(
             state_root=tmp_path / "runner-state"
         ),
         target_resolution_handler=DefaultFoundryTargetResolutionHandler(
             foundry_inventory=foundry_inventory,
-            azure_inventory=azure_inventory,
         ),
         repository_handler=BootstrapRepositorySetupHandler(
             coordinator=repository_coordinator
@@ -270,7 +263,6 @@ def test_registered_disabled_agent_needs_no_target_connection_or_deployment(
 
     assert turn.state == "final_handoff"
     assert foundry_inventory.inspect_calls == []
-    assert azure_inventory.calls == []
     registry = yaml.safe_load(
         (repository / ".foundry-opt" / "registry.yaml").read_text(
             encoding="utf-8"

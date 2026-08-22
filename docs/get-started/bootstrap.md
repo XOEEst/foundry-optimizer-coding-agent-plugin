@@ -33,10 +33,13 @@ present.
      current Foundry binding state.
    - Choose `ignore`, `register disabled`, or `register enabled`.
 2. **Foundry targets**
-   - For each enabled agent, confirm the Foundry project endpoint and agent
-     name.
+   - For each enabled agent, reuse the Foundry project endpoint and agent name
+     from repository metadata, or ask only when either value is missing.
    - Bootstrap reuses trusted profile, metadata, `azure.yaml`, azd, or binding
      evidence values and asks only for missing information.
+   - The coding agent uses Azure tools and the current Azure login to resolve
+     the backing account resource. The owner is prompted only when no unique
+     account can be found or Azure access needs correction.
 3. **Repository approval**
    - Review registry entries, profiles, instructions, issue forms, workflows,
      added files, updated files, preserved files, and conflicts.

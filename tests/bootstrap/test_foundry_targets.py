@@ -8,7 +8,7 @@ import subprocess
 import pytest
 import yaml
 
-from foundry_opt.bootstrap.errors import BootstrapApplyError
+from foundry_opt.bootstrap.errors import BootstrapApplyError, BootstrapConfigError
 from foundry_opt.bootstrap.foundry_targets import (
     DefaultFoundryTargetResolutionHandler,
     FoundryProjectInventory,
@@ -31,16 +31,6 @@ PROFILE_ACCOUNT_ID = (
     "/subscriptions/33333333-3333-3333-3333-333333333333/resourceGroups/example-rg"
     "/providers/Microsoft.CognitiveServices/accounts/profile"
 )
-
-
-class _FakeAzureInventory:
-    def __init__(self, mapping: Mapping[str, str | None]) -> None:
-        self._mapping = dict(mapping)
-        self.calls: list[str] = []
-
-    def resolve_account_resource_id(self, project_endpoint: str) -> str | None:
-        self.calls.append(project_endpoint)
-        return self._mapping.get(project_endpoint)
 
 
 class _FakeFoundryInventory:
@@ -244,18 +234,26 @@ def test_metadata_target_reuse_classifies_existing_aligned_without_mutation(
         latest_versions={PROJECT_ENDPOINT: {"example-agent": "1"}},
         adapters={PROJECT_ENDPOINT: adapter},
     )
-    azure_inventory = _FakeAzureInventory({PROJECT_ENDPOINT: ACCOUNT_RESOURCE_ID})
     store = FileBootstrapRunnerStateStore(state_root=tmp_path / "state")
     runner = BootstrapRunner(
         state_store=store,
         target_resolution_handler=DefaultFoundryTargetResolutionHandler(
             foundry_inventory=foundry_inventory,
-            azure_inventory=azure_inventory,
         ),
     )
 
     first = runner.start(repo)
     turn = _select_and_enable_all(runner, first)
+    assert turn.state == "foundry_target_resolution"
+    assert turn.next_question is not None
+    assert turn.next_question.required_fields == ("account_resource_id",)
+    assert foundry_inventory.inspect_calls == []
+
+    turn = runner.answer(
+        turn.operation_id,
+        turn.next_question.question_id,
+        {"account_resource_id": ACCOUNT_RESOURCE_ID},
+    )
     record = store.load(turn.operation_id).foundry_targets[0].reviewed_target
 
     assert turn.state == "verification_policy"
@@ -303,13 +301,11 @@ def test_existing_profile_takes_priority_over_agent_metadata(tmp_path: Path) -> 
     foundry_inventory = _FakeFoundryInventory(
         latest_versions={PROFILE_ENDPOINT: {"profile-agent": "9"}}
     )
-    azure_inventory = _FakeAzureInventory({PROFILE_ENDPOINT: PROFILE_ACCOUNT_ID})
     store = FileBootstrapRunnerStateStore(state_root=tmp_path / "state")
     runner = BootstrapRunner(
         state_store=store,
         target_resolution_handler=DefaultFoundryTargetResolutionHandler(
             foundry_inventory=foundry_inventory,
-            azure_inventory=azure_inventory,
         ),
     )
 
@@ -327,7 +323,7 @@ def test_existing_profile_takes_priority_over_agent_metadata(tmp_path: Path) -> 
     assert METADATA_ENDPOINT not in foundry_inventory.inspect_calls
 
 
-def test_questions_only_cover_unresolved_fields_one_agent_at_a_time(tmp_path: Path) -> None:
+def test_questions_cover_all_unresolved_fields_one_agent_at_a_time(tmp_path: Path) -> None:
     repo = _create_repository(
         tmp_path,
         agents=[
@@ -348,18 +344,11 @@ def test_questions_only_cover_unresolved_fields_one_agent_at_a_time(tmp_path: Pa
             SECOND_ENDPOINT: {},
         }
     )
-    azure_inventory = _FakeAzureInventory(
-        {
-            PROJECT_ENDPOINT: ACCOUNT_RESOURCE_ID,
-            SECOND_ENDPOINT: SECOND_ACCOUNT_ID,
-        }
-    )
     store = FileBootstrapRunnerStateStore(state_root=tmp_path / "state")
     runner = BootstrapRunner(
         state_store=store,
         target_resolution_handler=DefaultFoundryTargetResolutionHandler(
             foundry_inventory=foundry_inventory,
-            azure_inventory=azure_inventory,
         ),
     )
 
@@ -371,54 +360,58 @@ def test_questions_only_cover_unresolved_fields_one_agent_at_a_time(tmp_path: Pa
     assert turn.next_question is not None
     assert turn.next_question.kind == "foundry_target"
     assert selected[0] in turn.next_question.title
-    assert "`agent_name`" in turn.next_question.details_markdown
-    assert "`project_endpoint`" not in turn.next_question.details_markdown
+    assert turn.next_question.required_fields == (
+        "agent_name",
+        "account_resource_id",
+    )
 
     first_question_id = turn.next_question.question_id
     turn = runner.answer(
         turn.operation_id,
         first_question_id,
-        "agent-a",
+        {
+            "agent_name": "agent-a",
+            "account_resource_id": ACCOUNT_RESOURCE_ID,
+        },
     )
 
     assert turn.state == "foundry_target_resolution"
     assert turn.next_question is not None
     assert turn.next_question.question_id != first_question_id
     assert selected[1] in turn.next_question.title
-    assert "`project_endpoint`" in turn.next_question.details_markdown
-    assert "`agent_name`" not in turn.next_question.details_markdown
+    assert turn.next_question.required_fields == (
+        "project_endpoint",
+        "agent_name",
+        "account_resource_id",
+    )
 
     with pytest.raises(BootstrapApplyError, match="stale question id"):
         runner.answer(
             turn.operation_id,
             first_question_id,
-            "agent-a",
+            {
+                "agent_name": "agent-a",
+                "account_resource_id": ACCOUNT_RESOURCE_ID,
+            },
         )
-
-    endpoint = runner.answer(
-        turn.operation_id,
-        turn.next_question.question_id,
-        SECOND_ENDPOINT,
-    )
-    assert endpoint.state == "foundry_target_resolution"
-    assert endpoint.next_question is not None
-    assert "`agent_name`" in endpoint.next_question.details_markdown
-    assert "`project_endpoint`" not in endpoint.next_question.details_markdown
 
     resumed = BootstrapRunner(
         state_store=FileBootstrapRunnerStateStore(state_root=tmp_path / "state"),
         target_resolution_handler=DefaultFoundryTargetResolutionHandler(
             foundry_inventory=foundry_inventory,
-            azure_inventory=azure_inventory,
         ),
     ).start(repo)
-    assert resumed.operation_id == endpoint.operation_id
-    assert resumed.next_question == endpoint.next_question
+    assert resumed.operation_id == turn.operation_id
+    assert resumed.next_question == turn.next_question
 
     final = runner.answer(
         resumed.operation_id,
         resumed.next_question.question_id,
-        "agent-b",
+        {
+            "project_endpoint": SECOND_ENDPOINT,
+            "agent_name": "agent-b",
+            "account_resource_id": SECOND_ACCOUNT_ID,
+        },
     )
     records = {
         item.repo_agent_id: item.reviewed_target
@@ -442,6 +435,7 @@ def test_duplicate_normalized_targets_across_agents_are_rejected(
                 "metadata": {
                     "project_endpoint": PROJECT_ENDPOINT,
                     "agent_name": "example-agent",
+                    "foundry_account_resource_id": ACCOUNT_RESOURCE_ID,
                 },
             },
             {
@@ -449,6 +443,7 @@ def test_duplicate_normalized_targets_across_agents_are_rejected(
                 "metadata": {
                     "project_endpoint": f"{PROJECT_ENDPOINT}/",
                     "agent_name": "EXAMPLE-AGENT",
+                    "foundry_account_resource_id": ACCOUNT_RESOURCE_ID,
                 },
             },
         ],
@@ -458,9 +453,6 @@ def test_duplicate_normalized_targets_across_agents_are_rejected(
         target_resolution_handler=DefaultFoundryTargetResolutionHandler(
             foundry_inventory=_FakeFoundryInventory(
                 latest_versions={PROJECT_ENDPOINT: {}}
-            ),
-            azure_inventory=_FakeAzureInventory(
-                {PROJECT_ENDPOINT: ACCOUNT_RESOURCE_ID}
             ),
         ),
     )
@@ -505,13 +497,11 @@ def test_invalid_metadata_blocks_the_target_without_inventory_calls(
         ],
     )
     foundry_inventory = _FakeFoundryInventory(latest_versions={})
-    azure_inventory = _FakeAzureInventory({})
     store = FileBootstrapRunnerStateStore(state_root=tmp_path / "state")
     runner = BootstrapRunner(
         state_store=store,
         target_resolution_handler=DefaultFoundryTargetResolutionHandler(
             foundry_inventory=foundry_inventory,
-            azure_inventory=azure_inventory,
         ),
     )
 
@@ -529,17 +519,27 @@ def test_invalid_metadata_blocks_the_target_without_inventory_calls(
     assert expected_detail in (record.detail or "")
     assert foundry_inventory.inspect_calls == []
     assert foundry_inventory.observe_calls == []
-    assert azure_inventory.calls == []
 
 
 @pytest.mark.parametrize(
     ("answer", "expected_endpoint", "expected_account_id"),
     [
-        ({"retry": "true"}, PROJECT_ENDPOINT, ACCOUNT_RESOURCE_ID),
-        ({"project_endpoint": SECOND_ENDPOINT}, SECOND_ENDPOINT, SECOND_ACCOUNT_ID),
+        (
+            {"account_resource_id": ACCOUNT_RESOURCE_ID},
+            PROJECT_ENDPOINT,
+            ACCOUNT_RESOURCE_ID,
+        ),
+        (
+            {
+                "project_endpoint": SECOND_ENDPOINT,
+                "account_resource_id": SECOND_ACCOUNT_ID,
+            },
+            SECOND_ENDPOINT,
+            SECOND_ACCOUNT_ID,
+        ),
     ],
 )
-def test_azure_account_resolution_failure_stays_renderable_and_recovers(
+def test_skill_resolved_account_is_required_and_accepts_corrected_target(
     tmp_path: Path,
     answer: Mapping[str, str],
     expected_endpoint: str,
@@ -563,38 +563,31 @@ def test_azure_account_resolution_failure_stays_renderable_and_recovers(
             SECOND_ENDPOINT: {},
         }
     )
-    azure_inventory = _FakeAzureInventory(
-        {
-            PROJECT_ENDPOINT: None,
-            SECOND_ENDPOINT: SECOND_ACCOUNT_ID,
-        }
-    )
     store = FileBootstrapRunnerStateStore(state_root=tmp_path / "state")
     runner = BootstrapRunner(
         state_store=store,
         target_resolution_handler=DefaultFoundryTargetResolutionHandler(
             foundry_inventory=foundry_inventory,
-            azure_inventory=azure_inventory,
         ),
         repository_handler=_ExplodingRepositoryHandler(),
     )
 
     first = runner.start(repo)
-    blocked = _select_and_enable_all(runner, first)
-    status = runner.status(blocked.operation_id)
+    unresolved = _select_and_enable_all(runner, first)
+    status = runner.status(unresolved.operation_id)
 
-    assert blocked.state == "foundry_target_resolution"
-    assert blocked.next_question is not None
-    assert "could not be resolved" in blocked.owner_markdown
-    assert "retry" in blocked.next_question.details_markdown.casefold()
-    assert status.owner_markdown == blocked.owner_markdown
+    assert unresolved.state == "foundry_target_resolution"
+    assert unresolved.next_question is not None
+    assert unresolved.next_question.required_fields == ("account_resource_id",)
+    assert "Azure account lookup" in unresolved.owner_markdown
+    assert "coding-agent Azure tools" in unresolved.next_question.details_markdown
+    assert status.owner_markdown == unresolved.owner_markdown
     assert [action.name for action in status.available_actions] == ["answer", "status"]
+    assert foundry_inventory.inspect_calls == []
 
-    if answer == {"retry": "true"}:
-        azure_inventory._mapping[PROJECT_ENDPOINT] = ACCOUNT_RESOURCE_ID
     recovered = runner.answer(
-        blocked.operation_id,
-        blocked.next_question.question_id,
+        unresolved.operation_id,
+        unresolved.next_question.question_id,
         answer,
     )
     record = store.load(recovered.operation_id).foundry_targets[0].reviewed_target
@@ -605,6 +598,105 @@ def test_azure_account_resolution_failure_stays_renderable_and_recovers(
     assert record.agent_name == "example-agent"
     assert record.account_resource_id == expected_account_id
     assert record.deployment_ready is True
+
+
+def test_skill_resolved_account_must_match_the_submitted_endpoint(
+    tmp_path: Path,
+) -> None:
+    repo = _create_repository(
+        tmp_path,
+        agents=[
+            {
+                "root": "agents/app",
+            }
+        ],
+    )
+    foundry_inventory = _FakeFoundryInventory(
+        latest_versions={PROJECT_ENDPOINT: {}}
+    )
+    runner = BootstrapRunner(
+        state_store=FileBootstrapRunnerStateStore(state_root=tmp_path / "state"),
+        target_resolution_handler=DefaultFoundryTargetResolutionHandler(
+            foundry_inventory=foundry_inventory,
+        ),
+    )
+
+    first = runner.start(repo)
+    unresolved = _select_and_enable_all(runner, first)
+
+    assert unresolved.next_question is not None
+    assert unresolved.next_question.required_fields == (
+        "project_endpoint",
+        "agent_name",
+        "account_resource_id",
+    )
+    with pytest.raises(
+        BootstrapConfigError,
+        match="account must match the Foundry project endpoint",
+    ):
+        runner.answer(
+            unresolved.operation_id,
+            unresolved.next_question.question_id,
+            {
+                "account_resource_id": SECOND_ACCOUNT_ID,
+                "project_endpoint": PROJECT_ENDPOINT,
+                "agent_name": "example-agent",
+            },
+        )
+    assert foundry_inventory.inspect_calls == []
+
+
+def test_foundry_inventory_failure_stays_renderable_and_retries(
+    tmp_path: Path,
+) -> None:
+    repo = _create_repository(
+        tmp_path,
+        agents=[
+            {
+                "root": "agents/app",
+                "metadata": {
+                    "project_endpoint": PROJECT_ENDPOINT,
+                    "agent_name": "example-agent",
+                    "foundry_account_resource_id": ACCOUNT_RESOURCE_ID,
+                },
+            }
+        ],
+    )
+    foundry_inventory = _FakeFoundryInventory(
+        latest_versions={PROJECT_ENDPOINT: {}},
+        inspect_errors={PROJECT_ENDPOINT: RuntimeError("access denied")},
+    )
+    store = FileBootstrapRunnerStateStore(state_root=tmp_path / "state")
+    runner = BootstrapRunner(
+        state_store=store,
+        target_resolution_handler=DefaultFoundryTargetResolutionHandler(
+            foundry_inventory=foundry_inventory,
+        ),
+        repository_handler=_ExplodingRepositoryHandler(),
+    )
+
+    first = runner.start(repo)
+    blocked = _select_and_enable_all(runner, first)
+    status = runner.status(blocked.operation_id)
+
+    assert blocked.state == "foundry_target_resolution"
+    assert blocked.next_question is not None
+    assert blocked.next_question.required_fields == ()
+    assert "project inventory failed" in blocked.owner_markdown
+    assert "retry" in blocked.next_question.details_markdown.casefold()
+    assert status.owner_markdown == blocked.owner_markdown
+
+    foundry_inventory._inspect_errors.clear()
+    recovered = runner.answer(
+        blocked.operation_id,
+        blocked.next_question.question_id,
+        {"retry": "true"},
+    )
+    record = store.load(recovered.operation_id).foundry_targets[0].reviewed_target
+
+    assert recovered.state == "verification_policy"
+    assert record.state == "new_target"
+    assert record.account_resource_id == ACCOUNT_RESOURCE_ID
 
 
 def test_existing_diverged_and_existing_unknown_targets_are_recorded(tmp_path: Path) -> None:
@@ -621,6 +713,7 @@ def test_existing_diverged_and_existing_unknown_targets_are_recorded(tmp_path: P
                 "metadata": {
                     "project_endpoint": PROJECT_ENDPOINT,
                     "agent_name": "agent-c",
+                    "foundry_account_resource_id": ACCOUNT_RESOURCE_ID,
                     "expected_version": "1",
                 },
             },
@@ -629,6 +722,7 @@ def test_existing_diverged_and_existing_unknown_targets_are_recorded(tmp_path: P
                 "metadata": {
                     "project_endpoint": third_endpoint,
                     "agent_name": "agent-u",
+                    "foundry_account_resource_id": third_account_id,
                 },
             },
         ],
@@ -639,18 +733,11 @@ def test_existing_diverged_and_existing_unknown_targets_are_recorded(tmp_path: P
             third_endpoint: {"agent-u": "9"},
         }
     )
-    azure_inventory = _FakeAzureInventory(
-        {
-            PROJECT_ENDPOINT: ACCOUNT_RESOURCE_ID,
-            third_endpoint: third_account_id,
-        }
-    )
     store = FileBootstrapRunnerStateStore(state_root=tmp_path / "state")
     runner = BootstrapRunner(
         state_store=store,
         target_resolution_handler=DefaultFoundryTargetResolutionHandler(
             foundry_inventory=foundry_inventory,
-            azure_inventory=azure_inventory,
         ),
     )
 
