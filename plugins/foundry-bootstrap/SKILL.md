@@ -13,6 +13,10 @@ is the only owner client over `BootstrapRunner`.
 Keep every owner turn short and concrete:
 
 - what agents were discovered and where
+- where an existing per-agent sidecar was found and its target, baseline model,
+  deployment state, and verification defaults
+- whether an existing repository OIDC identity and exact matching connection
+  resources can be reused
 - which agents will be ignored, registered disabled, or registered enabled
 - the Foundry project endpoint and agent name for each enabled agent
 - the GitHub environments and Azure identity/OIDC/RBAC connection

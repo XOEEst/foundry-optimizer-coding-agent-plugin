@@ -7,8 +7,9 @@ import subprocess
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal, Protocol, Self
 
 from pydantic import Field, StringConstraints, field_validator, model_validator
@@ -19,6 +20,7 @@ from foundry_opt.bootstrap.contracts import (
     BootstrapDocument,
     BootstrapSidecar,
     ReviewedFoundryTarget,
+    RootRegistry,
 )
 from foundry_opt.bootstrap.discovery import DiscoveryResult, discover_repository_agents
 from foundry_opt.bootstrap.errors import BootstrapApplyError, BootstrapConfigError
@@ -199,6 +201,13 @@ class BootstrapTurn(FrozenModel):
     operation_id: str
     state: BootstrapLifecycleStage
     resource_links: ResourceLinksReview
+
+
+@dataclass(frozen=True, slots=True)
+class _ExistingSidecarInspection:
+    path: str
+    profile: BootstrapSidecar | None = None
+    error: str | None = None
 
 
 class RepositoryBinding(BootstrapDocument):
@@ -1349,7 +1358,11 @@ class BootstrapRunner:
                 )
                 return self._build_turn(active)
         discovery = discover_repository_agents(repository_root)
-        selection = _selection_plan_from_discovery(discovery)
+        selection = _selection_plan_from_discovery(
+            discovery,
+            registry=_load_repository_registry(repository_root),
+            repository_root=repository_root,
+        )
         stage: BootstrapLifecycleStage = "agent_selection"
         note = "Preflight and discovery completed."
         if not selection.discovered_agents:
@@ -1780,7 +1793,7 @@ class BootstrapRunner:
         if outcome.handler_context is not None:
             handler_context.update(outcome.handler_context)
         _validate_stage_transition(envelope.lifecycle_stage, outcome.stage)
-        return next_runner_generation(
+        updated = next_runner_generation(
             envelope,
             now=self._clock.now(),
             lifecycle_stage=outcome.stage,
@@ -1792,6 +1805,7 @@ class BootstrapRunner:
             note=outcome.note,
             handler_context=handler_context,
         )
+        return self._advance_existing_verification(updated)
 
     def _build_turn(self, envelope: BootstrapRunnerStateEnvelope) -> BootstrapTurn:
         resource_links = build_resource_links(repository_id=envelope.repository_binding.repository_id)
@@ -1993,11 +2007,151 @@ class BootstrapRunner:
         )
         return tuple(choices)
 
-    @staticmethod
     def _existing_profile(
+        self,
         envelope: BootstrapRunnerStateEnvelope,
         repo_agent_id: str,
     ) -> BootstrapSidecar | None:
+        inspection = self._inspect_existing_sidecar(
+            envelope,
+            repo_agent_id=repo_agent_id,
+        )
+        if inspection is None or inspection.error is not None:
+            return None
+        return inspection.profile
+
+    def _advance_existing_verification(
+        self,
+        envelope: BootstrapRunnerStateEnvelope,
+    ) -> BootstrapRunnerStateEnvelope:
+        if envelope.lifecycle_stage != "verification_policy":
+            return envelope
+        choices = list(envelope.verification_choices)
+        preserved: list[str] = []
+        while True:
+            resolved = {
+                item.repo_agent_id.casefold()
+                for item in choices
+            }
+            pending_id = next(
+                (
+                    item
+                    for item in self._enabled_agent_ids(envelope)
+                    if item.casefold() not in resolved
+                ),
+                None,
+            )
+            if pending_id is None:
+                break
+            if self._existing_profile(envelope, pending_id) is None:
+                break
+            choices.append(
+                BootstrapVerificationChoice(
+                    repo_agent_id=pending_id,
+                    choice="preserve_existing",
+                )
+            )
+            preserved.append(pending_id)
+        if not preserved:
+            return envelope
+        enabled = self._enabled_agent_ids(envelope)
+        complete = len(choices) == len(enabled)
+        return next_runner_generation(
+            envelope,
+            now=self._clock.now(),
+            lifecycle_stage=(
+                "repository_approval" if complete else "verification_policy"
+            ),
+            verification_choices=tuple(choices),
+            note=(
+                "Preserved existing sidecar verification and prepared the repository review."
+                if complete
+                else "Preserved existing sidecar verification for "
+                + ", ".join(preserved)
+                + "."
+            ),
+        )
+
+    def _render_existing_sidecars(
+        self,
+        envelope: BootstrapRunnerStateEnvelope,
+    ) -> str | None:
+        inspections = tuple(
+            (
+                record.repo_agent_id,
+                self._inspect_existing_sidecar(
+                    envelope,
+                    repo_agent_id=record.repo_agent_id,
+                ),
+            )
+            for record in envelope.selection_plan.discovered_agents
+        )
+        existing = tuple(
+            (repo_agent_id, inspection)
+            for repo_agent_id, inspection in inspections
+            if inspection is not None
+        )
+        if not existing:
+            return None
+        lines = ["## Existing sidecars"]
+        for repo_agent_id, inspection in existing:
+            assert inspection is not None
+            lines.append(f"- {repo_agent_id}: `{inspection.path}`")
+            if inspection.error is not None:
+                lines.append(f"  - Status: invalid ({inspection.error})")
+                continue
+            profile = inspection.profile
+            assert profile is not None
+            lines.extend(
+                (
+                    f"  - Profile agent ID: `{profile.repo_agent_id}`",
+                    (
+                        "  - Foundry target: "
+                        f"`{profile.foundry_project.project_endpoint}` / "
+                        f"`{profile.foundry_project.agent_name}`"
+                    ),
+                    f"  - Baseline model: `{profile.baseline_model}`",
+                    (
+                        "  - Deployment: "
+                        f"{'enabled' if profile.deployment.enabled else 'disabled'}"
+                    ),
+                )
+            )
+            verification = profile.verification
+            bundle = verification.bundle
+            if bundle is not None:
+                evaluator_ids = tuple(
+                    item.reference.evaluator_id
+                    for item in bundle.default_evaluator_bundle.objective.evaluators
+                )
+                lines.extend(
+                    (
+                        f"  - Verification: `{verification.mode}` with a default evaluator bundle",
+                        f"  - Development dataset: `{bundle.development_dataset.dataset_id}`",
+                        f"  - Validating dataset: `{bundle.validating_dataset.dataset_id}`",
+                        (
+                            "  - Default evaluators: "
+                            + ", ".join(f"`{item}`" for item in evaluator_ids)
+                        ),
+                    )
+                )
+            elif verification.repository_checks:
+                lines.append(
+                    f"  - Verification: `{verification.mode}` with "
+                    f"{len(verification.repository_checks)} repository check(s)"
+                )
+            else:
+                lines.append(
+                    f"  - Verification: `{verification.mode}`; no default evaluator bundle"
+                )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _inspect_existing_sidecar(
+        envelope: BootstrapRunnerStateEnvelope,
+        *,
+        repo_agent_id: str,
+    ) -> _ExistingSidecarInspection | None:
         candidate = next(
             (
                 item
@@ -2006,24 +2160,65 @@ class BootstrapRunner:
             ),
             None,
         )
-        if (
-            candidate is None
-            or candidate.config_path is None
-            or Path(candidate.config_path).name != "foundry-opt.yaml"
-        ):
+        if candidate is None:
             return None
-        path = (
-            Path(envelope.repository_binding.repository_root)
-            / candidate.config_path
+        candidate_paths: list[str] = []
+        registry = _load_repository_registry(
+            Path(envelope.repository_binding.repository_root),
         )
-        if not path.is_file():
-            return None
-        try:
-            return BootstrapSidecar.from_document(
-                path.read_text(encoding="utf-8")
+        if registry is not None:
+            registry_entry = _matching_registry_entry(
+                registry,
+                repo_agent_id=repo_agent_id,
+                root=candidate.root,
+                source_root=candidate.source_root,
             )
-        except BootstrapConfigError:
-            return None
+            if registry_entry is not None:
+                candidate_paths.append(registry_entry.config_path)
+        if (
+            candidate.config_path is not None
+            and PurePosixPath(candidate.config_path).name == "foundry-opt.yaml"
+        ):
+            candidate_paths.append(candidate.config_path)
+        managed_root = (
+            candidate.root
+            if candidate.root != "."
+            else candidate.source_root
+        )
+        conventional_path = (
+            ".foundry/foundry-opt.yaml"
+            if managed_root == "."
+            else f"{managed_root}/.foundry/foundry-opt.yaml"
+        )
+        if conventional_path not in candidate_paths:
+            candidate_paths.append(conventional_path)
+        repository_root = Path(envelope.repository_binding.repository_root)
+        for relative in candidate_paths:
+            path = repository_root.joinpath(*PurePosixPath(relative).parts)
+            if not path.is_file():
+                continue
+            try:
+                profile = BootstrapSidecar.from_document(
+                    path.read_text(encoding="utf-8")
+                )
+            except (OSError, BootstrapConfigError) as exc:
+                return _ExistingSidecarInspection(
+                    path=relative,
+                    error=str(exc),
+                )
+            if profile.repo_agent_id != repo_agent_id:
+                return _ExistingSidecarInspection(
+                    path=relative,
+                    error=(
+                        "profile repo_agent_id does not match the discovered "
+                        f"agent ID {repo_agent_id!r}"
+                    ),
+                )
+            return _ExistingSidecarInspection(
+                path=relative,
+                profile=profile,
+            )
+        return None
 
     def _available_actions(
         self,
@@ -2050,6 +2245,9 @@ class BootstrapRunner:
         return (BootstrapAvailableAction(name="status"),)
 
     def _render_owner_markdown(self, envelope: BootstrapRunnerStateEnvelope) -> str:
+        registry = _load_repository_registry(
+            Path(envelope.repository_binding.repository_root),
+        )
         lines = [
             "## Bootstrap preflight",
             f"- Repository: {envelope.repository_binding.repository_id}",
@@ -2057,8 +2255,14 @@ class BootstrapRunner:
             f"- Repository commit: {envelope.repository_binding.head_commit[:12]}",
             f"- Runtime: {envelope.runtime_binding.runtime_commit[:12]}",
             "",
-            build_discovery_review(envelope.selection_plan).render_markdown(),
+            build_discovery_review(
+                envelope.selection_plan,
+                registry=registry,
+            ).render_markdown(),
         ]
+        existing_sidecars = self._render_existing_sidecars(envelope)
+        if existing_sidecars is not None:
+            lines.extend(("", existing_sidecars))
         if self._target_resolution_handler is not None:
             rendered_targets = self._target_resolution_handler.render_owner_markdown(
                 operation=envelope,
@@ -2387,18 +2591,73 @@ class BootstrapRunner:
         return f"{kind}:{envelope.generation}:{envelope.generation_hash[:12]}"
 
 
-def _selection_plan_from_discovery(result: DiscoveryResult) -> SelectionPlan:
-    discovered_agents = tuple(
-        DiscoveredAgentRecord(
-            repo_agent_id=agent.repoAgentId,
+def _selection_plan_from_discovery(
+    result: DiscoveryResult,
+    *,
+    registry: RootRegistry | None = None,
+    repository_root: Path | None = None,
+) -> SelectionPlan:
+    discovered_agents: list[DiscoveredAgentRecord] = []
+    binding_assessments = []
+    seen_ids: set[str] = set()
+    for agent in result.agents:
+        registry_entry = (
+            None
+            if registry is None
+            else _matching_registry_entry(
+                registry,
+                repo_agent_id=agent.repoAgentId,
+                root=agent.root,
+                source_root=agent.sourceRoot,
+            )
+        )
+        existing_sidecar = (
+            None
+            if repository_root is None
+            else _existing_sidecar_for_discovered(
+                repository_root,
+                root=agent.root,
+                source_root=agent.sourceRoot,
+            )
+        )
+        repo_agent_id = (
+            registry_entry.agent_id
+            if registry_entry is not None
+            else (
+                existing_sidecar[1].repo_agent_id
+                if existing_sidecar is not None
+                else agent.repoAgentId
+            )
+        )
+        key = repo_agent_id.casefold()
+        if key in seen_ids:
+            raise BootstrapConfigError(
+                f"existing registry maps multiple discovered agents to {repo_agent_id!r}"
+            )
+        seen_ids.add(key)
+        assessment = agent.bindingAssessment.model_copy(
+            update={"agent_id": repo_agent_id}
+        )
+        binding_assessments.append(assessment)
+        discovered_agents.append(
+            DiscoveredAgentRecord(
+            repo_agent_id=repo_agent_id,
             root=agent.root,
-            config_path=agent.configPath,
+            config_path=(
+                registry_entry.config_path
+                if registry_entry is not None
+                else (
+                    existing_sidecar[0]
+                    if existing_sidecar is not None
+                    else agent.configPath
+                )
+            ),
             source_root=agent.sourceRoot,
             package_root=agent.packageRoot,
             source_fingerprint=agent.sourceFingerprint,
             package_fingerprint=agent.packageFingerprint,
-            classification=agent.bindingAssessment.classification,
-            detail=agent.bindingAssessment.detail,
+            classification=assessment.classification,
+            detail=assessment.detail,
             confidence=agent.confidence,
             blockers=tuple(
                 DiscoveryBlockerRecord(code=item.code, detail=item.detail)
@@ -2406,13 +2665,13 @@ def _selection_plan_from_discovery(result: DiscoveryResult) -> SelectionPlan:
             ),
             approved_shared_source_repo_agent_ids=agent.approvedSharedSourceRepoAgentIds,
         )
-        for agent in result.agents
-    )
+        )
+    discovered_records = tuple(discovered_agents)
     blockers = tuple(
         sorted(
             {
                 blocker.detail
-                for agent in discovered_agents
+                for agent in discovered_records
                 for blocker in agent.blockers
                 if blocker.detail
             }
@@ -2421,11 +2680,77 @@ def _selection_plan_from_discovery(result: DiscoveryResult) -> SelectionPlan:
     return SelectionPlan(
         repository_root=result.repositoryRoot,
         selected_agent_ids=(),
-        binding_assessments=tuple(agent.bindingAssessment for agent in result.agents),
+        binding_assessments=tuple(binding_assessments),
         discovery_fingerprints=(),
         blockers=blockers,
-        discovered_agents=discovered_agents,
+        discovered_agents=discovered_records,
     )
+
+
+def _load_repository_registry(
+    repository_root: Path,
+) -> RootRegistry | None:
+    path = repository_root / ".foundry-opt" / "registry.yaml"
+    if not path.is_file():
+        return None
+    try:
+        return RootRegistry.from_document(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise BootstrapConfigError(
+            "existing repository registry could not be read"
+        ) from exc
+
+
+def _existing_sidecar_for_discovered(
+    repository_root: Path,
+    *,
+    root: str,
+    source_root: str,
+) -> tuple[str, BootstrapSidecar] | None:
+    managed_root = root if root != "." else source_root
+    relative = (
+        ".foundry/foundry-opt.yaml"
+        if managed_root == "."
+        else f"{managed_root}/.foundry/foundry-opt.yaml"
+    )
+    path = repository_root.joinpath(*PurePosixPath(relative).parts)
+    if not path.is_file():
+        return None
+    try:
+        return (
+            relative,
+            BootstrapSidecar.from_document(path.read_text(encoding="utf-8")),
+        )
+    except OSError as exc:
+        raise BootstrapConfigError(
+            f"existing sidecar could not be read: {relative}"
+        ) from exc
+
+
+def _matching_registry_entry(
+    registry: RootRegistry,
+    *,
+    repo_agent_id: str,
+    root: str,
+    source_root: str,
+):
+    exact = [
+        item
+        for item in registry.agents
+        if item.agent_id.casefold() == repo_agent_id.casefold()
+    ]
+    if len(exact) == 1:
+        return exact[0]
+    matching_roots = [
+        item
+        for item in registry.agents
+        if item.root.casefold() in {root.casefold(), source_root.casefold()}
+    ]
+    if len(matching_roots) > 1:
+        raise BootstrapConfigError(
+            f"existing registry has ambiguous entries for discovered root {root!r}"
+        )
+    return matching_roots[0] if matching_roots else None
 
 
 def _coerce_selection_answer(answer: object) -> tuple[str, ...]:

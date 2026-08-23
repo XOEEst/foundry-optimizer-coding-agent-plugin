@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 from typing import Protocol
 from urllib.parse import quote, urlparse
@@ -1039,7 +1039,12 @@ class DefaultFoundryTargetResolutionHandler:
         if owner_blocked is not None:
             blocked_detail = owner_blocked
         for seed in (
-            self._seed_from_existing_profile(root_path),
+            self._seed_from_existing_profile(
+                repository_root,
+                root_path=root_path,
+                config_path=discovered.config_path,
+                repo_agent_id=discovered.repo_agent_id,
+            ),
             self._seed_from_agent_metadata(root_path),
             self._seed_from_azure_values(repository_root, selected_count=len(operation.selection_plan.selected_agent_ids)),
             self._seed_from_binding_evidence(discovered.repo_agent_id, discovered.root),
@@ -1091,8 +1096,22 @@ class DefaultFoundryTargetResolutionHandler:
             blocked_detail=blocked_detail,
         )
 
-    def _seed_from_existing_profile(self, root_path: Path) -> tuple[_TargetSeed | None, str | None]:
-        path = root_path / ".foundry" / "foundry-opt.yaml"
+    def _seed_from_existing_profile(
+        self,
+        repository_root: Path,
+        *,
+        root_path: Path,
+        config_path: str | None,
+        repo_agent_id: str,
+    ) -> tuple[_TargetSeed | None, str | None]:
+        path = (
+            repository_root.joinpath(*PurePosixPath(config_path).parts)
+            if (
+                config_path is not None
+                and PurePosixPath(config_path).name == "foundry-opt.yaml"
+            )
+            else root_path / ".foundry" / "foundry-opt.yaml"
+        )
         if not path.exists():
             return None, None
         try:
@@ -1103,8 +1122,13 @@ class DefaultFoundryTargetResolutionHandler:
                 return None, None
             document = BootstrapSidecar.from_document(raw)
         except Exception as exc:
-            return None, f"{path.relative_to(root_path).as_posix()} is not a valid existing v2 profile: {exc}"
-        detail = path.relative_to(root_path).as_posix()
+            return None, f"{path.relative_to(repository_root).as_posix()} is not a valid existing v2 profile: {exc}"
+        if document.repo_agent_id != repo_agent_id:
+            return None, (
+                f"{path.relative_to(repository_root).as_posix()} repo_agent_id "
+                f"does not match {repo_agent_id!r}"
+            )
+        detail = path.relative_to(repository_root).as_posix()
         project = document.foundry_project
         return (
             _TargetSeed(

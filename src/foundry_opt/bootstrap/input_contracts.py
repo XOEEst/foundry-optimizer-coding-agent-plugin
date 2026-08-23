@@ -677,8 +677,6 @@ class AzurePhaseInput(BootstrapDocument):
         for assignment in self.approved_role_assignments:
             if f'/subscriptions/{self.subscription_id}' not in assignment.scope.casefold():
                 raise BootstrapConfigError('approved role assignment scope must stay within azure subscription')
-            if f'/resourcegroups/{self.resource_group.casefold()}' not in assignment.scope.casefold():
-                raise BootstrapConfigError('approved role assignment scope must stay within azure resource_group')
         if self.identity.existing_resource_id is not None:
             lowered = self.identity.existing_resource_id.casefold()
             if f'/subscriptions/{self.subscription_id}' not in lowered or f'/resourcegroups/{self.resource_group.casefold()}' not in lowered:

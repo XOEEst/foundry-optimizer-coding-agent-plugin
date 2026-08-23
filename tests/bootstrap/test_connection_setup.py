@@ -8,6 +8,7 @@ import yaml
 from foundry_opt.bootstrap.connection_setup import (
     AzureConnectionInventory,
     BootstrapConnectionSetupHandler,
+    CliConnectionInventory,
     ConnectionSetupCoordinator,
 )
 from foundry_opt.bootstrap.contracts import (
@@ -15,6 +16,7 @@ from foundry_opt.bootstrap.contracts import (
     BootstrapPlan,
     BootstrapReceipt,
     FingerprintRecord,
+    IdentitySettings,
 )
 from foundry_opt.bootstrap.errors import BootstrapApplyError
 from foundry_opt.bootstrap.repository_setup import (
@@ -55,6 +57,32 @@ class _Inventory:
             project_scopes=(
                 f"{ACCOUNT_RESOURCE_ID}/projects/example",
             ),
+        )
+
+
+class _RecordingReuseInventory(_Inventory):
+    def __init__(self) -> None:
+        self.preferred_identity: IdentitySettings | None = None
+
+    def inspect(
+        self,
+        *,
+        preferred_identity: IdentitySettings | None = None,
+        **_: object,
+    ) -> AzureConnectionInventory:
+        self.preferred_identity = preferred_identity
+        inventory = super().inspect()
+        assert preferred_identity is not None
+        assert preferred_identity.resource_id is not None
+        return inventory.model_copy(
+            update={
+                "identity_resource_id": preferred_identity.resource_id,
+                "identity_name": preferred_identity.resource_id.rsplit("/", 1)[-1],
+                "identity_exists": True,
+                "client_id": CLIENT_ID,
+                "principal_id": PRINCIPAL_ID,
+                "identity_source": "repository_registry",
+            }
         )
 
 
@@ -336,6 +364,115 @@ def test_connection_setup_applies_azure_then_github(
     assert (
         github_input.github_phase.oidc_subject_prefix
         == "repo:example@123/example-repo@456"
+    )
+
+
+def test_connection_review_reuses_repository_registry_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operation = _connection_operation(tmp_path, monkeypatch)
+    repository = Path(operation.repository_binding.repository_root)
+    registry_path = repository / ".foundry-opt" / "registry.yaml"
+    registry = yaml.safe_load(registry_path.read_text(encoding="utf-8"))
+    existing_identity = (
+        "/subscriptions/33333333-3333-3333-3333-333333333333/"
+        "resourceGroups/identity-rg/providers/Microsoft.ManagedIdentity/"
+        "userAssignedIdentities/existing-foundry-opt"
+    )
+    registry["identity"] = {
+        "schema_version": 1,
+        "kind": "user_assigned_managed_identity",
+        "resource_id": existing_identity,
+        "client_id": CLIENT_ID,
+    }
+    registry_path.write_text(
+        yaml.safe_dump(registry, sort_keys=False),
+        encoding="utf-8",
+    )
+    inventory = _RecordingReuseInventory()
+    coordinator = ConnectionSetupCoordinator(
+        inventory=inventory,
+        drivers=_Drivers(),
+        repository_coordinator=RepositorySetupCoordinator(
+            state_root=tmp_path / "repository-state"
+        ),
+        state_root=tmp_path / "connection-state",
+    )
+
+    review = coordinator.review(operation)
+
+    assert inventory.preferred_identity is not None
+    assert inventory.preferred_identity.resource_id == existing_identity
+    assert review.github_preflight_complete is True
+    assert "existing repository registry" in review.render_markdown()
+    assert "exact matching managed identity, OIDC subjects" in review.render_markdown()
+    assert "inspected and bound to this review" in review.render_markdown()
+
+
+def test_cli_connection_inventory_uses_preferred_registry_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    preferred_resource_id = (
+        "/subscriptions/33333333-3333-3333-3333-333333333333/"
+        "resourceGroups/identity-rg/providers/Microsoft.ManagedIdentity/"
+        "userAssignedIdentities/existing-foundry-opt"
+    )
+    calls: list[list[str]] = []
+
+    def _json(command, *, error):
+        calls.append(list(command))
+        if command[:3] == ["az", "account", "show"]:
+            return {
+                "tenant_id": "22222222-2222-2222-2222-222222222222",
+                "subscription_id": "33333333-3333-3333-3333-333333333333",
+            }
+        return {
+            "id": 456,
+            "owner": {"id": 123},
+        }
+
+    def _optional(command, *, error):
+        calls.append(list(command))
+        return {
+            "clientId": CLIENT_ID,
+            "principalId": PRINCIPAL_ID,
+        }
+
+    monkeypatch.setattr(
+        "foundry_opt.bootstrap.connection_setup._run_json",
+        _json,
+    )
+    monkeypatch.setattr(
+        "foundry_opt.bootstrap.connection_setup._run_json_optional",
+        _optional,
+    )
+    monkeypatch.setattr(
+        "foundry_opt.bootstrap.connection_setup._run_text",
+        lambda command, *, error: "eastus2",
+    )
+
+    inventory = CliConnectionInventory().inspect(
+        repository_identity="example/repo",
+        targets=(
+            (
+                ACCOUNT_RESOURCE_ID,
+                "https://example.services.ai.azure.com/api/projects/example",
+            ),
+        ),
+        preferred_identity=IdentitySettings(
+            kind="user_assigned_managed_identity",
+            resource_id=preferred_resource_id,
+            client_id=CLIENT_ID,
+        ),
+    )
+
+    assert inventory.identity_resource_id == preferred_resource_id
+    assert inventory.identity_source == "repository_registry"
+    assert any(
+        command[:4] == ["az", "identity", "show", "--ids"]
+        and command[4] == preferred_resource_id
+        for command in calls
     )
 
 

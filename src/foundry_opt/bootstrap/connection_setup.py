@@ -24,6 +24,7 @@ from foundry_opt.bootstrap.contracts import (
     BootstrapPlan,
     BootstrapReceipt,
     FingerprintRecord,
+    GitHubSettings,
     IdentitySettings,
     RootRegistry,
 )
@@ -65,6 +66,9 @@ class AzureConnectionInventory(BootstrapDocument):
     identity_exists: bool
     client_id: str | None = None
     principal_id: str | None = None
+    identity_source: Literal["derived_default", "repository_registry"] = (
+        "derived_default"
+    )
     github_oidc_subject_prefix: str
     project_scopes: tuple[str, ...]
 
@@ -81,6 +85,9 @@ class ConnectionSetupPlan(BootstrapDocument):
     azure_plan_input: BootstrapPlanInput
     azure_plan: BootstrapPlan
     azure_live_fingerprints: tuple[FingerprintRecord, ...]
+    github_plan_input: BootstrapPlanInput | None = None
+    github_plan: BootstrapPlan | None = None
+    github_live_fingerprints: tuple[FingerprintRecord, ...] = ()
     github_intent_hash: str
     plan_hash: str
 
@@ -99,6 +106,18 @@ class ConnectionSetupPlan(BootstrapDocument):
             "azure_live_fingerprints": [
                 item.model_dump(mode="json")
                 for item in self.azure_live_fingerprints
+            ],
+            "github_plan_input_hash": (
+                None
+                if self.github_plan_input is None
+                else self.github_plan_input.plan_input_hash
+            ),
+            "github_plan_hash": (
+                None if self.github_plan is None else self.github_plan.plan_hash
+            ),
+            "github_live_fingerprints": [
+                item.model_dump(mode="json")
+                for item in self.github_live_fingerprints
             ],
             "github_intent_hash": self.github_intent_hash,
         }
@@ -233,16 +252,32 @@ class ConnectionSetupReview(BootstrapDocument):
     deployment_environment: str
     client_id_variable: str
     inventory: AzureConnectionInventory
+    github_preflight_complete: bool = False
 
     def render_markdown(self) -> str:
         disposition = "adopt" if self.inventory.identity_exists else "create"
+        source = (
+            " from the existing repository registry"
+            if self.inventory.identity_source == "repository_registry"
+            else ""
+        )
         lines = [
             "## GitHub-to-Azure connection review",
             f"- Repository: {self.repository_identity}",
             f"- GitHub environments: `{self.optimizer_environment}`, `{self.deployment_environment}`",
             f"- GitHub variable: `{self.client_id_variable}` in both environments",
-            f"- Azure identity: {disposition} user-assigned managed identity `{self.inventory.identity_name}`",
+            f"- Azure identity: {disposition} user-assigned managed identity `{self.inventory.identity_name}`{source}",
             f"- Identity resource: {self.inventory.identity_resource_id}",
+            (
+                "- Reuse policy: exact matching managed identity, OIDC subjects, "
+                "RBAC assignments, GitHub environments, and variables are adopted; "
+                "only missing or drifted settings are changed."
+            ),
+            (
+                "- Existing GitHub connection: inspected and bound to this review."
+                if self.github_preflight_complete
+                else "- Existing GitHub connection: inspected after the new Azure identity resolves."
+            ),
             "- OIDC subjects:",
             f"  - `{self.inventory.github_oidc_subject_prefix}:environment:{self.optimizer_environment}`",
             f"  - `{self.inventory.github_oidc_subject_prefix}:environment:{self.deployment_environment}`",
@@ -268,6 +303,7 @@ class ConnectionInventoryProtocol(Protocol):
         *,
         repository_identity: str,
         targets: Sequence[tuple[str, str]],
+        preferred_identity: IdentitySettings | None = None,
     ) -> AzureConnectionInventory: ...
 
 
@@ -291,6 +327,7 @@ class CliConnectionInventory(ConnectionInventoryProtocol):
         *,
         repository_identity: str,
         targets: Sequence[tuple[str, str]],
+        preferred_identity: IdentitySettings | None = None,
     ) -> AzureConnectionInventory:
         reviewed_targets = tuple(
             sorted(set(targets), key=lambda item: (item[0].casefold(), item[1].casefold()))
@@ -327,7 +364,7 @@ class CliConnectionInventory(ConnectionInventoryProtocol):
             raise BootstrapConfigError(
                 "active Azure subscription does not match the reviewed Foundry project"
             )
-        location = _run_text(
+        account_location = _run_text(
             [
                 "az",
                 "resource",
@@ -351,6 +388,32 @@ class CliConnectionInventory(ConnectionInventoryProtocol):
             f"/subscriptions/{subscription_id}/resourceGroups/{account['resource_group']}"
             f"/providers/Microsoft.ManagedIdentity/userAssignedIdentities/{identity_name}"
         )
+        identity_source: Literal[
+            "derived_default",
+            "repository_registry",
+        ] = "derived_default"
+        if (
+            preferred_identity is not None
+            and preferred_identity.kind == "entra_application"
+        ):
+            raise BootstrapConfigError(
+                "existing registry Entra application connections require explicit migration; automatic OIDC reuse currently supports managed identities"
+            )
+        if (
+            preferred_identity is not None
+            and preferred_identity.kind == "user_assigned_managed_identity"
+        ):
+            assert preferred_identity.resource_id is not None
+            preferred_parts = _resource_id_parts(
+                preferred_identity.resource_id
+            )
+            if preferred_parts["subscription"] != subscription_id:
+                raise BootstrapConfigError(
+                    "existing registry identity is outside the reviewed Foundry subscription"
+                )
+            identity_resource_id = preferred_identity.resource_id
+            identity_name = identity_resource_id.rstrip("/").rsplit("/", 1)[-1]
+            identity_source = "repository_registry"
         identity = _run_json_optional(
             [
                 "az",
@@ -363,6 +426,21 @@ class CliConnectionInventory(ConnectionInventoryProtocol):
             ],
             error="unable to inspect the reviewed Azure managed identity",
         )
+        location = (
+            str(identity.get("location"))
+            if identity is not None and identity.get("location")
+            else account_location
+        )
+        if (
+            identity is not None
+            and preferred_identity is not None
+            and preferred_identity.client_id is not None
+            and str(identity.get("clientId") or "").casefold()
+            != preferred_identity.client_id.casefold()
+        ):
+            raise BootstrapConfigError(
+                "existing registry identity client_id does not match the live managed identity"
+            )
         github = _run_json(
             ["gh", "api", f"repos/{repository_identity}"],
             error="GitHub CLI authentication is required for immutable OIDC planning",
@@ -401,6 +479,7 @@ class CliConnectionInventory(ConnectionInventoryProtocol):
                 if identity is not None and identity.get("principalId")
                 else None
             ),
+            identity_source=identity_source,
             github_oidc_subject_prefix=(
                 f"repo:{owner_name}@{owner_id}/{repository_name}@{repository_id}"
             ),
@@ -451,6 +530,15 @@ class ConnectionSetupCoordinator:
                 "connection setup requires an applied repository plan"
             )
         base_input = repository_state.plan_input
+        repository_root = Path(operation.repository_binding.repository_root)
+        registry = RootRegistry.from_document(
+            (
+                repository_root
+                / ".foundry-opt"
+                / "registry.yaml"
+            ).read_text(encoding="utf-8")
+        )
+        github_settings = registry.github
         enabled = tuple(str(item) for item in setup.get("enabled_agent_ids", ()))
         if not enabled:
             raise BootstrapApplyError(
@@ -477,6 +565,7 @@ class ConnectionSetupCoordinator:
                 if target.account_resource_id is not None
                 and target.project_endpoint is not None
             ),
+            preferred_identity=registry.identity,
         )
         azure_input = _connection_plan_input(
             base_input,
@@ -484,6 +573,7 @@ class ConnectionSetupCoordinator:
             repository_identity=operation.repository_binding.repository_id,
             client_id=inventory.client_id,
             require_github=False,
+            github=github_settings,
         )
         azure_driver = self._drivers.azure(azure_input)
         context = _driver_context(operation, azure_input, phase="azure")
@@ -496,10 +586,38 @@ class ConnectionSetupCoordinator:
             repository_identity=operation.repository_binding.repository_id,
             actions=actions,
         )
+        github_input: BootstrapPlanInput | None = None
+        github_plan: BootstrapPlan | None = None
+        github_live: tuple[FingerprintRecord, ...] = ()
+        if inventory.client_id is not None:
+            github_input = _connection_plan_input(
+                base_input,
+                inventory=inventory,
+                repository_identity=operation.repository_binding.repository_id,
+                client_id=inventory.client_id,
+                require_github=True,
+                github=github_settings,
+            )
+            github_driver = self._drivers.github(github_input)
+            github_context = _driver_context(
+                operation,
+                github_input,
+                phase="github",
+            )
+            github_live = tuple(
+                github_driver.live_fingerprints(github_context)
+            )
+            github_plan = BootstrapPlan.create(
+                operation_id=operation.operation_id,
+                runtime_repository=operation.runtime_binding.runtime_repository,
+                runtime_commit=operation.runtime_binding.runtime_commit,
+                repository_identity=operation.repository_binding.repository_id,
+                actions=tuple(github_driver.plan(github_context)),
+            )
         github_intent = {
-            "optimizer_environment": "copilot",
-            "deployment_environment": "foundry-production",
-            "client_id_variable": "AZURE_FOUNDRY_OPT_CLIENT_ID",
+            "optimizer_environment": github_settings.optimizer_environment,
+            "deployment_environment": github_settings.deployment_environment,
+            "client_id_variable": github_settings.client_id_variable,
             "oidc_subject_prefix": inventory.github_oidc_subject_prefix,
         }
         plan = ConnectionSetupPlan.create(
@@ -507,13 +625,16 @@ class ConnectionSetupCoordinator:
             repository_identity=operation.repository_binding.repository_id,
             runtime_repository=operation.runtime_binding.runtime_repository,
             runtime_commit=operation.runtime_binding.runtime_commit,
-            optimizer_environment="copilot",
-            deployment_environment="foundry-production",
-            client_id_variable="AZURE_FOUNDRY_OPT_CLIENT_ID",
+            optimizer_environment=github_settings.optimizer_environment,
+            deployment_environment=github_settings.deployment_environment,
+            client_id_variable=github_settings.client_id_variable,
             inventory=inventory,
             azure_plan_input=azure_input,
             azure_plan=azure_plan,
             azure_live_fingerprints=live,
+            github_plan_input=github_input,
+            github_plan=github_plan,
+            github_live_fingerprints=github_live,
             github_intent_hash=canonical_sha256(github_intent),
         )
         envelope = ConnectionSetupStateEnvelope.create(
@@ -533,6 +654,7 @@ class ConnectionSetupCoordinator:
             deployment_environment=plan.deployment_environment,
             client_id_variable=plan.client_id_variable,
             inventory=plan.inventory,
+            github_preflight_complete=plan.github_plan is not None,
         )
 
     def approve(
@@ -685,29 +807,47 @@ class ConnectionSetupCoordinator:
                     raise BootstrapApplyError(
                         "connection setup is missing the resolved Azure identity"
                     )
-                github_input = _connection_plan_input(
-                    current.plan.azure_plan_input,
-                    inventory=current.plan.inventory,
-                    repository_identity=current.plan.repository_identity,
-                    client_id=str(identity["client_id"]),
-                    require_github=True,
-                )
-                github_driver = self._drivers.github(github_input)
-                github_context = _driver_context(
-                    operation,
-                    github_input,
-                    phase="github",
-                )
-                github_live = tuple(
-                    github_driver.live_fingerprints(github_context)
-                )
-                github_plan = BootstrapPlan.create(
-                    operation_id=current.plan.operation_id,
-                    runtime_repository=current.plan.runtime_repository,
-                    runtime_commit=current.plan.runtime_commit,
-                    repository_identity=current.plan.repository_identity,
-                    actions=tuple(github_driver.plan(github_context)),
-                )
+                if (
+                    current.plan.github_plan_input is not None
+                    and current.plan.github_plan is not None
+                ):
+                    github_input = current.plan.github_plan_input
+                    github_plan = current.plan.github_plan
+                    github_live = current.plan.github_live_fingerprints
+                    planned_client_id = (
+                        github_input.github_phase.shared_client_id
+                        if github_input.github_phase is not None
+                        else None
+                    )
+                    if planned_client_id != str(identity["client_id"]):
+                        raise BootstrapApplyError(
+                            "resolved Azure identity no longer matches the reviewed GitHub connection"
+                        )
+                else:
+                    github_input = _connection_plan_input(
+                        current.plan.azure_plan_input,
+                        inventory=current.plan.inventory,
+                        repository_identity=current.plan.repository_identity,
+                        client_id=str(identity["client_id"]),
+                        require_github=True,
+                        github=_plan_github_settings(current.plan),
+                    )
+                    github_driver = self._drivers.github(github_input)
+                    github_context = _driver_context(
+                        operation,
+                        github_input,
+                        phase="github",
+                    )
+                    github_live = tuple(
+                        github_driver.live_fingerprints(github_context)
+                    )
+                    github_plan = BootstrapPlan.create(
+                        operation_id=current.plan.operation_id,
+                        runtime_repository=current.plan.runtime_repository,
+                        runtime_commit=current.plan.runtime_commit,
+                        repository_identity=current.plan.repository_identity,
+                        actions=tuple(github_driver.plan(github_context)),
+                    )
                 preimages = _registry_connection_preimages(
                     Path(operation.repository_binding.repository_root)
                 )
@@ -855,6 +995,7 @@ class ConnectionSetupCoordinator:
                 Path(operation.repository_binding.repository_root),
                 identity_resource_id=current.plan.inventory.identity_resource_id,
                 client_id=str(identity["client_id"]),
+                github=_plan_github_settings(current.plan),
                 preimages=current.payload.repository_preimages,
             )
             latest = self._load(
@@ -1001,6 +1142,7 @@ class ConnectionSetupCoordinator:
                 latest.payload.repository_preimages,
                 identity_resource_id=latest.plan.inventory.identity_resource_id,
                 client_id=self._connection_client_id(latest),
+                github=_plan_github_settings(latest.plan),
             )
         if ephemeral is not None:
             phase, driver, receipt, provider_state = ephemeral
@@ -1112,6 +1254,7 @@ class ConnectionSetupCoordinator:
                 envelope.payload.repository_preimages,
                 identity_resource_id=envelope.plan.inventory.identity_resource_id,
                 client_id=self._connection_client_id(envelope),
+                github=_plan_github_settings(envelope.plan),
             )
         if (
             envelope.lifecycle_state
@@ -1321,23 +1464,37 @@ class BootstrapConnectionSetupHandler:
         )
         assert state.payload.azure_receipt is not None
         assert state.payload.github_receipt is not None
+        adopted = (
+            len(state.payload.azure_receipt.adopted_actions)
+            + len(state.payload.github_receipt.adopted_actions)
+        )
+        created = (
+            len(state.payload.azure_receipt.created_actions)
+            + len(state.payload.github_receipt.created_actions)
+        )
+        changed = (
+            len(state.payload.azure_receipt.changed_actions)
+            + len(state.payload.github_receipt.changed_actions)
+        )
+        connection_summary = (
+            f"reused {adopted}, created {created}, updated {changed}"
+        )
         child_refs = tuple(
             item for item in operation.child_refs if item.step != "connection"
         )
         return BootstrapStageOutcome(
             stage="commit_approval",
-            note="Connected the reviewed GitHub environments to the Azure identity. Review the local commit next.",
+            note=(
+                "Connected the reviewed GitHub environments to the Azure identity "
+                f"({connection_summary}). Review the local commit next."
+            ),
             child_refs=(
                 *child_refs,
                 BootstrapChildReference(
                     step="connection",
                     kind="github-azure-connection",
                     identifier=state.plan.plan_hash,
-                    summary=(
-                        f"{state.plan.inventory.identity_name}; "
-                        f"{state.plan.optimizer_environment}, "
-                        f"{state.plan.deployment_environment}"
-                    ),
+                    summary=connection_summary,
                 ),
             ),
         )
@@ -1399,6 +1556,7 @@ def _connection_plan_input(
     repository_identity: str,
     client_id: str | None,
     require_github: bool,
+    github: GitHubSettings,
 ) -> BootstrapPlanInput:
     payload = base.model_dump(mode="json")
     payload["offline_plan"] = False
@@ -1406,14 +1564,14 @@ def _connection_plan_input(
         ["github"] if require_github else ["azure"]
     )
     payload["github_phase"] = {
-        "optimizer_environment": "copilot",
-        "deployment_environment": "foundry-production",
+        "optimizer_environment": github.optimizer_environment,
+        "deployment_environment": github.deployment_environment,
         "shared_client_id": (
             client_id
             if client_id is not None
             else "azure_identity_resolution_required"
         ),
-        "client_id_variable_name": "AZURE_FOUNDRY_OPT_CLIENT_ID",
+        "client_id_variable_name": github.client_id_variable,
         "oidc_subject_prefix": inventory.github_oidc_subject_prefix,
         "default_branch_policy_intent": "preserve_repository_default",
     }
@@ -1496,12 +1654,14 @@ def _apply_registry_connection(
     *,
     identity_resource_id: str,
     client_id: str,
+    github: GitHubSettings,
     preimages: Mapping[str, str],
 ) -> None:
     desired = _desired_registry_connection(
         preimages,
         identity_resource_id=identity_resource_id,
         client_id=client_id,
+        github=github,
     )
     for repo_path, desired_bytes in desired.items():
         path = repository_root / repo_path
@@ -1550,11 +1710,13 @@ def _restore_registry_connection_safely(
     *,
     identity_resource_id: str,
     client_id: str,
+    github: GitHubSettings,
 ) -> None:
     desired = _desired_registry_connection(
         preimages,
         identity_resource_id=identity_resource_id,
         client_id=client_id,
+        github=github,
     )
     for repo_path, desired_bytes in desired.items():
         path = repository_root / repo_path
@@ -1577,6 +1739,7 @@ def _desired_registry_connection(
     *,
     identity_resource_id: str,
     client_id: str,
+    github: GitHubSettings,
 ) -> dict[str, bytes]:
     try:
         registry_before = bytes.fromhex(
@@ -1593,6 +1756,7 @@ def _desired_registry_connection(
         registry_before.decode("utf-8")
     )
     registry_payload = registry.model_dump(mode="json")
+    registry_payload["github"] = github.model_dump(mode="json")
     registry_payload["identity"] = IdentitySettings(
         kind="user_assigned_managed_identity",
         resource_id=identity_resource_id,
@@ -1633,6 +1797,17 @@ def _desired_registry_connection(
         ".foundry-opt/registry.yaml": registry_bytes,
         ".foundry-opt/bootstrap.lock.json": lock_bytes,
     }
+
+
+def _plan_github_settings(
+    plan: ConnectionSetupPlan,
+) -> GitHubSettings:
+    return GitHubSettings(
+        optimizer_environment=plan.optimizer_environment,
+        deployment_environment=plan.deployment_environment,
+        client_id_variable=plan.client_id_variable,
+        oidc_subject_prefix=plan.inventory.github_oidc_subject_prefix,
+    )
 
 
 def _atomic_write(path: Path, content: bytes) -> None:

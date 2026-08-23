@@ -13,6 +13,8 @@ JSON, hashes, provider state, or receipt payloads during the normal path.
 
 1. **Discovered agents**
    - Folder, source root, package root, readiness, and current binding state.
+   - When an existing sidecar is found, its repository-relative path, Foundry
+     target, baseline model, deployment state, and verification defaults.
    - Choose `ignore`, `register disabled`, or `register enabled`.
 2. **Foundry targets**
    - Detect the Foundry project endpoint and agent name from repository
@@ -32,6 +34,10 @@ JSON, hashes, provider state, or receipt payloads during the normal path.
    - Registry, profiles, instructions, issue form, workflows, preserved files,
      and conflicts.
 4. **GitHub-to-Azure connection**
+   - Reuse the repository registry's existing identity when it still matches
+     the live Azure resource.
+   - Adopt exact matching OIDC credentials, role assignments, GitHub
+     environments, and variables instead of recreating them.
    - GitHub environments and variables.
    - Azure identity, OIDC subjects, and project-scoped Foundry User roles.
 5. **Verification**

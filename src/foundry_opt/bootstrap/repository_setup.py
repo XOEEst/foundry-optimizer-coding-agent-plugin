@@ -23,8 +23,10 @@ from foundry_opt.bootstrap.contracts import (
     DeploymentSettings,
     FoundryProjectSettings,
     HardGuardrail,
+    RootRegistry,
     RuntimeProtocolSettings,
     SelectedAgentProfile,
+    TemplatePayloadSpec,
     VerificationSettings,
 )
 from foundry_opt.bootstrap.errors import BootstrapApplyError, BootstrapConfigError
@@ -205,7 +207,10 @@ class RepositorySetupCoordinator:
             return existing
         plan_input, _ = build_repository_plan_input(operation)
         repository_root = Path(operation.repository_binding.repository_root)
-        payloads = load_trusted_manifest(plan_input)
+        payloads = _reuse_existing_repository_contract(
+            repository_root,
+            load_trusted_manifest(plan_input),
+        )
         plan = plan_repository(
             repository_root,
             operation_id=operation.operation_id,
@@ -771,6 +776,63 @@ def _verification_settings(
             evaluation_gate_policy="allow_repository_checks",
         )
     raise BootstrapConfigError("unsupported verification choice")
+
+
+def _reuse_existing_repository_contract(
+    repository_root: Path,
+    payloads: Sequence[TemplatePayloadSpec],
+) -> tuple[TemplatePayloadSpec, ...]:
+    registry_path = repository_root / ".foundry-opt" / "registry.yaml"
+    if not registry_path.is_file():
+        return tuple(payloads)
+    try:
+        existing = RootRegistry.from_document(
+            registry_path.read_text(encoding="utf-8")
+        )
+    except OSError as exc:
+        raise BootstrapConfigError(
+            "existing repository registry could not be read"
+        ) from exc
+    reused: list[TemplatePayloadSpec] = []
+    for payload in payloads:
+        if payload.template_id != "registry":
+            reused.append(payload)
+            continue
+        rendered = RootRegistry.from_document(payload.rendered_template)
+        merged_agents = {
+            item.agent_id.casefold(): item
+            for item in existing.agents
+        }
+        merged_agents.update(
+            {
+                item.agent_id.casefold(): item
+                for item in rendered.agents
+            }
+        )
+        merged = rendered.model_copy(
+            update={
+                "github": existing.github,
+                "identity": existing.identity,
+                "agents": tuple(
+                    sorted(
+                        merged_agents.values(),
+                        key=lambda item: item.agent_id.casefold(),
+                    )
+                ),
+            }
+        )
+        reused.append(
+            payload.model_copy(
+                update={
+                    "rendered_template": yaml.safe_dump(
+                        merged.model_dump(mode="json"),
+                        sort_keys=False,
+                        allow_unicode=False,
+                    )
+                }
+            )
+        )
+    return tuple(reused)
 
 
 def _infer_runtime(

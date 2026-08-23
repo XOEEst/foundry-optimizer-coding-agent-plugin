@@ -390,6 +390,47 @@ def test_start_owner_markdown_uses_discovery_review_without_raw_json(tmp_path: P
     assert not turn.owner_markdown.lstrip().startswith("{")
 
 
+def test_start_owner_markdown_surfaces_existing_sidecar_details(tmp_path: Path) -> None:
+    repo = _create_repository(tmp_path)
+    _write_registry_profile(repo, repo_agent_id="stable-agent")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "--quiet", "-m", "add sidecar"],
+        check=True,
+    )
+    store = FileBootstrapRunnerStateStore(state_root=tmp_path / "state")
+    runner = BootstrapRunner(
+        state_store=store,
+        target_resolution_handler=_ReadyTargetResolutionHandler(),
+    )
+
+    turn = runner.start(repo)
+
+    assert "## Existing sidecars" in turn.owner_markdown
+    assert "- stable-agent: `agent/.foundry/foundry-opt.yaml`" in turn.owner_markdown
+    assert "- Profile agent ID: `stable-agent`" in turn.owner_markdown
+    assert (
+        "- Foundry target: "
+        "`https://example.services.ai.azure.com/api/projects/example` / `stable-agent`"
+    ) in turn.owner_markdown
+    assert "- Baseline model: `baseline`" in turn.owner_markdown
+    assert "- Deployment: enabled" in turn.owner_markdown
+    assert "- Verification: `off`; no default evaluator bundle" in turn.owner_markdown
+    turn = runner.answer(
+        turn.operation_id,
+        turn.next_question.question_id,
+        ["stable-agent"],
+    )
+    turn = runner.answer(
+        turn.operation_id,
+        turn.next_question.question_id,
+        ["register_enabled"],
+    )
+    assert turn.state == "repository_approval"
+    persisted = store.load(turn.operation_id)
+    assert persisted.verification_choices[0].choice == "preserve_existing"
+
+
 def test_answer_accepts_valid_selection_and_records_a_blocked_target(tmp_path: Path) -> None:
     repo = _create_repository(tmp_path)
     store = FileBootstrapRunnerStateStore(state_root=tmp_path / "state")

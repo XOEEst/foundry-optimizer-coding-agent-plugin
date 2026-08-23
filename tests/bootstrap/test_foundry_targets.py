@@ -257,6 +257,7 @@ def test_metadata_target_reuse_classifies_existing_aligned_without_mutation(
     record = store.load(turn.operation_id).foundry_targets[0].reviewed_target
 
     assert turn.state == "verification_policy"
+    assert store.load(turn.operation_id).verification_choices == ()
     assert record.state == "existing_aligned"
     assert record.project_endpoint_source == "agent_metadata"
     assert record.agent_name_source == "agent_metadata"
@@ -313,7 +314,11 @@ def test_existing_profile_takes_priority_over_agent_metadata(tmp_path: Path) -> 
     turn = _select_and_enable_all(runner, first)
     record = store.load(turn.operation_id).foundry_targets[0].reviewed_target
 
-    assert turn.state == "verification_policy"
+    assert turn.state == "repository_approval"
+    assert (
+        store.load(turn.operation_id).verification_choices[0].choice
+        == "preserve_existing"
+    )
     assert record.project_endpoint == PROFILE_ENDPOINT
     assert record.project_endpoint_source == "existing_profile"
     assert record.agent_name == "profile-agent"

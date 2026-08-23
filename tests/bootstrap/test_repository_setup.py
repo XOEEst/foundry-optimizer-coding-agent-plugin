@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from foundry_opt.bootstrap.contracts import ReviewedFoundryTarget
+from foundry_opt.bootstrap.contracts import ReviewedFoundryTarget, RootRegistry
 from foundry_opt.bootstrap.operation_state import (
     DiscoveredAgentRecord,
     SelectionPlan,
@@ -162,6 +162,77 @@ def test_repository_plan_input_creates_a_quick_profile_with_reviewed_target(
     assert profile.verification.mode == "off"
     assert profile.deployment.enabled is True
     assert any("hosted Python 3.13" in item for item in assumptions)
+
+
+def test_repository_plan_preserves_existing_registry_connection_and_agents(
+    tmp_path: Path,
+) -> None:
+    operation = _operation(tmp_path)
+    repository = Path(operation.repository_binding.repository_root)
+    existing_identity = (
+        "/subscriptions/33333333-3333-3333-3333-333333333333/"
+        "resourceGroups/identity-rg/providers/Microsoft.ManagedIdentity/"
+        "userAssignedIdentities/existing-foundry-opt"
+    )
+    registry_path = repository / ".foundry-opt" / "registry.yaml"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry_path.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "distribution": {
+                    "schema_version": 1,
+                    "repository": RUNTIME_REPOSITORY,
+                    "channel": "existing",
+                    "pin": RUNTIME_COMMIT,
+                },
+                "github": {
+                    "schema_version": 1,
+                    "optimizer_environment": "existing-optimizer",
+                    "deployment_environment": "existing-production",
+                    "client_id_variable": "EXISTING_CLIENT_ID",
+                    "oidc_subject_prefix": "repo:example@123/repo@456",
+                },
+                "identity": {
+                    "schema_version": 1,
+                    "kind": "user_assigned_managed_identity",
+                    "resource_id": existing_identity,
+                    "client_id": "44444444-4444-4444-4444-444444444444",
+                },
+                "agents": [
+                    {
+                        "schema_version": 1,
+                        "agent_id": "existing-agent",
+                        "root": "existing",
+                        "config_path": "existing/.foundry/foundry-opt.yaml",
+                        "enabled": False,
+                    }
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    state = RepositorySetupCoordinator(state_root=tmp_path / "state").build(
+        operation
+    )
+    registry_payload = next(
+        action.template_payload
+        for action in state.plan.actions
+        if action.template_payload is not None
+        and action.template_payload.template_id == "registry"
+    )
+    rendered = RootRegistry.from_document(
+        registry_payload.rendered_template
+    )
+
+    assert rendered.identity.resource_id == existing_identity
+    assert rendered.github.optimizer_environment == "existing-optimizer"
+    assert rendered.github.client_id_variable == "EXISTING_CLIENT_ID"
+    assert {item.agent_id for item in rendered.agents} == {
+        "existing-agent",
+        "example-agent",
+    }
 
 
 def test_repository_handler_applies_reviewed_files_and_returns_commit_context(
