@@ -7,6 +7,16 @@
           "title": "Channel",
           "type": "string"
         },
+        "optimizer_skill_path": {
+          "default": "plugins/foundry-agent-optimizer",
+          "title": "Optimizer Skill Path",
+          "type": "string"
+        },
+        "package_path": {
+          "default": ".",
+          "title": "Package Path",
+          "type": "string"
+        },
         "pin": {
           "anyOf": [
             {
@@ -30,6 +40,19 @@
           "default": 1,
           "title": "Schema Version",
           "type": "integer"
+        },
+        "uv_lock_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Uv Lock Sha256"
         }
       },
       "required": [
@@ -187,8 +210,11 @@
       "$ref": "#/$defs/IdentitySettings"
     },
     "schema_version": {
-      "const": 1,
       "default": 1,
+      "enum": [
+        1,
+        2
+      ],
       "title": "Schema Version",
       "type": "integer"
     }

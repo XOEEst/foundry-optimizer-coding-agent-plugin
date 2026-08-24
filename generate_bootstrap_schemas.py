@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from foundry_opt.bootstrap.contracts import BootstrapLock, BootstrapPlan, BootstrapReceipt, BootstrapSidecar, RootRegistry
+from foundry_opt.repository_contracts import BootstrapLock, BootstrapPlan, BootstrapReceipt, BootstrapSidecar, RootRegistry
 from foundry_opt.bootstrap.evaluation.execution import EvaluationFinalization, EvaluationOnboardingRequest
 from foundry_opt.bootstrap.input_contracts import BindingEvidenceInput, BootstrapPlanInput, TrustedTemplateManifest
 
