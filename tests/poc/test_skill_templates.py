@@ -104,14 +104,12 @@ def test_skill_and_tenzing_attribution_stay_in_sync() -> None:
     adapter = _read(ADAPTER_PATH)
     attribution = _read(ATTRIBUTION_PATH)
 
-    assert ".github/foundry-opt.lock.yml" in skill
+    assert ".foundry-opt/registry.yaml" in skill
     assert "OIDC only" in skill
     assert "original issue" in skill
-    assert "validating dataset only for the provisional winner" in skill
+    assert "validating evaluation only for the provisional winner" in skill
     assert "early draft pull request" in skill
-    assert "read-only reference material" in skill
-    assert "Bootstrap for first-time owners" in skill
-    assert "Advanced and recovery" in skill
+    assert "separate `foundry-bootstrap` skill" in skill
     assert "deployable winning patch" in skill
 
     assert "redacted, idempotent candidate update to the original issue" in adapter
@@ -125,21 +123,11 @@ def test_skill_and_tenzing_attribution_stay_in_sync() -> None:
     assert (SKILL_TEMPLATE_ROOT / "references" / "tenzing" / "INIT.md").is_file()
 
 
-def test_skill_bootstrap_owner_flow_uses_owner_commands_and_terms() -> None:
+def test_optimizer_skill_does_not_embed_bootstrap_orchestration() -> None:
     skill = _read(SKILL_PATH)
     normalized = " ".join(skill.split())
 
-    for required in (
-        "foundry-opt bootstrap review discovery",
-        "foundry-opt bootstrap review plan",
-        "foundry-opt bootstrap connect plan",
-        "foundry-opt bootstrap resources",
-        "Do not paste raw JSON into owner-facing updates",
-        "registered` — the agent is listed in `.foundry-opt/registry.yaml`",
-        "`enabled` — the reviewed registry/profile intends the agent to participate",
-        "`verified` — reviewed evidence or receipt-backed verification is attached",
-        "`deployable` — policy currently allows exact-source deployment",
-        "combined connection approval",
-        "issue-supplied Foundry",
-    ):
-        assert required in normalized
+    assert "foundry-opt bootstrap" not in normalized
+    assert "bootstrap receipt" not in normalized
+    assert "rollback" not in normalized
+    assert "Use this skill only for an optimize job" in normalized

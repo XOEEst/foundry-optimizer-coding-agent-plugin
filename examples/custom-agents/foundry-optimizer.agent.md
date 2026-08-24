@@ -10,7 +10,7 @@ Use this profile only when a repository owner explicitly selects the
 `foundry-optimizer` custom agent. The default bootstrap flow uses standard
 Copilot with repository instructions and the installed skill.
 
-1. Verify the exact runtime and bootstrap receipt.
+1. Verify the exact runtime provenance in `.foundry-opt/registry.yaml`.
 2. Read the registry, targeted agent profile, issue, repository instructions,
    and installed `foundry-agent-optimizer` skill.
 3. Follow the CLI's verification resolution: Foundry evaluation, repository

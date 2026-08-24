@@ -4,26 +4,21 @@ This repository separates top-level skill distribution from the shared
 `foundry_opt` runtime package.
 
 - `foundry-bootstrap/` is the downloadable first-time-owner skill. Owners
-  invoke `/foundry-bootstrap`; the skill presents natural-language reviews and
-  uses `scripts/bootstrap.py` internally to start, resume, answer, approve, or
-  recover one durable `BootstrapRunner` operation.
+  invoke `/foundry-bootstrap`; the skill uses general repository, GitHub,
+  Azure, Foundry, Git, and azd tools directly after one reviewed approval.
 - `foundry-agent-optimizer/` is the canonical issue-time optimizer skill folder.
-  Setup workflows and bootstrap defaults install from this path, while legacy
-  explicit pins and receipts that name the former
-  `src/foundry_opt/templates/skills/foundry-agent-optimizer/` location are
-  compatibly resolved here.
+  Setup workflows install this skill from the exact runtime revision recorded
+  in the repository registry.
 
-Both skill folders are thin owner/runtime clients over shared `foundry_opt`
-code. They do not vendor or duplicate the runtime package.
+The bootstrap skill is static and does not invoke a bootstrap runtime, state
+machine, receipt, or rollback service. The optimizer skill remains a client of
+the shared optimizer runtime.
 
-The bootstrap skill is intentionally the only normal owner interface. The
-existing `foundry-opt bootstrap ...` commands remain available for CI,
-diagnostics, recovery, and older integrations.
+The bootstrap skill is the only bootstrap interface. There is no
+`foundry-opt bootstrap ...` command tree.
 
-Release packaging for `foundry-bootstrap/` is built after checkout with
-`uv run python tools/build_foundry_bootstrap_skill.py`, which writes the
-installable package directory plus `dist/foundry-bootstrap-skill.zip` and
-`dist/foundry-bootstrap-skill.checksums.json`.
+Standard release automation packages the static skill folder, injects
+`release.json`, and publishes the ZIP and checksum.
 
 See [`foundry-bootstrap/references/owner-flow.md`](foundry-bootstrap/references/owner-flow.md)
 for the owner experience and
