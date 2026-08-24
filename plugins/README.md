@@ -14,8 +14,8 @@ The bootstrap skill is static and does not invoke a bootstrap runtime, state
 machine, receipt, or rollback service. The optimizer skill remains a client of
 the shared optimizer runtime.
 
-The bootstrap skill is the only bootstrap interface. There is no
-`foundry-opt bootstrap ...` command tree.
+The bootstrap skill is the only bootstrap interface. There is no bootstrap
+command tree in the shared CLI.
 
 Standard release automation packages the static skill folder, injects
 `release.json`, and publishes the ZIP and checksum.
