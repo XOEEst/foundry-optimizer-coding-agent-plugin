@@ -155,6 +155,34 @@ def _create_runtime_repository(tmp_path: Path) -> tuple[Path, str, dict[str, str
     lock_sha256 = hashlib.sha256((repository / "uv.lock").read_bytes()).hexdigest()
     (repository / ".github").mkdir()
     (repository / ".foundry").mkdir()
+    (repository / ".foundry-opt").mkdir()
+    (repository / ".foundry-opt" / "registry.yaml").write_text(
+        "\n".join(
+            (
+                "schema_version: 2",
+                "distribution:",
+                "  repository: https://github.com/example-org/shared-skill",
+                "  channel: reviewed",
+                f"  pin: {shared_commit}",
+                "  package_path: .",
+                f"  uv_lock_sha256: {lock_sha256}",
+                "  optimizer_skill_path: skills/foundry-agent-optimizer",
+                "github:",
+                "  optimizer_environment: copilot",
+                "  deployment_environment: foundry-production",
+                "  client_id_variable: AZURE_OPTIMIZER_CLIENT_ID",
+                "identity:",
+                "  kind: unresolved_migration",
+                "agents:",
+                "  - agent_id: travel-agent",
+                "    root: src",
+                "    config_path: .foundry/foundry-opt.yaml",
+                "    enabled: true",
+                "",
+            )
+        ),
+        encoding="ascii",
+    )
     (repository / ".github" / "foundry-opt.lock.yml").write_text(
         "\n".join(
             (
@@ -277,7 +305,7 @@ def _create_runtime_repository(tmp_path: Path) -> tuple[Path, str, dict[str, str
         ),
         encoding="ascii",
     )
-    _git(repository, "add", ".github", ".foundry")
+    _git(repository, "add", ".github", ".foundry", ".foundry-opt")
     _git(repository, "commit", "-m", "config")
     base_commit = _git(repository, "rev-parse", "HEAD")
 

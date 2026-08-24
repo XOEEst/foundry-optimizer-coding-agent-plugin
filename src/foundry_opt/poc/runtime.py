@@ -15,9 +15,7 @@ from typing import Any, Literal, Protocol, Self
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from foundry_opt.distribution import optimizer_skill_paths_match
 from foundry_opt.poc.auth import AuthError, GitHubActionsOidcConfig, build_client_assertion_credential
-from foundry_opt.poc.bootstrap import BootstrapReceipt, load_shared_pin, read_bootstrap_receipt
 from foundry_opt.poc.candidate import CandidateWorkspace, FinalizedCandidate
 from foundry_opt.poc.checks import LocalRepositoryCheckRunner, RepositoryCheckRunnerProtocol
 from foundry_opt.poc.config import (
@@ -66,12 +64,15 @@ from foundry_opt.poc.state import (
 )
 from foundry_opt.poc.source import SourcePackagingError, package_git_source
 from foundry_opt.poc.verification import VerificationResolution
+from foundry_opt.repository_contracts import RootRegistry
 from foundry_opt.repository_selection import protected_editable_patterns_for_repository
 
 
 DEFAULT_POLICY_PATH = Path(".github/foundry-optimizer.yaml")
 DEFAULT_METADATA_PATH = Path(".foundry/agent-metadata.yaml")
+DEFAULT_REGISTRY_PATH = Path(".foundry-opt/registry.yaml")
 DEFAULT_PIN_PATH = Path(".github/foundry-opt.lock.yml")
+REGISTRY_PATH_ENV = "FOUNDRY_OPT_REGISTRY"
 BOOTSTRAP_RECEIPT_ENV = "FOUNDRY_OPT_BOOTSTRAP_RECEIPT"
 BROKER_SOCKET_ENV = "FOUNDRY_OPT_BROKER_SOCKET"
 STATE_ROOT_ENV = "FOUNDRY_OPT_STATE_ROOT"
@@ -120,8 +121,7 @@ class RuntimePaths(_FrozenModel):
     repository_root: Path
     policy_path: Path
     metadata_path: Path
-    pin_path: Path
-    bootstrap_receipt_path: Path
+    registry_path: Path
     broker_socket_path: Path
     state_root: Path
     job_root: Path
@@ -134,8 +134,7 @@ class RuntimePaths(_FrozenModel):
         "repository_root",
         "policy_path",
         "metadata_path",
-        "pin_path",
-        "bootstrap_receipt_path",
+        "registry_path",
         "broker_socket_path",
         "state_root",
         "job_root",
@@ -157,7 +156,6 @@ class RuntimeSettings(_FrozenModel):
     policy: RepositoryPolicy
     metadata: AgentMetadata
     pin: SharedPin
-    bootstrap_receipt: BootstrapReceipt
     repository_head: str = Field(pattern=_COMMIT_PATTERN.pattern)
     base_commit: str = Field(pattern=_COMMIT_PATTERN.pattern)
     deadline_seconds: float = Field(gt=0)
@@ -528,6 +526,7 @@ def load_runtime_paths(
     job_id: str | None = None,
     policy_path: Path | str | None = None,
     metadata_path: Path | str | None = None,
+    registry_path: Path | str | None = None,
     pin_path: Path | str | None = None,
     bootstrap_receipt_path: Path | str | None = None,
     broker_socket_path: Path | str | None = None,
@@ -543,17 +542,17 @@ def load_runtime_paths(
         repository_root / DEFAULT_METADATA_PATH if metadata_path is None else Path(metadata_path),
         field="metadata_path",
     )
-    resolved_pin_path = _resolve_existing_file(
-        repository_root / DEFAULT_PIN_PATH if pin_path is None else Path(pin_path),
-        field="pin_path",
+    del pin_path, bootstrap_receipt_path
+    configured_registry_path = (
+        registry_path
+        if registry_path is not None
+        else env.get(REGISTRY_PATH_ENV)
     )
-    resolved_receipt_path = _resolve_existing_file(
-        _environment_or_path(
-            bootstrap_receipt_path,
-            BOOTSTRAP_RECEIPT_ENV,
-            environment=env,
-        ),
-        field="bootstrap_receipt_path",
+    resolved_registry_path = _resolve_existing_file(
+        repository_root / DEFAULT_REGISTRY_PATH
+        if configured_registry_path is None
+        else Path(configured_registry_path),
+        field="registry_path",
     )
     resolved_broker_socket = _resolve_any_path(
         _environment_or_path(
@@ -590,8 +589,7 @@ def load_runtime_paths(
         repository_root=repository_root,
         policy_path=resolved_policy_path,
         metadata_path=resolved_metadata_path,
-        pin_path=resolved_pin_path,
-        bootstrap_receipt_path=resolved_receipt_path,
+        registry_path=resolved_registry_path,
         broker_socket_path=resolved_broker_socket,
         state_root=resolved_state_root,
         job_root=job_root,
@@ -642,15 +640,34 @@ def load_runtime_settings(
     deadline_seconds: float | str | None = None,
     policy_loader: Callable[..., RepositoryPolicy] = load_repository_policy,
     metadata_loader: Callable[[Path | str], AgentMetadata] = load_agent_metadata,
-    pin_loader: Callable[[Path | str], SharedPin] = load_shared_pin,
-    bootstrap_receipt_reader: Callable[[Path | str], BootstrapReceipt] = read_bootstrap_receipt,
+    registry_loader: Callable[
+        [str | bytes | Mapping[str, object]], RootRegistry
+    ] = RootRegistry.from_document,
+    pin_loader: Callable[[Path | str], SharedPin] | None = None,
+    bootstrap_receipt_reader: Callable[[Path | str], object] | None = None,
     repository_head_loader: Callable[[Path], str] = load_repository_head,
     base_commit_resolver: Callable[..., str] = resolve_base_commit,
 ) -> RuntimeSettings:
     policy = policy_loader(paths.policy_path, metadata_path=paths.metadata_path)
     metadata = metadata_loader(paths.metadata_path)
-    pin = pin_loader(paths.pin_path)
-    receipt = bootstrap_receipt_reader(paths.bootstrap_receipt_path)
+    del pin_loader, bootstrap_receipt_reader
+    registry = registry_loader(paths.registry_path.read_text(encoding="utf-8"))
+    if not registry.has_exact_runtime_provenance:
+        raise RuntimeIntegrationError(
+            "optimizer runtime requires registry v2 exact runtime provenance"
+        )
+    distribution = registry.distribution
+    assert distribution.pin is not None
+    assert distribution.uv_lock_sha256 is not None
+    pin = SharedPin.from_document(
+        {
+            "repository_url": distribution.repository,
+            "commit": distribution.pin,
+            "package_path": distribution.package_path,
+            "skill_path": distribution.optimizer_skill_path,
+            "uv_lock_sha256": distribution.uv_lock_sha256,
+        }
+    )
     repository_head = repository_head_loader(paths.repository_root)
     resolved_base_commit = base_commit_resolver(
         paths.repository_root,
@@ -660,7 +677,6 @@ def load_runtime_settings(
         environment=environment,
         deadline_seconds=deadline_seconds,
     )
-    _validate_bootstrap_receipt(pin, receipt)
     expected_metadata_path = (paths.repository_root / policy.metadata_path).resolve(strict=False)
     if expected_metadata_path != paths.metadata_path:
         raise RuntimeIntegrationError("repository policy metadata_path does not match the loaded metadata file")
@@ -670,7 +686,6 @@ def load_runtime_settings(
         policy=policy,
         metadata=metadata,
         pin=pin,
-        bootstrap_receipt=receipt,
         repository_head=repository_head,
         base_commit=resolved_base_commit,
         deadline_seconds=configured_deadline,
@@ -1613,6 +1628,7 @@ def capture_route_fingerprint(
     settings: RuntimeSettings | None = None,
     policy_path: Path | str | None = None,
     metadata_path: Path | str | None = None,
+    registry_path: Path | str | None = None,
     pin_path: Path | str | None = None,
     bootstrap_receipt_path: Path | str | None = None,
     broker_socket_path: Path | str | None = None,
@@ -1622,8 +1638,11 @@ def capture_route_fingerprint(
     foundry_client_factory: Callable[..., FoundryPocClient] = FoundryPocClient,
     policy_loader: Callable[..., RepositoryPolicy] = load_repository_policy,
     metadata_loader: Callable[[Path | str], AgentMetadata] = load_agent_metadata,
-    pin_loader: Callable[[Path | str], SharedPin] = load_shared_pin,
-    bootstrap_receipt_reader: Callable[[Path | str], BootstrapReceipt] = read_bootstrap_receipt,
+    registry_loader: Callable[
+        [str | bytes | Mapping[str, object]], RootRegistry
+    ] = RootRegistry.from_document,
+    pin_loader: Callable[[Path | str], SharedPin] | None = None,
+    bootstrap_receipt_reader: Callable[[Path | str], object] | None = None,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> RouteFingerprint:
     runtime_paths = paths or load_runtime_paths(
@@ -1631,6 +1650,7 @@ def capture_route_fingerprint(
         environment=environment,
         policy_path=policy_path,
         metadata_path=metadata_path,
+        registry_path=registry_path,
         pin_path=pin_path,
         bootstrap_receipt_path=bootstrap_receipt_path,
         broker_socket_path=broker_socket_path,
@@ -1642,6 +1662,7 @@ def capture_route_fingerprint(
         deadline_seconds=deadline_seconds,
         policy_loader=policy_loader,
         metadata_loader=metadata_loader,
+        registry_loader=registry_loader,
         pin_loader=pin_loader,
         bootstrap_receipt_reader=bootstrap_receipt_reader,
     )
@@ -1719,6 +1740,7 @@ def build_runtime_controller(
     verification_resolution: VerificationResolution | None = None,
     policy_path: Path | str | None = None,
     metadata_path: Path | str | None = None,
+    registry_path: Path | str | None = None,
     pin_path: Path | str | None = None,
     bootstrap_receipt_path: Path | str | None = None,
     broker_socket_path: Path | str | None = None,
@@ -1736,8 +1758,11 @@ def build_runtime_controller(
     closure_factory: Callable[..., BrokerClosure] = BrokerClosure,
     policy_loader: Callable[..., RepositoryPolicy] = load_repository_policy,
     metadata_loader: Callable[[Path | str], AgentMetadata] = load_agent_metadata,
-    pin_loader: Callable[[Path | str], SharedPin] = load_shared_pin,
-    bootstrap_receipt_reader: Callable[[Path | str], BootstrapReceipt] = read_bootstrap_receipt,
+    registry_loader: Callable[
+        [str | bytes | Mapping[str, object]], RootRegistry
+    ] = RootRegistry.from_document,
+    pin_loader: Callable[[Path | str], SharedPin] | None = None,
+    bootstrap_receipt_reader: Callable[[Path | str], object] | None = None,
 ) -> OptimizeJobController:
     runtime_paths = paths or load_runtime_paths(
         repository,
@@ -1745,6 +1770,7 @@ def build_runtime_controller(
         job_id=identity.job_id,
         policy_path=policy_path,
         metadata_path=metadata_path,
+        registry_path=registry_path,
         pin_path=pin_path,
         bootstrap_receipt_path=bootstrap_receipt_path,
         broker_socket_path=broker_socket_path,
@@ -1757,6 +1783,7 @@ def build_runtime_controller(
         deadline_seconds=deadline_seconds,
         policy_loader=policy_loader,
         metadata_loader=metadata_loader,
+        registry_loader=registry_loader,
         pin_loader=pin_loader,
         bootstrap_receipt_reader=bootstrap_receipt_reader,
     )
@@ -1899,19 +1926,6 @@ def select_oidc_principal(
     raise RuntimeIntegrationError(
         f"trusted metadata must declare one {role} OIDC principal"
     )
-
-
-def _validate_bootstrap_receipt(pin: SharedPin, receipt: BootstrapReceipt) -> None:
-    if receipt.repository != pin.repository_url:
-        raise RuntimeIntegrationError("bootstrap receipt repository does not match the shared pin")
-    if receipt.commit != pin.commit:
-        raise RuntimeIntegrationError("bootstrap receipt commit does not match the shared pin")
-    if receipt.package_path != pin.package_path:
-        raise RuntimeIntegrationError("bootstrap receipt package_path does not match the shared pin")
-    if not optimizer_skill_paths_match(receipt.skill_path, pin.skill_path):
-        raise RuntimeIntegrationError("bootstrap receipt skill_path does not match the shared pin")
-    if receipt.lock_sha256 != pin.uv_lock_sha256:
-        raise RuntimeIntegrationError("bootstrap receipt lock_sha256 does not match the shared pin")
 
 
 def _validate_policy_models(policy: RepositoryPolicy, metadata: AgentMetadata) -> None:

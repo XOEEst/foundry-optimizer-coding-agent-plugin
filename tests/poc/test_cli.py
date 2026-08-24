@@ -1292,6 +1292,34 @@ def _create_runtime_repository(tmp_path: Path) -> tuple[Path, str, dict[str, str
     lock_sha256 = hashlib.sha256((repository / "uv.lock").read_bytes()).hexdigest()
     (repository / ".github").mkdir()
     (repository / ".foundry").mkdir()
+    runtime_registry = repository / ".foundry" / "runtime-registry.yaml"
+    runtime_registry.write_text(
+        "\n".join(
+            (
+                "schema_version: 2",
+                "distribution:",
+                "  repository: https://github.com/example-org/shared-skill",
+                "  channel: reviewed",
+                f"  pin: {shared_commit}",
+                "  package_path: .",
+                f"  uv_lock_sha256: {lock_sha256}",
+                "  optimizer_skill_path: skills/foundry-agent-optimizer",
+                "github:",
+                "  optimizer_environment: copilot",
+                "  deployment_environment: foundry-production",
+                "  client_id_variable: AZURE_OPTIMIZER_CLIENT_ID",
+                "identity:",
+                "  kind: unresolved_migration",
+                "agents:",
+                "  - agent_id: travel-agent",
+                "    root: src",
+                "    config_path: .foundry/foundry-opt.yaml",
+                "    enabled: true",
+                "",
+            )
+        ),
+        encoding="ascii",
+    )
     (repository / ".github" / "foundry-opt.lock.yml").write_text(
         "\n".join(
             (
@@ -1437,6 +1465,7 @@ def _create_runtime_repository(tmp_path: Path) -> tuple[Path, str, dict[str, str
     broker_socket = tmp_path / "broker.sock"
     broker_socket.write_text("", encoding="utf-8")
     environment = {
+        "FOUNDRY_OPT_REGISTRY": str(runtime_registry),
         BOOTSTRAP_RECEIPT_ENV: str(receipt_path),
         BROKER_SOCKET_ENV: str(broker_socket),
         STATE_ROOT_ENV: str(state_root),
@@ -3407,8 +3436,7 @@ def test_job_resume_rejects_primary_metric_override_drift(
             "issue-request",
             "persisted optimize-job issue request does not match the current issue body",
         ),
-        ("pin", "bootstrap receipt commit does not match the shared pin"),
-        ("receipt", "bootstrap receipt lock_sha256 does not match the shared pin"),
+        ("registry-pin", "shared_commit does not match the shared pin"),
         ("base", "repository HEAD drifted from the optimize-job base commit"),
     ),
 )
@@ -3434,26 +3462,11 @@ def test_job_resume_rejects_runtime_drift(
         )
     elif drift_kind == "issue-request":
         _replace_text(event, "Improve coverage.", "Improve latency.")
-    elif drift_kind == "pin":
+    elif drift_kind == "registry-pin":
         _replace_text(
-            repository / ".github" / "foundry-opt.lock.yml",
-            "commit: ",
-            f"commit: {'a' * 40} # ",
-        )
-    elif drift_kind == "receipt":
-        receipt_path = Path(environment[BOOTSTRAP_RECEIPT_ENV])
-        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-        receipt_path.unlink()
-        write_bootstrap_receipt(
-            receipt_path,
-            BootstrapReceipt.create(
-                repository=receipt["repository"],
-                commit=receipt["commit"],
-                package_path=receipt["package_path"],
-                skill_path=receipt["skill_path"],
-                lock_sha256="0" * 64,
-                checkout_root=receipt["checkout_root"],
-            ),
+            Path(environment["FOUNDRY_OPT_REGISTRY"]),
+            "  pin: ",
+            f"  pin: {'a' * 40} # ",
         )
     elif drift_kind == "base":
         (repository / "src" / "main.py").write_text("VALUE = 'drifted'\n", encoding="utf-8")
