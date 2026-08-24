@@ -18,7 +18,6 @@ from pydantic import ValidationError
 
 from foundry_opt import __version__
 from foundry_opt.contract_errors import BootstrapConfigError
-from foundry_opt.bootstrap.cli import register_bootstrap_commands
 from foundry_opt.repository_selection import (
     build_registered_deployment_plan,
     normalize_issue_author_permission,
@@ -122,23 +121,16 @@ from foundry_opt.poc.verification import (
 
 
 app = typer.Typer(no_args_is_help=True, pretty_exceptions_enable=False)
-bootstrap_app = typer.Typer(
-    no_args_is_help=True,
-    help="Advanced compatibility interface for the frozen `foundry-opt bootstrap ...` tree. Normal owners should use `/foundry-bootstrap`.",
-)
 broker_app = typer.Typer(no_args_is_help=True)
 issue_app = typer.Typer(no_args_is_help=True)
 job_app = typer.Typer(no_args_is_help=True)
 acceptance_app = typer.Typer(no_args_is_help=True)
 deploy_app = typer.Typer(no_args_is_help=True)
-app.add_typer(bootstrap_app, name="bootstrap")
 app.add_typer(broker_app, name="broker")
 app.add_typer(issue_app, name="issue")
 app.add_typer(job_app, name="job")
 app.add_typer(acceptance_app, name="acceptance")
 app.add_typer(deploy_app, name="deploy")
-register_bootstrap_commands(bootstrap_app)
-
 _PIN_PATH = Path(".github/foundry-opt.lock.yml")
 _POLICY_PATH = Path(".github/foundry-optimizer.yaml")
 _METADATA_PATH = Path(".foundry/agent-metadata.yaml")

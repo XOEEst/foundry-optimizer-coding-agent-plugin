@@ -1539,49 +1539,6 @@ def test_issue_parse(tmp_path: Path) -> None:
     assert payload["request"]["candidate_budget"] == 2
 
 
-def test_bootstrap_verify(tmp_path: Path) -> None:
-    checkout = tmp_path / "shared"
-    checkout.mkdir()
-    _git(checkout, "init")
-    (checkout / "src").mkdir()
-    (checkout / "src" / "skill").mkdir()
-    (checkout / "uv.lock").write_text("lock\n", encoding="utf-8")
-    _git(checkout, "add", ".")
-    _git(checkout, "commit", "-m", "fixture")
-    commit = _git(checkout, "rev-parse", "HEAD")
-    lock_sha = hashlib.sha256((checkout / "uv.lock").read_bytes()).hexdigest()
-    pin = tmp_path / "pin.yml"
-    pin.write_text(
-        f"""schema_version: 1
-repository_url: https://github.com/example/shared.git
-commit: "{commit}"
-package_path: .
-skill_path: src/skill
-uv_lock_sha256: "{lock_sha}"
-""",
-        encoding="utf-8",
-    )
-    receipt = tmp_path / "receipt.json"
-
-    result = runner.invoke(
-        app,
-        [
-            "bootstrap",
-            "verify",
-            "--pin",
-            str(pin),
-            "--checkout",
-            str(checkout),
-            "--receipt",
-            str(receipt),
-        ],
-    )
-
-    assert result.exit_code == 0, result.stdout
-    assert receipt.exists()
-    assert json.loads(result.stdout)["commit"] == commit
-
-
 def test_validate_config_rejects_non_repository(tmp_path: Path) -> None:
     result = runner.invoke(app, ["validate-config", "--repository", str(tmp_path)])
 
