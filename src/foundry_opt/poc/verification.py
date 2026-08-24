@@ -5,7 +5,7 @@ from typing import Literal, Protocol, runtime_checkable
 from pydantic import Field, model_validator
 
 from foundry_opt.repository_contracts import (
-    BootstrapSidecar,
+    AgentProfile,
     EvaluationGatePolicy,
     HardGuardrail,
     VerificationBundle,
@@ -491,7 +491,7 @@ def deployment_evaluator_ids(
 
 
 def _usable_deployment_bundle(
-    profile: BootstrapSidecar,
+    profile: AgentProfile,
 ) -> VerificationBundle | None:
     bundle = profile.verification.bundle
     if bundle is None:
@@ -509,7 +509,7 @@ def _usable_deployment_bundle(
 
 def resolve_deployment_verification(
     *,
-    profile: BootstrapSidecar,
+    profile: AgentProfile,
 ) -> DeploymentVerification:
     policy = profile.verification.evaluation_gate_policy
     bundle = profile.verification.bundle

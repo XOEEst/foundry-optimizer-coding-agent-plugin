@@ -8,7 +8,7 @@ from pathlib import Path, PurePosixPath
 from typing import Literal, cast
 
 from foundry_opt.contract_errors import BootstrapConfigError
-from foundry_opt.repository_contracts import BootstrapSidecar, RootRegistry
+from foundry_opt.repository_contracts import AgentProfile, RepositoryRegistry
 from foundry_opt.poc.config import IssueEvaluatorEntry, validate_repository_relative_path
 from foundry_opt.poc.verification import (
     DeploymentVerification,
@@ -22,7 +22,7 @@ class RegistrySelection:
     repo_agent_id: str
     root: str
     config_path: str
-    sidecar: BootstrapSidecar
+    sidecar: AgentProfile
     registry_hash: str
     sidecar_hash: str
 
@@ -103,7 +103,7 @@ def resolve_registry_selection(
         else lambda relative: (repository_root / relative).read_bytes()
     )
     registry_bytes = reader(".foundry-opt/registry.yaml")
-    registry = RootRegistry.from_document(registry_bytes.decode("utf-8"))
+    registry = RepositoryRegistry.from_document(registry_bytes.decode("utf-8"))
     enabled = tuple(agent for agent in registry.agents if agent.enabled)
     if repo_agent_id is None:
         if len(enabled) != 1:
@@ -118,7 +118,7 @@ def resolve_registry_selection(
         sidecar_bytes = reader(selected.config_path)
     except OSError as exc:
         raise BootstrapConfigError("enabled registry entry requires a profile at config_path") from exc
-    sidecar = BootstrapSidecar.from_document(sidecar_bytes.decode("utf-8"))
+    sidecar = AgentProfile.from_document(sidecar_bytes.decode("utf-8"))
     if sidecar.repo_agent_id != selected.agent_id:
         raise BootstrapConfigError("registry config_path sidecar repo_agent_id does not match registry agent_id")
     return RegistrySelection(
@@ -142,7 +142,7 @@ def protected_editable_patterns_for_repository(
     *,
     repo_agent_id: str | None = None,
 ) -> tuple[str, ...]:
-    registry = RootRegistry.from_document((repository_root / ".foundry-opt" / "registry.yaml").read_text(encoding="utf-8"))
+    registry = RepositoryRegistry.from_document((repository_root / ".foundry-opt" / "registry.yaml").read_text(encoding="utf-8"))
     protected = {".foundry-opt/**", ".foundry-opt/registry.yaml"}
     enabled = [agent for agent in registry.agents if agent.enabled]
     selected_agents = enabled
@@ -219,7 +219,7 @@ def build_changed_path_matrix(
     changed_paths: Sequence[str],
     manual_repo_agent_id: str | None = None,
 ) -> tuple[WorkflowMatrixEntry, ...]:
-    registry = RootRegistry.from_document((repository_root / ".foundry-opt" / "registry.yaml").read_text(encoding="utf-8"))
+    registry = RepositoryRegistry.from_document((repository_root / ".foundry-opt" / "registry.yaml").read_text(encoding="utf-8"))
     enabled = [agent for agent in registry.agents if agent.enabled]
     by_id = {agent.agent_id: agent for agent in registry.agents}
     if manual_repo_agent_id is not None:
@@ -238,7 +238,7 @@ def build_changed_path_matrix(
         for path in normalized
     )
     sidecars = {
-        agent.agent_id: BootstrapSidecar.from_document((repository_root / agent.config_path).read_text(encoding="utf-8"))
+        agent.agent_id: AgentProfile.from_document((repository_root / agent.config_path).read_text(encoding="utf-8"))
         for agent in enabled
     }
     include: list[WorkflowMatrixEntry] = []

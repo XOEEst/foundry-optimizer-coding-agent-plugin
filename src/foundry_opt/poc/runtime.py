@@ -64,7 +64,7 @@ from foundry_opt.poc.state import (
 )
 from foundry_opt.poc.source import SourcePackagingError, package_git_source
 from foundry_opt.poc.verification import VerificationResolution
-from foundry_opt.repository_contracts import RootRegistry
+from foundry_opt.repository_contracts import RepositoryRegistry
 from foundry_opt.repository_selection import protected_editable_patterns_for_repository
 
 
@@ -641,8 +641,8 @@ def load_runtime_settings(
     policy_loader: Callable[..., RepositoryPolicy] = load_repository_policy,
     metadata_loader: Callable[[Path | str], AgentMetadata] = load_agent_metadata,
     registry_loader: Callable[
-        [str | bytes | Mapping[str, object]], RootRegistry
-    ] = RootRegistry.from_document,
+        [str | bytes | Mapping[str, object]], RepositoryRegistry
+    ] = RepositoryRegistry.from_document,
     pin_loader: Callable[[Path | str], SharedPin] | None = None,
     bootstrap_receipt_reader: Callable[[Path | str], object] | None = None,
     repository_head_loader: Callable[[Path], str] = load_repository_head,
@@ -1639,8 +1639,8 @@ def capture_route_fingerprint(
     policy_loader: Callable[..., RepositoryPolicy] = load_repository_policy,
     metadata_loader: Callable[[Path | str], AgentMetadata] = load_agent_metadata,
     registry_loader: Callable[
-        [str | bytes | Mapping[str, object]], RootRegistry
-    ] = RootRegistry.from_document,
+        [str | bytes | Mapping[str, object]], RepositoryRegistry
+    ] = RepositoryRegistry.from_document,
     pin_loader: Callable[[Path | str], SharedPin] | None = None,
     bootstrap_receipt_reader: Callable[[Path | str], object] | None = None,
     monotonic: Callable[[], float] = time.monotonic,
@@ -1759,8 +1759,8 @@ def build_runtime_controller(
     policy_loader: Callable[..., RepositoryPolicy] = load_repository_policy,
     metadata_loader: Callable[[Path | str], AgentMetadata] = load_agent_metadata,
     registry_loader: Callable[
-        [str | bytes | Mapping[str, object]], RootRegistry
-    ] = RootRegistry.from_document,
+        [str | bytes | Mapping[str, object]], RepositoryRegistry
+    ] = RepositoryRegistry.from_document,
     pin_loader: Callable[[Path | str], SharedPin] | None = None,
     bootstrap_receipt_reader: Callable[[Path | str], object] | None = None,
 ) -> OptimizeJobController:

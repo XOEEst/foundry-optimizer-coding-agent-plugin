@@ -15,7 +15,7 @@ from typing import Literal, Protocol, TypeVar
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from foundry_opt.canonical import canonical_sha256
-from foundry_opt.repository_contracts import RootRegistry
+from foundry_opt.repository_contracts import RepositoryRegistry
 from foundry_opt.repository_selection import (
     RegistrySelection,
     resolve_registry_selection,
@@ -1154,7 +1154,7 @@ def _load_registered_settings(
         raise RuntimeIntegrationError(
             "registered deployment sidecar does not match the exact source commit"
         )
-    registry = RootRegistry.from_document(registry_bytes.decode("utf-8"))
+    registry = RepositoryRegistry.from_document(registry_bytes.decode("utf-8"))
     if not registry.has_exact_runtime_provenance:
         raise RuntimeIntegrationError(
             "registered deployment requires registry v2 exact runtime provenance"
@@ -2115,7 +2115,7 @@ def _subscription_id(resource_id: str) -> str:
 
 
 def _registered_oidc_subject_prefix(
-    registry: RootRegistry,
+    registry: RepositoryRegistry,
     *,
     environment: Mapping[str, str],
     repository_identity: str,
