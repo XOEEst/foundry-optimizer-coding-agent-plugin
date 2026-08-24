@@ -41,7 +41,7 @@ Tradeoffs:
 ## Evidence
 
 - OIDC subject and tenant-policy guidance in [Identity and RBAC](../identity-rbac.md).
-- Exact-subject validation and two-subject planning in [`src/foundry_opt/bootstrap/providers/azure.py`](../../src/foundry_opt/bootstrap/providers/azure.py) and [`tests/bootstrap/test_azure_provider.py`](../../tests/bootstrap/test_azure_provider.py).
+- The skill now inspects and applies exact GitHub environment subjects directly through GitHub/Azure tools.
 - Public runtime changes in [PR #84](https://github.com/XOEEst/foundry-optimizer-coding-agent-plugin/pull/84) and [PR #86](https://github.com/XOEEst/foundry-optimizer-coding-agent-plugin/pull/86).
 - Detailed tenant-policy acceptance evidence is retained privately.
 

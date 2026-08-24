@@ -42,13 +42,10 @@ Tradeoffs:
 
 ## Evidence
 
-- Public evaluation contract in [Evaluation onboarding](../evaluation-onboarding.md).
-- Receipt-backed verification posture and labels in [Owner review interface](../owner-review.md) and [Evaluation gates](../get-started/evaluation-gates.md).
-- Evaluation onboarding implementation in [`src/foundry_opt/bootstrap/evaluation/inventory.py`](../../src/foundry_opt/bootstrap/evaluation/inventory.py), [`src/foundry_opt/bootstrap/evaluation/core.py`](../../src/foundry_opt/bootstrap/evaluation/core.py), [`src/foundry_opt/bootstrap/evaluation/execution.py`](../../src/foundry_opt/bootstrap/evaluation/execution.py), and [`src/foundry_opt/bootstrap/evaluation/activation.py`](../../src/foundry_opt/bootstrap/evaluation/activation.py).
-- Tests for inventory, dataset materialization, activation, resumability, and finalization in [`tests/bootstrap/test_evaluation_inventory.py`](../../tests/bootstrap/test_evaluation_inventory.py), [`tests/bootstrap/test_dataset_materialization.py`](../../tests/bootstrap/test_dataset_materialization.py), [`tests/bootstrap/test_activation_draft.py`](../../tests/bootstrap/test_activation_draft.py), [`tests/bootstrap/test_evaluation_onboarding_machine.py`](../../tests/bootstrap/test_evaluation_onboarding_machine.py), [`tests/bootstrap/test_evaluation_phase_flow.py`](../../tests/bootstrap/test_evaluation_phase_flow.py), and [`tests/bootstrap/test_plan_receipt.py`](../../tests/bootstrap/test_plan_receipt.py).
-- Detailed original acceptance evidence is retained privately.
+- Historical implementation and acceptance evidence was removed with bootstrap evaluation onboarding.
+- Existing activated bundles remain readable through the neutral agent-profile contract.
 
 ## Supersedes / Superseded by
 
 - Supersedes: None.
-- Superseded by: [0015](0015-skill-first-bootstrap-and-optional-verification.md) for the owner-facing rule that evaluation is optional and labels must match proof; receipt-bound activation, safety gates, and deterministic reuse rules remain current.
+- Superseded by: [0015](0015-skill-first-bootstrap-and-optional-verification.md), then by the skill-only bootstrap decision. New evaluation onboarding is out of scope pending a dedicated future skill.

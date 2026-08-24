@@ -39,7 +39,7 @@ Tradeoffs:
 
 - Repository authority is stated in the root [README](../../README.md) and [Documentation](../README.md).
 - Public runtime source authority and exact release responsibilities are documented in [Distribution and pinning](../distribution.md) and [Recommended branch protection](../branch-protection.md).
-- Owner-facing documentation that now points back to this ADR lineage lives in [Owner review interface](../owner-review.md) and [Identity and RBAC](../identity-rbac.md).
+- Owner-facing identity guidance lives in [Identity and RBAC](../identity-rbac.md).
 - Plugin and packaging boundaries are exercised by [`tests/test_plugin_layout.py`](../../tests/test_plugin_layout.py) and [`tests/packaging/test_foundry_bootstrap_release.py`](../../tests/packaging/test_foundry_bootstrap_release.py).
 
 ## Supersedes / Superseded by

@@ -12,9 +12,8 @@ Repository owners should read:
 3. [Issues and monitoring](get-started/issues-and-monitoring.md)
 4. [Evaluation gates](get-started/evaluation-gates.md)
 
-The normal owner interface is `/foundry-bootstrap`. The low-level
-`foundry-opt bootstrap ...` command tree remains available for automation,
-diagnostics, recovery, and compatibility.
+The bootstrap interface is `/foundry-bootstrap`. Bootstrap has no low-level
+CLI or runtime state machine.
 
 ## Architecture
 
@@ -37,9 +36,6 @@ diagnostics, recovery, and compatibility.
 - [Evidence, state, and receipts](reference/evidence-state-and-receipts.md)
 - [Managed files](managed-files.md)
 - [Identity and RBAC](identity-rbac.md)
-- [Binding evidence](binding-evidence.md)
-- [Evaluation onboarding](evaluation-onboarding.md)
-- [Owner review interface](owner-review.md)
 - [Distribution and pinning](distribution.md)
 - [Recommended branch protection](branch-protection.md)
 

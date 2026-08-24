@@ -39,12 +39,10 @@ Tradeoffs:
 ## Evidence
 
 - Default shared-identity policy, approved roles, and accepted residual risk in [Identity and RBAC](../identity-rbac.md).
-- Input validation for exact identity references in [`src/foundry_opt/bootstrap/input_contracts.py`](../../src/foundry_opt/bootstrap/input_contracts.py).
-- Exact two-subject planning and drift checks in [`src/foundry_opt/bootstrap/providers/azure.py`](../../src/foundry_opt/bootstrap/providers/azure.py) and [`tests/bootstrap/test_azure_provider.py`](../../tests/bootstrap/test_azure_provider.py).
-- Owner-facing identity review in [`src/foundry_opt/bootstrap/connection_setup.py`](../../src/foundry_opt/bootstrap/connection_setup.py) and [`tests/bootstrap/test_connection_setup.py`](../../tests/bootstrap/test_connection_setup.py).
-- Role-matrix and end-to-end bootstrap coverage in [`tests/bootstrap/test_azure_role_matrix.py`](../../tests/bootstrap/test_azure_role_matrix.py), [`tests/bootstrap/test_azure_identity_plan.py`](../../tests/bootstrap/test_azure_identity_plan.py), and [`tests/bootstrap/test_skill_one_click_e2e.py`](../../tests/bootstrap/test_skill_one_click_e2e.py).
+- The skill now inspects and applies identity, federation, and RBAC directly through general GitHub/Azure tools.
+- Exact existing resources are adopted, missing resources are created, and conflicts stop for owner review.
 
 ## Supersedes / Superseded by
 
 - Supersedes: [0004](0004-oidc-only-role-specific-identities.md) as the default bootstrap identity model while preserving OIDC-only authentication and refusal of static credentials.
-- Superseded by: None.
+- Superseded by: the skill-only bootstrap decision for implementation ownership; the shared-identity policy remains current.

@@ -120,4 +120,3 @@ spreading them across the skill or callers.
 - [System overview](system-overview.md)
 - [Deployment](deployment.md)
 - [Trust model](trust-model.md)
-- [Evaluation onboarding](../evaluation-onboarding.md)

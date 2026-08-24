@@ -34,9 +34,9 @@ Tradeoffs:
 
 ## Evidence
 
-- Legacy shared pin schema and receipt verification remain covered by [`src/foundry_opt/poc/config.py`](../../src/foundry_opt/poc/config.py), [`src/foundry_opt/poc/bootstrap.py`](../../src/foundry_opt/poc/bootstrap.py), and [`tests/poc/test_bootstrap.py`](../../tests/poc/test_bootstrap.py).
+- Legacy shared pin parsing remains in [`src/foundry_opt/poc/config.py`](../../src/foundry_opt/poc/config.py) for compatibility.
 - Current public exact-pin verification and migration rules are documented in [Managed files](../managed-files.md) and [Distribution and pinning](../distribution.md).
-- The public exact-pin contract is implemented in [`src/foundry_opt/distribution.py`](../../src/foundry_opt/distribution.py) and exercised by [`tests/test_distribution.py`](../../tests/test_distribution.py), [`tests/bootstrap/test_launchers.py`](../../tests/bootstrap/test_launchers.py), and [`tests/packaging/test_foundry_bootstrap_release.py`](../../tests/packaging/test_foundry_bootstrap_release.py).
+- The current exact runtime contract is registry v2, implemented in [`repository_contracts.py`](../../src/foundry_opt/repository_contracts.py) and [`runtime_provenance.py`](../../src/foundry_opt/runtime_provenance.py).
 
 ## Supersedes / Superseded by
 

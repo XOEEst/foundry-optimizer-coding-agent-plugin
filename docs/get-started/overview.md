@@ -84,8 +84,6 @@ Verification can be added later without repeating repository bootstrap.
 - [Architecture decisions](../decisions/README.md)
 - [Repository contract](../reference/repository-contract.md)
 - [Identity and RBAC](../identity-rbac.md)
-- [Binding evidence](../binding-evidence.md)
 - [Managed files](../managed-files.md)
-- [Evaluation onboarding](../evaluation-onboarding.md)
 - [Recommended branch protection](../branch-protection.md)
 - [Distribution and pinning](../distribution.md)

@@ -48,14 +48,12 @@ The final summary links to the GitHub repository and environments, Azure
 identity and role assignments, Foundry projects and agents, and any configured
 datasets or evaluators.
 
-## Compatibility policy
+## Bootstrap interface
 
-- Use `/foundry-bootstrap` for normal owner bootstraps.
-- Keep `foundry-opt bootstrap ...` names, arguments, exit codes, JSON
-  payloads, receipts, and workflows stable while compatibility is
-  retained.
-- Record future retirement or breaking changes in docs and release
-  notes instead of emitting runtime warning noise in CI.
+- Use `/foundry-bootstrap` for repository bootstrap.
+- Bootstrap is skill-only; there is no bootstrap CLI, state service, receipt,
+  or rollback runtime.
+- Optimizer and registered deployment commands remain available.
 
 ## What this repository covers
 
@@ -84,12 +82,9 @@ See [Distribution and pinning](docs/distribution.md) and
 - [CLI reference](docs/reference/cli.md)
 - [Evidence, state, and receipts](docs/reference/evidence-state-and-receipts.md)
 - [Identity and RBAC](docs/identity-rbac.md)
-- [Binding evidence](docs/binding-evidence.md)
 - [Managed files](docs/managed-files.md)
-- [Evaluation onboarding](docs/evaluation-onboarding.md)
 - [Recommended branch protection](docs/branch-protection.md)
 - [Distribution and pinning](docs/distribution.md)
-- [Owner review interface](docs/owner-review.md)
 
 ## License
 

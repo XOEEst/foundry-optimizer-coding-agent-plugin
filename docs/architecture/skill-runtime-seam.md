@@ -1,98 +1,46 @@
-# Skill and runtime seam
+# Skill-only bootstrap
 
-Bootstrap is intentionally split at one small seam. The owner-facing skill is
-adaptive and conversational. The runtime is deterministic and receipt-backed.
+Bootstrap has no Python orchestration runtime or CLI seam. The installed
+`foundry-bootstrap` skill is the owner-facing module and uses general
+repository, Git, GitHub, Azure, Foundry, and azd tools directly.
 
-## The seam
+## Owner interface
 
-The bootstrap owner interface is exactly five bridge operations:
+The owner invokes `/foundry-bootstrap`, resolves any ambiguous agent or cloud
+choices, reviews one combined plan, and gives one approval.
 
-- `start`
-- `answer`
-- `approve`
-- `status`
-- `rollback`
+Before approval the skill performs read-only inspection and stages proposed
+files in the session workspace. After approval it:
 
-The checked-in bridge lives in
-[`plugins/foundry-bootstrap/scripts/bootstrap.py`](../../plugins/foundry-bootstrap/scripts/bootstrap.py).
-Its job is to carry owner turns across the seam, not to reimplement bootstrap.
+1. applies the reviewed repository changes;
+2. adopts exact GitHub/Azure resources and creates missing resources;
+3. writes `.foundry-opt/bootstrap-report.md`;
+4. creates one local commit;
+5. deploys enabled agents with `azd deploy`.
 
-## Ownership split
+There is no operation ID, state machine, receipt, compensation, or rollback.
+Conflicting existing remote resources stop the flow instead of being
+overwritten.
 
-| Side of the seam | Module | What it owns |
-| --- | --- | --- |
-| Owner-facing side | [`plugins/foundry-bootstrap/SKILL.md`](../../plugins/foundry-bootstrap/SKILL.md) and [`scripts/bootstrap.py`](../../plugins/foundry-bootstrap/scripts/bootstrap.py) | owner wording, exact runtime install and re-exec, adaptive repository inspection, adaptive Azure management-plane lookup, choice collection |
-| Runtime side | [`src/foundry_opt/bootstrap/runner.py`](../../src/foundry_opt/bootstrap/runner.py) and child modules under [`src/foundry_opt/bootstrap/`](../../src/foundry_opt/bootstrap/) | deterministic validation, lifecycle state, stage transitions, repository mutations, connection mutations, local commit creation, local deployment, receipts, resume, rollback |
+## Retained runtime seam
 
-One rule is deliberate: Foundry data-plane inspection remains runtime-owned.
-The skill may help resolve endpoint or account inputs, but target inventory,
-binding observation, and deployment readiness stay in
-[`foundry_targets.py`](../../src/foundry_opt/bootstrap/foundry_targets.py)
-and the Foundry adapter modules.
+Optimizer and registered deployment still use shared code:
 
-## Why this seam is deep
+- [`repository_contracts.py`](../../src/foundry_opt/repository_contracts.py)
+- [`repository_selection.py`](../../src/foundry_opt/repository_selection.py)
+- [`source_discovery.py`](../../src/foundry_opt/source_discovery.py)
+- [`poc/runtime.py`](../../src/foundry_opt/poc/runtime.py)
+- [`poc/deploy.py`](../../src/foundry_opt/poc/deploy.py)
 
-The external interface is tiny, but the implementation behind it is large:
+These modules validate committed registry/profile contracts and exact-source
+optimizer or deployment operations. They do not orchestrate bootstrap.
 
-- discovery and binding classification
-- register/enable decisions
-- reviewed Foundry target validation
-- repository plan rendering and apply
-- GitHub-to-Azure connection planning and compensation
-- exact reviewed local commit creation
-- optional exact-commit local deployment
-- persistent state, receipts, and rollback
+## Failure model
 
-That depth gives leverage to the skill caller and locality to maintainers. The
-skill can stay simple while bootstrap rules change in one runtime module.
-
-## Owner flow across the seam
-
-```mermaid
-sequenceDiagram
-    participant Owner
-    participant Skill as foundry-bootstrap skill
-    participant Bridge as scripts/bootstrap.py
-    participant Runner as BootstrapRunner
-    participant Runtime as bootstrap modules
-
-    Owner->>Skill: Use /foundry-bootstrap
-    Skill->>Bridge: start
-    Bridge->>Runner: start(repository)
-    Runner->>Runtime: discover, plan, render
-    Runtime-->>Runner: owner markdown + machine turn
-    Runner-->>Bridge: BootstrapTurn
-    Bridge-->>Skill: owner markdown + hidden envelope
-
-    loop question or approval
-        Skill->>Bridge: answer or approve
-        Bridge->>Runner: answer(...) / approve(...)
-        Runner->>Runtime: validate, mutate, persist
-        Runtime-->>Runner: next stage
-        Runner-->>Bridge: BootstrapTurn
-        Bridge-->>Skill: next owner turn
-    end
-```
-
-## Default caller
-
-Standard Copilot plus installed skills is the default adapter at this seam.
-Bootstrap does not require a custom agent and does not switch to one
-automatically. An optional custom agent is only another caller-side adapter
-for teams that deliberately choose it.
-
-## Exact runtime contract
-
-The downloaded skill keeps a materialized `skill.lock.json` and re-executes
-through the exact reviewed runtime commit. Source checkouts import their own
-tree directly. In both cases the runtime, not the skill text, is the mutation
-authority.
-
-See:
-
-- [`plugins/foundry-bootstrap/references/owner-flow.md`](../../plugins/foundry-bootstrap/references/owner-flow.md)
-- [`plugins/foundry-bootstrap/references/security.md`](../../plugins/foundry-bootstrap/references/security.md)
-- [`docs/owner-review.md`](../owner-review.md)
+Bootstrap does not roll back. Local changes remain visible in Git and remote
+resources already created remain in place. The report and final skill response
+identify completed, failed, and pending actions so a rerun can re-inspect and
+adopt exact existing state.
 
 ## Related architecture
 

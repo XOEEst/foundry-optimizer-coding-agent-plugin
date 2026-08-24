@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import re
 from pathlib import Path
-
-import yaml
 
 from tools.check_docs import collect_violations
 
@@ -19,30 +16,26 @@ def test_documentation_links_and_public_safety_are_valid() -> None:
     assert collect_violations() == []
 
 
-def test_managed_files_document_matches_the_manifest() -> None:
-    manifest = yaml.safe_load(
-        _read(
-            "src/foundry_opt/templates/customer-repo/"
-            ".foundry-opt/managed-payloads.manifest.yaml"
-        )
-    )
-    payloads = manifest["managed_payloads"]
+def test_managed_files_document_lists_the_skill_only_core() -> None:
     documentation = _read("docs/managed-files.md")
-    documented_ids = set(
-        re.findall(r"^\| `([^`]+)` \|", documentation, flags=re.MULTILINE)
-    )
 
-    assert documented_ids == {payload["template_id"] for payload in payloads}
+    for path in (
+        ".foundry-opt/registry.yaml",
+        ".foundry-opt/bootstrap-report.md",
+        "azure.yaml",
+        ".github/workflows/copilot-setup-steps.yml",
+        ".github/workflows/foundry-opt-deploy.yml",
+    ):
+        assert path in documentation
+    assert "ownership ledger" in documentation
 
 
 def test_skill_runtime_seam_documents_the_complete_owner_interface() -> None:
-    documentation = (
-        _read("docs/architecture/skill-runtime-seam.md")
-        + _read("docs/owner-review.md")
-    )
+    documentation = _read("docs/architecture/skill-runtime-seam.md")
 
-    for operation in ("start", "answer", "approve", "status", "rollback"):
-        assert f"`{operation}`" in documentation
+    assert "one approval" in documentation
+    assert "no operation ID" in documentation
+    assert "does not roll back" in documentation
 
 
 def test_cli_reference_covers_the_current_public_command_tree() -> None:
@@ -51,30 +44,6 @@ def test_cli_reference_covers_the_current_public_command_tree() -> None:
         "version",
         "validate-config",
         "preflight",
-        "bootstrap verify",
-        "bootstrap discover",
-        "bootstrap binding-evidence",
-        "bootstrap plan",
-        "bootstrap status",
-        "bootstrap diff",
-        "bootstrap apply",
-        "bootstrap rollback",
-        "bootstrap resources",
-        "bootstrap review discovery",
-        "bootstrap review plan",
-        "bootstrap review status",
-        "bootstrap connect plan",
-        "bootstrap connect approve",
-        "bootstrap connect apply",
-        "bootstrap connect status",
-        "bootstrap connect rollback",
-        "bootstrap evaluation inventory",
-        "bootstrap evaluation plan",
-        "bootstrap evaluation apply",
-        "bootstrap evaluation activate",
-        "bootstrap evaluation status",
-        "bootstrap evaluation inspect",
-        "bootstrap evaluation replace",
         "broker launch",
         "broker bind-pr",
         "issue parse",
@@ -85,9 +54,7 @@ def test_cli_reference_covers_the_current_public_command_tree() -> None:
         "job finish",
         "job resume",
         "acceptance smoke",
-        "deploy preflight",
         "deploy plan",
-        "deploy publish",
         "deploy verify-registered",
         "deploy publish-registered",
     )
@@ -114,4 +81,4 @@ def test_distribution_docs_do_not_publish_a_global_current_sha() -> None:
     documentation = _read("docs/distribution.md")
 
     assert "current reviewed customer runtime" not in documentation
-    assert "operation-specific" in documentation
+    assert "registry v2" in documentation.casefold()

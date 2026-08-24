@@ -72,3 +72,4 @@ Every ADR uses the same durable sections and section order:
 | [0014](0014-public-development-authority.md) | Public development authority | Accepted | This repository is the public authority for runtime, docs, ADRs, issues, and future development. |
 | [0015](0015-skill-first-bootstrap-and-optional-verification.md) | Skill-first bootstrap and optional verification | Accepted | Standard Copilot plus `/foundry-bootstrap` is the default owner path; evaluation is optional and labels must match proof. |
 | [0016](0016-shared-identity-with-environment-federation.md) | Shared identity with environment federation | Accepted | Bootstrap defaults to one repository-wide identity with exact per-environment OIDC federation and no static credentials. |
+| [0017](0017-skill-only-bootstrap.md) | Skill-only bootstrap | Accepted | The static skill performs one-approved bootstrap directly through general tools; bootstrap runtime, state, receipts, and rollback are removed. |

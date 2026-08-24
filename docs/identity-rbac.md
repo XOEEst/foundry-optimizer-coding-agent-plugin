@@ -6,10 +6,9 @@ assigns a privileged fallback role.
 
 ## Approved least-privilege role matrix
 
-`foundry-opt bootstrap plan` accepts only the Azure built-in role definitions below. Anything
-else fails closed with `role_definition_id is not in the approved allow-list`. Each approved
-assignment must also carry an alias that starts with the role slug, so plans, actions, and
-receipts name the role they actually grant.
+The skill proposes only the Azure built-in role definitions below. It shows
+the exact role and scope before approval, adopts an exact existing assignment,
+creates a missing assignment, and stops on conflicting broader access.
 
 | Slug | Role | Role definition GUID | Scope kind | Why it is required |
 | --- | --- | --- | --- | --- |

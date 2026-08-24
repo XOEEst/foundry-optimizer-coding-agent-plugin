@@ -34,7 +34,7 @@ Tradeoffs:
 
 ## Evidence
 
-- The historical two-principal shape is preserved in [`tests/bootstrap/fixtures/templates/legacy-single-agent-agent-metadata.yaml`](../../tests/bootstrap/fixtures/templates/legacy-single-agent-agent-metadata.yaml) and imported by [`src/foundry_opt/bootstrap/legacy.py`](../../src/foundry_opt/bootstrap/legacy.py).
+- Historical two-principal metadata remains migration context only; the skill preserves exact existing identity configuration when upgrading a repository.
 - OIDC-only auth and separate role handling remain covered by [`src/foundry_opt/poc/auth.py`](../../src/foundry_opt/poc/auth.py), [`src/foundry_opt/poc/runtime.py`](../../src/foundry_opt/poc/runtime.py), [`src/foundry_opt/poc/deploy.py`](../../src/foundry_opt/poc/deploy.py), and their tests in [`tests/poc/test_auth.py`](../../tests/poc/test_auth.py), [`tests/poc/test_runtime.py`](../../tests/poc/test_runtime.py), and [`tests/poc/test_deploy.py`](../../tests/poc/test_deploy.py).
 - Current public OIDC-only and no-static-credentials policy is documented in [Identity and RBAC](../identity-rbac.md).
 

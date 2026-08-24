@@ -120,5 +120,3 @@ safe summary is: enabled for workflow use, not independently verified.
 - [Run an optimization](../guides/run-an-optimization.md)
 - [Optimize-job architecture](../architecture/optimize-job.md)
 - [Evidence, state, and receipts](../reference/evidence-state-and-receipts.md)
-- [Evaluation onboarding](../evaluation-onboarding.md)
-- [Binding evidence](../binding-evidence.md)

@@ -42,12 +42,10 @@ Tradeoffs:
 ## Evidence
 
 - Default owner workflow in the root [README](../../README.md), [Bootstrap](../get-started/bootstrap.md), and [`plugins/foundry-bootstrap/references/owner-flow.md`](../../plugins/foundry-bootstrap/references/owner-flow.md).
-- Bridge operations and boundary rules in [`plugins/foundry-bootstrap/SKILL.md`](../../plugins/foundry-bootstrap/SKILL.md), [`plugins/foundry-bootstrap/scripts/README.md`](../../plugins/foundry-bootstrap/scripts/README.md), and [`plugins/foundry-bootstrap/scripts/bootstrap.py`](../../plugins/foundry-bootstrap/scripts/bootstrap.py).
-- Runtime owner-review and state handling in [`src/foundry_opt/bootstrap/runner.py`](../../src/foundry_opt/bootstrap/runner.py) and [`src/foundry_opt/bootstrap/owner_review.py`](../../src/foundry_opt/bootstrap/owner_review.py).
-- Optional-verification and proof-label behavior in [Evaluation gates](../get-started/evaluation-gates.md), [Issues and monitoring](../get-started/issues-and-monitoring.md), and [Owner review interface](../owner-review.md).
-- End-to-end bridge coverage in [`tests/bootstrap/test_skill_bridge.py`](../../tests/bootstrap/test_skill_bridge.py), [`tests/bootstrap/test_skill_one_click_e2e.py`](../../tests/bootstrap/test_skill_one_click_e2e.py), [`tests/bootstrap/test_owner_review.py`](../../tests/bootstrap/test_owner_review.py), and [`tests/bootstrap/test_workflow_integration.py`](../../tests/bootstrap/test_workflow_integration.py).
+- The historical bridge/runtime implementation and its E2E tests were removed by the later skill-only bootstrap decision.
+- Optional-verification and proof-label behavior remains documented in [Evaluation gates](../get-started/evaluation-gates.md) and [Issues and monitoring](../get-started/issues-and-monitoring.md).
 
 ## Supersedes / Superseded by
 
 - Supersedes: [0011](0011-public-runtime-and-guided-bootstrap.md) for the default owner interface and skill-runtime responsibility split, and [0012](0012-receipt-bound-evaluation-activation.md) for the owner-facing verification-default and proof-label wording.
-- Superseded by: None.
+- Superseded by: the skill-only bootstrap decision.

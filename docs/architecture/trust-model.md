@@ -1,140 +1,50 @@
 # Trust model
 
-Foundry Optimizer narrows trust aggressively. The rule is consistent across
-bootstrap, optimize job, and deployment: adaptive callers may propose or
-narrow, but only trusted repository state and deterministic runtime modules may
-authorize mutation.
-
-## Trusted inputs and state
-
-The active repository contract is:
+## Trusted repository state
 
 - `.foundry-opt/registry.yaml`
-- one v2 profile per selected `config_path`
-- exact reviewed runtime commit and skill lock for downloaded bootstrap
-- exact Git commits for optimize-job and deployment source
+- each registered agent profile
+- the exact Git commit used by optimizer or deployment
+- exact runtime provenance recorded in registry v2
 
-Bootstrap receipts and operation state are also trusted, but they live outside
-the customer repository or in workflow artifacts rather than in tracked
-source.
+`.foundry-opt/bootstrap-report.md` is an audit summary, not authority.
 
-The old `.github/foundry-opt.lock.yml` document is legacy migration input. It
-is not the active repository authority.
+## Skill-only bootstrap
 
-## Less-trusted inputs
+The skill may inspect and mutate repository, GitHub, Azure, and Foundry state
+only after showing one combined plan and receiving approval.
 
-- issue prose
-- owner free-text answers
-- Copilot candidate edits
-- mutable working-tree bytes outside the reviewed commit
-- external results before runtime validation
+It adopts exact remote matches, creates missing resources, and stops on
+conflicting existing resources. It does not overwrite conflicts, persist
+credentials, compensate, or roll back.
 
-These inputs may guide behavior, but they do not widen policy or bypass exact
-validation.
+## Identity
 
-## Trust split at the bootstrap seam
+- Prefer an exact existing repository identity.
+- Otherwise create a user-assigned managed identity.
+- Use separate federated subjects for optimizer and production environments.
+- Store only non-secret identity and resource identifiers.
 
-- Skill-side modules may inspect repository files adaptively and perform Azure
-  management-plane lookup to help answer a target question.
-- Runtime-side modules own deterministic validation, state transitions,
-  classification, mutations, receipts, and rollback.
-- Foundry data-plane inspection remains runtime-owned.
+## Exact source
 
-That seam keeps trust concentrated in the reviewed runtime implementation.
+- Initial skill deployment requires a clean reviewed local commit.
+- Registered deployment requires the committed default-branch source.
+- Optimize-job candidates remain inside allowed editable paths and owned
+  drafts.
+- No flow mutates an explicit Foundry version route.
 
-## Identity model
+## External seams
 
-Bootstrap uses one repository-wide identity by default, with separate GitHub
-environment credentials for `copilot` and `foundry-production`. In practice
-that means:
+- GitHub CLI for environments and variables
+- Azure CLI/tools for identity, federation, and RBAC
+- Foundry tools for inventory
+- azd for initial local source deployment
+- [`poc/auth.py`](../../src/foundry_opt/poc/auth.py),
+  [`poc/github.py`](../../src/foundry_opt/poc/github.py), and
+  [`poc/foundry.py`](../../src/foundry_opt/poc/foundry.py) for retained
+  optimizer/registered deployment runtime operations
 
-- one reviewed identity resource in the registry
-- one exact OIDC subject per GitHub environment
-- no static Azure credentials in repository files or runtime state
+## Sensitive data
 
-Local bootstrap deployment is different only in where the credential adapter
-comes from: it uses the current local Azure identity, but it still deploys the
-same reviewed exact commit and target.
-
-## Exact source and locality
-
-- bootstrap local deployment requires the reviewed local commit
-- registered deployment requires the reviewed main-branch commit
-- optimize-job candidate work stays inside allowed editable paths
-- published or reconciled versions must match exact packaged bytes
-
-This gives locality to debugging: if the exact bytes or exact commit do not
-match, the runtime fails in one place instead of spreading ambiguity across
-callers.
-
-## Protected modules and adapters
-
-- GitHub trust seam:
-  [`src/foundry_opt/poc/github.py`](../../src/foundry_opt/poc/github.py)
-- Azure OIDC trust seam:
-  [`src/foundry_opt/poc/auth.py`](../../src/foundry_opt/poc/auth.py)
-- Foundry trust seam:
-  [`src/foundry_opt/poc/foundry.py`](../../src/foundry_opt/poc/foundry.py)
-- Bootstrap provider adapters:
-  [`src/foundry_opt/bootstrap/providers/`](../../src/foundry_opt/bootstrap/providers/)
-
-These adapters are the only modules that should need transport-specific trust
-knowledge. The higher-level modules consume their interfaces and keep policy
-rules local.
-
-## Redaction
-
-Durable state and evidence are intentionally narrow:
-
-- no raw model content
-- no raw evaluation artifacts
-- no secrets or credential material
-- no hidden route mutation records, because route mutation is not part of the
-  architecture
-
-The runtime keeps hashes, identifiers, reviewed targets, and redacted receipts
-instead.
-
-## Trust zones
-
-```mermaid
-flowchart TD
-    subgraph Trusted[Trusted repository and runtime]
-        Registry[registry]
-        Profiles[v2 profiles]
-        Receipt[bootstrap receipts]
-        Runtime[bootstrap + poc modules]
-    end
-
-    subgraph Narrowing[Adaptive but less-trusted callers]
-        Skill[skills]
-        Issue[issue text]
-        Owner[owner answers]
-        Candidate[candidate edits]
-    end
-
-    subgraph External[External adapters]
-        GitHub[GitHub]
-        Azure[Azure]
-        Foundry[Foundry]
-    end
-
-    Skill --> Runtime
-    Issue --> Runtime
-    Owner --> Runtime
-    Candidate --> Runtime
-    Registry --> Runtime
-    Profiles --> Runtime
-    Receipt --> Runtime
-    Runtime --> GitHub
-    Runtime --> Azure
-    Runtime --> Foundry
-```
-
-## Related architecture
-
-- [System overview](system-overview.md)
-- [Skill and runtime seam](skill-runtime-seam.md)
-- [Deployment](deployment.md)
-- [Identity and RBAC](../identity-rbac.md)
-- [Managed files](../managed-files.md)
+Neither the report nor durable optimizer state may contain tokens, static
+credentials, raw prompts, responses, traces, or dataset rows.

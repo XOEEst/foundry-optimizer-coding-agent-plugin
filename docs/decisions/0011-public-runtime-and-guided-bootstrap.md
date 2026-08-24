@@ -48,7 +48,7 @@ Later ADRs refine this record: [0014](0014-public-development-authority.md) make
 - Exact-pin and branch-protection rules in [Distribution and pinning](../distribution.md) and [Recommended branch protection](../branch-protection.md).
 - Managed-file namespacing and legacy-pin migration rules in [Managed files](../managed-files.md).
 - Skill packaging and exact runtime provenance in [`src/foundry_opt/packaging/foundry_bootstrap_release.py`](../../src/foundry_opt/packaging/foundry_bootstrap_release.py), [`tests/packaging/test_foundry_bootstrap_release.py`](../../tests/packaging/test_foundry_bootstrap_release.py), and [`tests/test_plugin_layout.py`](../../tests/test_plugin_layout.py).
-- Owner bridge documentation in [`plugins/foundry-bootstrap/SKILL.md`](../../plugins/foundry-bootstrap/SKILL.md) and [`plugins/foundry-bootstrap/scripts/README.md`](../../plugins/foundry-bootstrap/scripts/README.md).
+- The former bridge was documented in the bootstrap skill; it was removed by the later skill-only bootstrap decision.
 - Detailed transition and pilot acceptance evidence is retained privately.
 
 ## Supersedes / Superseded by

@@ -38,10 +38,9 @@ commit with `foundry-opt deploy verify-registered` before merge.
    source to `GITHUB_SHA` before calling `verify-registered`, so the
    verification receipt is bound to the reviewed commit rather than the merge
    ref.
-6. The example resolves the shared CLI from the committed
-   `.foundry-opt/registry.yaml` plus `.foundry-opt/bootstrap.lock.json`
-   contract, verifies that pin, uploads the verification receipt, and writes a
-   GitHub step summary.
+6. The example resolves and verifies the shared CLI from registry v2 runtime
+   provenance, uploads the verification receipt, and writes a GitHub step
+   summary.
 7. Add the workflow as a required branch-protection status only after you
    trust the signal.
 
@@ -103,7 +102,6 @@ gate succeeds.
 - [Issues and monitoring](issues-and-monitoring.md)
 - [Run an optimization](../guides/run-an-optimization.md)
 - [Operate deployments](../guides/operate-deployments.md)
-- [Evaluation onboarding](../evaluation-onboarding.md)
 - [Recommended branch protection](../branch-protection.md)
 - [Identity and RBAC](../identity-rbac.md)
 - [Distribution and pinning](../distribution.md)
