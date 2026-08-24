@@ -90,6 +90,10 @@ def test_bootstrap_skill_is_static_and_uses_one_combined_approval() -> None:
     assert "session staging area" in normalized
     assert "azd ai agent version" in normalized
     assert "azd deploy" in normalized
+    assert "https://packagefeedproxy.microsoft.io/pypi/simple" in body
+    assert "https://packagefeedproxy.microsoft.io/nuget/v3/index.json" in body
+    assert "UV_DEFAULT_INDEX" in body
+    assert "PIP_INDEX_URL" in body
     assert "Never push." in normalized
     assert "Leave successful local and remote changes in place" in normalized
     assert "Do not create datasets, evaluators, evaluation definitions, or evaluation runs." in normalized

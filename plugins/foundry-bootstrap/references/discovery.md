@@ -43,6 +43,29 @@ azd ext install azure.ai.agents
 azd ext upgrade azure.ai.agents
 ```
 
+## Package feed inventory
+
+Identify Python and NuGet restore commands plus existing `pyproject.toml`,
+`uv.toml`, pip configuration, `NuGet.Config`, private sources, credentials, and
+package-source mapping. Probe required sources without installing packages.
+
+Prefer an existing approved repository configuration. When direct public
+access is unavailable, use these replacement public sources:
+
+```text
+https://packagefeedproxy.microsoft.io/pypi/simple
+https://packagefeedproxy.microsoft.io/nuget/v3/index.json
+```
+
+Use `UV_DEFAULT_INDEX` or `PIP_INDEX_URL` for a temporary Python restore.
+Replace the unreachable public NuGet source without removing approved private
+sources or source mapping. Do not use the Python proxy as an extra index beside
+public PyPI, and do not write feed credentials into repository files.
+
+Record the selected source and whether it requires an approved repository or
+workflow change. An inaccessible or authentication-blocked required source is
+`unknown` and blocks mutation until access is established.
+
 ## GitHub inventory
 
 Use `gh` read operations to inspect:

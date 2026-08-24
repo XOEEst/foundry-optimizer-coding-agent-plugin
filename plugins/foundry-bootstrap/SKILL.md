@@ -45,6 +45,29 @@ evaluation onboarding.
 `release.json` intentionally does not select an Azure Developer CLI version or
 an `azure.ai.agents` extension version.
 
+## Approved package-feed fallback
+
+Direct public package feeds can be unreachable in restricted environments.
+During discovery, inspect existing package-source configuration and probe the
+sources needed by the repository without restoring or installing packages.
+
+When direct PyPI or NuGet access is unavailable, or repository policy requires
+an approved proxy, plan these replacement public sources:
+
+- Python: `https://packagefeedproxy.microsoft.io/pypi/simple`
+- NuGet: `https://packagefeedproxy.microsoft.io/nuget/v3/index.json`
+
+For Python, set the proxy as the default source with `UV_DEFAULT_INDEX` or
+`PIP_INDEX_URL`; do not add it as an extra index alongside public PyPI. For
+NuGet, replace the unreachable public NuGet source while preserving approved
+private sources and package-source mapping. Never overwrite existing feed
+configuration blindly or commit credentials.
+
+Show the selected sources and every persistent configuration change in the
+combined approval. If a source fails after approval and using the proxy was not
+approved, stop and prepare a new exact plan rather than switching silently.
+Record the sources actually used in the bootstrap report.
+
 ## Required process
 
 ### 1. Establish a read-only baseline
@@ -63,6 +86,8 @@ an `azure.ai.agents` extension version.
   `azd ai agent --help`. Use the installed tools when the required commands are
   available. Otherwise include installation or upgrade from the official
   channel in the approval plan. Do not pin either tool in repository files.
+- Inventory Python and NuGet source configuration and determine whether direct
+  public feeds or the approved proxy sources will be used.
 - Record the actual `azd` and `azure.ai.agents` versions ultimately used.
 
 Follow [Discovery](references/discovery.md) and
@@ -111,6 +136,7 @@ Show:
 
 - discovery and agent classifications
 - actual tool versions already present and any approved install/upgrade action
+- exact Python and NuGet sources and any persistent source-configuration change
 - exact staged file diffs
 - exact GitHub, Azure, and Foundry resources to reuse
 - exact missing resources to create, including names, types, scopes, regions,

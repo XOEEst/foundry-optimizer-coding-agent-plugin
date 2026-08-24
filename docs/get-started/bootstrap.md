@@ -14,11 +14,19 @@ The skill performs read-only inspection:
 - discovers agent roots and existing registry/profile/azure.yaml settings;
 - resolves Foundry projects and existing deployed agents;
 - inspects GitHub environments/variables and Azure identity/OIDC/RBAC;
+- checks existing Python and NuGet package sources and whether approved proxy
+  feeds are required;
 - classifies remote state as adopt, create, or conflict;
 - stages proposed files in the session workspace;
 - shows exact local diffs, remote actions, commit intent, and deployment plan.
 
 Conflicting existing remote resources must be resolved before approval.
+
+If direct public package feeds are unavailable, bootstrap can use
+`https://packagefeedproxy.microsoft.io/pypi/simple` for Python and
+`https://packagefeedproxy.microsoft.io/nuget/v3/index.json` for NuGet. The
+selected sources and any persistent configuration changes are included in the
+single approval; bootstrap never switches feeds silently.
 
 ## Approval
 

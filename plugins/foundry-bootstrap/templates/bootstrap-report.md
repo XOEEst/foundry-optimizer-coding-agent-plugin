@@ -14,6 +14,11 @@
 - Azure Developer CLI: `__AZD_VERSION__`
 - `azure.ai.agents` extension: `__AZURE_AI_AGENTS_VERSION__`
 
+## Package feeds
+
+- Python: `__PYTHON_PACKAGE_INDEX_OR_NOT_USED__`
+- NuGet: `__NUGET_PACKAGE_SOURCE_OR_NOT_USED__`
+
 ## Runtime provenance
 
 - Repository: `__FOUNDRY_OPT_REPOSITORY__`
