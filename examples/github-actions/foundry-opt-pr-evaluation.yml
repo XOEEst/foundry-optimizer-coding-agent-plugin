@@ -79,12 +79,13 @@ jobs:
         run: |
           set -euo pipefail
           python - <<'PY'
-          import json
           import os
           from pathlib import Path
 
           repository = None
           commit = None
+          package_path = "."
+          uv_lock_sha256 = None
           in_distribution = False
           for raw in Path(".foundry-opt/registry.yaml").read_text(encoding="utf-8").splitlines():
               stripped = raw.strip()
@@ -99,16 +100,17 @@ jobs:
                   repository = stripped.split(":", 1)[1].strip().strip("'\"")
               elif stripped.startswith("pin:"):
                   commit = stripped.split(":", 1)[1].strip().strip("'\"")
-          if not repository or not commit:
-              raise SystemExit("could not resolve distribution.repository/pin from .foundry-opt/registry.yaml")
-          lock = json.loads(
-              Path(".foundry-opt/bootstrap.lock.json").read_text(encoding="utf-8")
-          )
-          if lock["runtime_repository"] != repository or lock["runtime_commit"] != commit:
-              raise SystemExit("registry and bootstrap lock do not agree on the shared runtime pin")
+              elif stripped.startswith("package_path:"):
+                  package_path = stripped.split(":", 1)[1].strip().strip("'\"")
+              elif stripped.startswith("uv_lock_sha256:"):
+                  uv_lock_sha256 = stripped.split(":", 1)[1].strip().strip("'\"")
+          if not repository or not commit or not uv_lock_sha256:
+              raise SystemExit("registry v2 runtime provenance is incomplete")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
               handle.write(f"runtime_repository={repository}\n")
               handle.write(f"runtime_commit={commit}\n")
+              handle.write(f"package_path={package_path}\n")
+              handle.write(f"uv_lock_sha256={uv_lock_sha256}\n")
           PY
 
       - name: Fetch the exact shared CLI revision from the committed contract
@@ -121,7 +123,11 @@ jobs:
           git -C "$shared_root" remote add origin "${{ steps.runtime.outputs.runtime_repository }}"
           git -C "$shared_root" fetch --depth=1 origin "${{ steps.runtime.outputs.runtime_commit }}"
           git -C "$shared_root" checkout --detach FETCH_HEAD
-          echo "FOUNDRY_OPT_PACKAGE_ROOT=$shared_root" >>"$GITHUB_ENV"
+          test "$(git -C "$shared_root" rev-parse HEAD)" = "${{ steps.runtime.outputs.runtime_commit }}"
+          package_root="$shared_root/${{ steps.runtime.outputs.package_path }}"
+          actual_lock="$(sha256sum "$package_root/uv.lock" | awk '{print $1}')"
+          test "$actual_lock" = "${{ steps.runtime.outputs.uv_lock_sha256 }}"
+          echo "FOUNDRY_OPT_PACKAGE_ROOT=$package_root" >>"$GITHUB_ENV"
 
       - name: Install the exact shared CLI
         shell: bash
@@ -129,28 +135,6 @@ jobs:
           set -euo pipefail
           uv sync --frozen --project "$FOUNDRY_OPT_PACKAGE_ROOT"
           echo "$FOUNDRY_OPT_PACKAGE_ROOT/.venv/bin" >>"$GITHUB_PATH"
-
-      - name: Verify the shared CLI checkout against the committed registry
-        shell: bash
-        run: |
-          set -euo pipefail
-          uv_lock_sha256="$("$FOUNDRY_OPT_PACKAGE_ROOT/.venv/bin/python" - <<'PY'
-          import hashlib
-          import os
-          from pathlib import Path
-
-          print(
-              hashlib.sha256(
-                  Path(os.environ["FOUNDRY_OPT_PACKAGE_ROOT"]).joinpath("uv.lock").read_bytes()
-              ).hexdigest()
-          )
-          PY
-          )"
-          foundry-opt bootstrap verify \
-            --registry .foundry-opt/registry.yaml \
-            --uv-lock-sha256 "$uv_lock_sha256" \
-            --checkout "$FOUNDRY_OPT_PACKAGE_ROOT" \
-            --receipt "$RUNNER_TEMP/foundry-opt-bootstrap-receipt.json"
 
       - name: Run the verify-only gate for the exact PR head
         id: verify

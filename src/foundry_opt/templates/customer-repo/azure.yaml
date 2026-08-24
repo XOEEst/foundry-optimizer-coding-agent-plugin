@@ -1,0 +1,15 @@
+name: foundry-agent-repository
+services:
+  example-agent:
+    host: azure.ai.agent
+    kind: hosted
+    name: example-agent
+    language: python
+    project: agent
+    protocols:
+      - protocol: responses
+        version: "2.0.0"
+    codeConfiguration:
+      runtime: python_3_13
+      entryPoint: main.py
+      dependencyResolution: remote_build

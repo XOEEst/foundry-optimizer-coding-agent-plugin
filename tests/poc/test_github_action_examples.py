@@ -40,7 +40,8 @@ def test_pr_example_uses_exact_pr_head_verify_only_and_oidc() -> None:
     assert "--repo-agent-id" in text
     assert "foundry-opt deploy verify-registered" in text
     assert ".foundry-opt/registry.yaml" in text
-    assert ".foundry-opt/bootstrap.lock.json" in text
+    assert ".foundry-opt/bootstrap.lock.json" not in text
+    assert "uv_lock_sha256" in text
     assert "FOUNDRY_OPT_DEPLOYMENT_CLIENT_ID" in text
     assert "AZURE_TENANT_ID" in text
     assert "GH_TOKEN: ${{ github.token }}" in text

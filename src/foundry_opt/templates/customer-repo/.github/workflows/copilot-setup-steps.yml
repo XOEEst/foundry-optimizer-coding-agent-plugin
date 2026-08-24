@@ -5,7 +5,6 @@ on:
   push:
     paths:
       - .github/workflows/copilot-setup-steps.yml
-      - .foundry-opt/bootstrap.lock.json
       - .foundry-opt/registry.yaml
       - '**/.foundry/foundry-opt.yaml'
 
@@ -71,6 +70,8 @@ jobs:
           if ! command -v uv >/dev/null 2>&1; then
             python3 -m pip install --disable-pip-version-check --no-input "uv==0.11.6"
           fi
+          actual_lock="$(sha256sum "$FOUNDRY_OPT_PACKAGE_ROOT/uv.lock" | awk '{print $1}')"
+          test "$actual_lock" = "74d7bb534c53e71a61ce197f3d5fa3169f2413373c2e42617280e78e83d6c681"
           uv sync --frozen --project "$FOUNDRY_OPT_PACKAGE_ROOT"
           launcher_root="$HOME/.local/bin"
           mkdir -p "$launcher_root"
@@ -91,33 +92,33 @@ jobs:
           set -euo pipefail
           trusted_root="$RUNNER_TEMP/foundry-opt-trusted"
           rm -rf "$trusted_root"
-          mkdir -p "$trusted_root/bootstrap" "$trusted_root/broker" "$trusted_root/jobs"
-          chmod 700 "$trusted_root" "$trusted_root/bootstrap" "$trusted_root/broker" "$trusted_root/jobs"
+          mkdir -p "$trusted_root/broker" "$trusted_root/jobs"
+          chmod 700 "$trusted_root" "$trusted_root/broker" "$trusted_root/jobs"
           echo "FOUNDRY_OPT_TRUSTED_ROOT=$trusted_root" >>"$GITHUB_ENV"
-          echo "FOUNDRY_OPT_BOOTSTRAP_RECEIPT=$trusted_root/bootstrap/receipt.json" >>"$GITHUB_ENV"
           echo "FOUNDRY_OPT_GITHUB_BINDING=$trusted_root/broker/binding.json" >>"$GITHUB_ENV"
           echo "FOUNDRY_OPT_BROKER_SOCKET=$trusted_root/broker/github.sock" >>"$GITHUB_ENV"
           echo "FOUNDRY_OPT_STATE_ROOT=$trusted_root/jobs" >>"$GITHUB_ENV"
+          echo "FOUNDRY_OPT_REGISTRY=$GITHUB_WORKSPACE/.foundry-opt/registry.yaml" >>"$GITHUB_ENV"
           echo "FOUNDRY_OPT_RUNTIME_SHA=770ad878f0658e9368b042d9a7f6732e49ff0200" >>"$GITHUB_ENV"
           echo "FOUNDRY_OPT_RESUME_RECORD=$trusted_root/resume.json" >>"$GITHUB_ENV"
 
-      - name: Validate bootstrap contracts and registry sidecars
+      - name: Validate registry and agent profiles
         shell: bash
         run: |
           set -euo pipefail
-          foundry-opt bootstrap verify --registry .foundry-opt/registry.yaml --uv-lock-sha256 74d7bb534c53e71a61ce197f3d5fa3169f2413373c2e42617280e78e83d6c681 --checkout "$FOUNDRY_OPT_SHARED_ROOT" --receipt "$FOUNDRY_OPT_BOOTSTRAP_RECEIPT"
           "$FOUNDRY_OPT_PACKAGE_ROOT/.venv/bin/python" - <<'PY'
           from pathlib import Path
-          from foundry_opt.bootstrap.contracts import BootstrapSidecar, RootRegistry
+          from foundry_opt.repository_contracts import AgentProfile, RepositoryRegistry
           root = Path('.')
-          registry = RootRegistry.from_document((root / '.foundry-opt' / 'registry.yaml').read_text(encoding='utf-8'))
+          registry = RepositoryRegistry.from_document((root / '.foundry-opt' / 'registry.yaml').read_text(encoding='utf-8'))
+          assert registry.has_exact_runtime_provenance
           protected = ['.foundry-opt/'] + [agent.config_path for agent in registry.agents]
           for agent in registry.agents:
               sidecar_path = root / agent.config_path
               if not sidecar_path.exists():
                   assert not agent.enabled, f'enabled agent sidecar is missing: {agent.config_path}'
                   continue
-              sidecar = BootstrapSidecar.from_document(sidecar_path.read_text(encoding='utf-8'))
+              sidecar = AgentProfile.from_document(sidecar_path.read_text(encoding='utf-8'))
               for editable in sidecar.editable_paths:
                   assert editable != '.foundry-opt/**'
                   assert not editable.startswith('.foundry-opt/')

@@ -102,7 +102,7 @@ def test_setup_and_validation_allow_missing_inactive_sidecars() -> None:
         assert 'for agent in registry.agents' in text
         assert 'if not sidecar_path.exists()' in text
         assert 'assert not agent.enabled' in text
-        assert 'BootstrapSidecar.from_document' in text
+        assert 'AgentProfile.from_document' in text
 
 
 def test_deploy_workflow_computes_dynamic_noop_matrix() -> None:
@@ -117,6 +117,8 @@ def test_deploy_workflow_computes_dynamic_noop_matrix() -> None:
     assert "matrix = {'include': include}" in text
     assert "toJson(fromJson(needs.discover.outputs.matrix).include) != '[]'" in text
     assert "manual repo_agent_id" in text
+    assert "path == '.foundry-opt/registry.yaml'" in text
+    assert "path.startswith('.foundry-opt/')" not in text
     assert "MANUAL_REPO_AGENT_ID" in text
     assert "${{ github.event.inputs.repo_agent_id" not in text
     assert "foundry-opt deploy publish-registered" in text
@@ -167,8 +169,22 @@ def test_shared_pin_matches_locked_runtime_artifact() -> None:
     assert registry.distribution.pin == RUNTIME_SHA
     lock_bytes = subprocess.check_output(["git", "show", f"{registry.distribution.pin}:uv.lock"], cwd=REPOSITORY_ROOT)
     assert lock_bytes
-    # The setup workflow verifies the fetched runtime against the registry pin plus the
-    # rendered uv.lock digest, without any committed legacy pin file.
     setup = _read(WORKFLOW_ROOT / "copilot-setup-steps.yml")
-    assert "bootstrap verify --registry .foundry-opt/registry.yaml --uv-lock-sha256" in setup
+    assert "foundry-opt bootstrap" not in setup
+    assert "sha256sum" in setup
+    assert "RepositoryRegistry.from_document" in setup
     assert hashlib.sha256(lock_bytes).hexdigest() in setup
+
+
+def test_skill_only_core_templates_include_azd_and_report() -> None:
+    azure = yaml.safe_load(_read(CUSTOMER_TEMPLATE_ROOT / "azure.yaml"))
+    service = azure["services"]["example-agent"]
+
+    assert service["host"] == "azure.ai.agent"
+    assert service["codeConfiguration"]["runtime"] == "python_3_13"
+    report = _read(
+        CUSTOMER_TEMPLATE_ROOT / ".foundry-opt" / "bootstrap-report.md"
+    )
+    assert "## GitHub changes" in report
+    assert "## Azure changes" in report
+    assert "must not contain credentials" in report
