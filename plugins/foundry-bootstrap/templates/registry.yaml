@@ -1,0 +1,26 @@
+schema_version: 2
+distribution:
+  schema_version: 1
+  repository: "__FOUNDRY_OPT_REPOSITORY__"
+  channel: reviewed
+  pin: "__FOUNDRY_OPT_COMMIT__"
+  package_path: "__FOUNDRY_OPT_PACKAGE_PATH__"
+  uv_lock_sha256: "__FOUNDRY_OPT_UV_LOCK_SHA256__"
+  optimizer_skill_path: "__FOUNDRY_OPT_OPTIMIZER_SKILL_PATH__"
+github:
+  schema_version: 1
+  optimizer_environment: copilot
+  deployment_environment: foundry-production
+  client_id_variable: AZURE_OPTIMIZER_CLIENT_ID
+  oidc_subject_prefix: "repo:__GITHUB_OWNER__/__GITHUB_REPOSITORY__"
+identity:
+  schema_version: 1
+  kind: user_assigned_managed_identity
+  resource_id: "__AZURE_IDENTITY_RESOURCE_ID__"
+  client_id: "__AZURE_IDENTITY_CLIENT_ID__"
+agents:
+  - schema_version: 1
+    agent_id: "__REPO_AGENT_ID__"
+    root: "__AGENT_ROOT__"
+    config_path: "__AGENT_ROOT__/.foundry/foundry-opt.yaml"
+    enabled: true

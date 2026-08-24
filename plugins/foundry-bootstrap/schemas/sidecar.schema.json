@@ -1,0 +1,369 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/XOEEst/foundry-optimizer-coding-agent-plugin/plugins/foundry-bootstrap/schemas/sidecar.schema.json",
+  "title": "Foundry optimizer agent sidecar v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "repo_agent_id",
+    "source_root",
+    "package_root",
+    "editable_paths",
+    "runtime",
+    "foundry_project",
+    "baseline_model",
+    "allowed_models",
+    "min_candidates",
+    "max_candidates",
+    "primary_metric",
+    "decision_policy",
+    "hard_guardrails",
+    "deployment",
+    "verification"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 2
+    },
+    "repo_agent_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+    },
+    "source_root": {
+      "type": "string",
+      "minLength": 1
+    },
+    "package_root": {
+      "type": "string",
+      "minLength": 1
+    },
+    "editable_paths": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "shared_source_relations": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "agent_id",
+          "relation"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": 1
+          },
+          "agent_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+          },
+          "relation": {
+            "const": "shared-source"
+          }
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "kind",
+        "runtime",
+        "entrypoint",
+        "dependency_resolution",
+        "protocol_name",
+        "protocol_version"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "kind": {
+          "const": "hosted"
+        },
+        "runtime": {
+          "type": "string",
+          "minLength": 1
+        },
+        "entrypoint": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "dependency_resolution": {
+          "type": "string",
+          "minLength": 1
+        },
+        "protocol_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "protocol_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cpu": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "memory": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model_environment_variable": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "foundry_project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "project_endpoint",
+        "account_resource_id",
+        "agent_name"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "project_endpoint": {
+          "type": "string",
+          "pattern": "^https://.+/api/projects/.+$"
+        },
+        "account_resource_id": {
+          "type": "string",
+          "pattern": "^/subscriptions/.+/resourceGroups/.+/providers/Microsoft\\.CognitiveServices/accounts/.+$"
+        },
+        "agent_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expected_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model_deployment_aliases": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "foundry_target": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "baseline_model": {
+      "type": "string",
+      "minLength": 1
+    },
+    "allowed_models": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "min_candidates": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "max_candidates": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "primary_metric": {
+      "type": "string",
+      "minLength": 1
+    },
+    "decision_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "minimum_aggregate_delta",
+        "focused_cases_required",
+        "max_regressions"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "minimum_aggregate_delta": {
+          "type": "number"
+        },
+        "focused_cases_required": {
+          "type": "boolean"
+        },
+        "max_regressions": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "max_issue_evaluators": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 8
+    },
+    "hard_guardrails": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "evaluator_name",
+          "required_pass_rate",
+          "required"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": 1
+          },
+          "evaluator_name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "required_pass_rate": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "required": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "deployment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "environment",
+        "enabled",
+        "require_aligned_binding"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "environment": {
+          "type": "string",
+          "minLength": 1
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "require_aligned_binding": {
+          "type": "boolean"
+        }
+      }
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "mode",
+        "repository_checks",
+        "evaluation_gate_policy",
+        "bundle",
+        "lineage"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "mode": {
+          "enum": [
+            "off",
+            "optional",
+            "required"
+          ]
+        },
+        "repository_checks": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "kind",
+                  "value"
+                ],
+                "properties": {
+                  "kind": {
+                    "enum": [
+                      "command",
+                      "check"
+                    ]
+                  },
+                  "value": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "evaluation_gate_policy": {
+          "enum": [
+            "require_foundry_evaluation",
+            "allow_repository_checks",
+            "allow_no_evidence"
+          ]
+        },
+        "bundle": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "lineage": {
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}

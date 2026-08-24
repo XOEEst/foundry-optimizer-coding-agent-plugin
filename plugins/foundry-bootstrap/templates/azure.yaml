@@ -1,0 +1,26 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+name: "__AZD_PROJECT_NAME__"
+
+services:
+  foundry-project:
+    host: azure.ai.project
+    endpoint: "__FOUNDRY_PROJECT_ENDPOINT__"
+
+  __AGENT_SERVICE_NAME__:
+    host: azure.ai.agent
+    uses:
+      - foundry-project
+    project: "__AGENT_PACKAGE_ROOT__"
+    language: python
+    kind: hosted
+    name: "__FOUNDRY_AGENT_NAME__"
+    description: "__AGENT_DESCRIPTION__"
+    protocols:
+      - protocol: responses
+        version: "2.0.0"
+    env:
+      MICROSOFT_FOUNDRY_MODEL_DEPLOYMENT_NAME: "${MICROSOFT_FOUNDRY_MODEL_DEPLOYMENT_NAME}"
+    codeConfiguration:
+      runtime: python_3_13
+      entryPoint: main.py
+      dependencyResolution: remote_build

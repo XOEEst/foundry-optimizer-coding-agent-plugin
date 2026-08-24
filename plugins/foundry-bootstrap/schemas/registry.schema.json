@@ -1,0 +1,161 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/XOEEst/foundry-optimizer-coding-agent-plugin/plugins/foundry-bootstrap/schemas/registry.schema.json",
+  "title": "Foundry optimizer registry v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "distribution",
+    "github",
+    "identity",
+    "agents"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 2
+    },
+    "distribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "repository",
+        "channel",
+        "pin",
+        "package_path",
+        "uv_lock_sha256",
+        "optimizer_skill_path"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "repository": {
+          "type": "string",
+          "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\\.git)?$"
+        },
+        "channel": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pin": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "package_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "uv_lock_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "optimizer_skill_path": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "github": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "optimizer_environment",
+        "deployment_environment",
+        "client_id_variable"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "optimizer_environment": {
+          "type": "string",
+          "minLength": 1
+        },
+        "deployment_environment": {
+          "type": "string",
+          "minLength": 1
+        },
+        "client_id_variable": {
+          "type": "string",
+          "minLength": 1
+        },
+        "oidc_subject_prefix": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^repo:[A-Za-z0-9_.-]+(?:@[0-9]+)?/[A-Za-z0-9_.-]+(?:@[0-9]+)?$"
+        }
+      }
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "kind"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "kind": {
+          "enum": [
+            "user_assigned_managed_identity",
+            "entra_application",
+            "unresolved_migration"
+          ]
+        },
+        "resource_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "client_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "agents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "agent_id",
+          "root",
+          "config_path",
+          "enabled"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": 1
+          },
+          "agent_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+          },
+          "root": {
+            "type": "string",
+            "minLength": 1
+          },
+          "config_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        }
+      }
+    }
+  }
+}

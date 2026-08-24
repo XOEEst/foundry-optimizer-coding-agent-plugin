@@ -1,7 +1,0 @@
-{
-  "schema_version": "__SCHEMA_VERSION__",
-  "runtime_repository": "__RUNTIME_REPOSITORY__",
-  "runtime_commit": "__RUNTIME_COMMIT__",
-  "uv_lock_sha256": "__UV_LOCK_SHA256__",
-  "package_path": "__PACKAGE_PATH__"
-}

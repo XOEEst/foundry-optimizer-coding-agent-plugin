@@ -1,72 +1,42 @@
 # Owner flow
 
-Invoke the installed skill from the repository root:
+Invoke the skill from the repository root:
 
 ```text
 Use /foundry-bootstrap to bootstrap this repository.
 ```
 
-The skill presents one review or question at a time. It does not show internal
-JSON, hashes, provider state, or receipt payloads during the normal path.
+The coding agent first inspects the repository and relevant GitHub, Azure, and
+Foundry resources without changing them. It then prepares proposed files in its
+session staging area and shows one review containing:
 
-## What you review
+1. discovered agents and their proposed enabled or disabled registration
+2. existing contracts that will be migrated in place
+3. exact repository diffs
+4. cloud resources that exactly match and will be reused
+5. missing cloud resources that will be created
+6. conflicts that prevent safe progress
+7. the exact local commit and `azd deploy` plan
 
-1. **Discovered agents**
-   - Folder, source root, package root, readiness, and current binding state.
-   - When an existing sidecar is found, its repository-relative path, Foundry
-     target, baseline model, deployment state, and verification defaults.
-   - Choose `ignore`, `register disabled`, or `register enabled`.
-2. **Foundry targets**
-   - Detect the Foundry project endpoint and agent name from repository
-     metadata when possible; ask the owner only for values that remain missing.
-   - Values already proven by a profile, metadata, `azure.yaml`, azd, or
-     binding evidence are reused.
-   - The coding agent resolves the backing Azure account with Azure tools and
-     the owner's current login. Owners are not asked to discover ARM resource
-     IDs.
-   - If no unique Azure account is visible, the owner is prompted to correct
-     the tenant/subscription login or choose the matching subscription.
-     Bootstrap does not advance until the enabled target is resolved.
-   - The skill submits the complete resolved target through `answer`; the
-     runtime validates the endpoint, agent name, account match, and Foundry
-     project access before continuing.
-3. **Repository changes**
-   - Registry, profiles, instructions, issue form, workflows, preserved files,
-     and conflicts.
-4. **GitHub-to-Azure connection**
-   - Reuse the repository registry's existing identity when it still matches
-     the live Azure resource.
-   - Adopt exact matching OIDC credentials, role assignments, GitHub
-     environments, and variables instead of recreating them.
-   - GitHub environments and variables.
-   - Azure identity, OIDC subjects, and project-scoped Foundry User roles.
-5. **Verification**
-   - Foundry dataset/evaluators now, defer to an issue, repository checks, or
-     no evidence.
-6. **Local commit**
-   - Exact paths, base commit, branch, and commit message.
-7. **Local deployment**
-   - Exact commit, project, agent name, target state, verification mode,
-     warnings, and version action.
+The owner gives one combined approval. If the plan changes, the coding agent
+shows a fresh exact diff and asks again.
 
-Repository, connection, commit, and deployment mutations each require their
-own explicit approval.
+## Expected result
 
-## What happens at the end
+- `.foundry-opt/registry.yaml` is version 2 and contains exact `foundry-opt`
+  provenance from the published skill's `release.json`.
+- Each selected agent has a version 2 sidecar.
+- Existing evaluation bundles and lineage remain unchanged; bootstrap creates no
+  evaluation assets.
+- `azure.yaml` describes or connects to the reviewed Foundry project and agent
+  services.
+- GitHub workflows use OIDC and the reviewed identity without static Azure
+  credentials.
+- The optimizer skill and runtime are installed from exact retained provenance.
+- A local commit is created and deployed with `azd deploy`.
+- No branch or tag is pushed.
+- `.foundry-opt/bootstrap-report.md` records what happened and the actual tool
+  versions.
 
-- The selected agents are registered; only enabled agents are deployment
-  candidates.
-- Reviewed target data is stored in each v2 profile.
-- GitHub OIDC uses the reviewed Azure identity without static credentials.
-- Bootstrap creates a local branch and exact commit; it does not push or merge.
-- Approved enabled agents are deployed from that exact commit with the current
-  local Azure identity.
-- The final response links to relevant GitHub, Azure, Foundry agent, dataset,
-  evaluator, and evaluation-run resources.
-
-## Evaluation is optional
-
-No dataset or evaluator is required to register, enable, or initially deploy an
-agent. A no-evidence deployment carries an explicit warning. Add evaluation
-later through an issue and activate the provided workflow template when the
-signal is ready.
+If a step fails, the coding agent stops and reports completed, failed, and
+pending work without deleting successful changes.

@@ -1,111 +1,165 @@
 ---
 name: foundry-bootstrap
-description: Guide a first-time owner through the downloadable bootstrap start/resume/approval loop over the shared foundry_opt runtime.
+description: Bootstrap repository agents for Microsoft Foundry with read-only discovery, one combined approval, static templates, and standard Git, GitHub, Azure, and azd tools.
 ---
 
 # Foundry bootstrap
 
-Use this skill for the first-time owner bootstrap loop. This downloadable skill
-is the only owner client over `BootstrapRunner`.
+Use this static skill to prepare a repository for Foundry agent optimization and
+hosted-agent deployment. The package contains guidance, editable templates, and
+JSON schemas only. Do not look for or run a bundled bootstrap program.
 
-## Owner experience
+## Non-negotiable behavior
 
-Keep every owner turn short and concrete:
+- Perform discovery with read-only repository, Git, GitHub, Azure, and Foundry
+  commands.
+- Render every proposed repository file in the coding session's staging area.
+  Do not modify the repository or a remote service during discovery.
+- Present one combined approval request containing the exact repository diffs,
+  exact remote resources to reuse or create, local commit plan, and deployment
+  plan.
+- After approval, apply only that reviewed plan. If discovery changes the plan,
+  render a new exact diff and request a new combined approval.
+- Reuse exact matching cloud resources. Create missing resources only after
+  approval. Stop on any name, scope, identity, endpoint, or configuration
+  conflict; never replace or modify a conflicting remote resource.
+- Create an exact local commit before deployment. Never push.
+- Deploy the clean committed tree with `azd deploy`.
+- If any mutation fails, stop immediately. Leave successful local and remote
+  changes in place and document completed, failed, and pending work.
 
-- what agents were discovered and where
-- where an existing per-agent sidecar was found and its target, baseline model,
-  deployment state, and verification defaults
-- whether an existing repository OIDC identity and exact matching connection
-  resources can be reused
-- which agents will be ignored, registered disabled, or registered enabled
-- the Foundry project endpoint and agent name for each enabled agent
-- the GitHub environments and Azure identity/OIDC/RBAC connection
-- optional dataset, evaluator, or repository-check verification
-- the exact local commit and deployment action
-- links to all relevant resources
+Do not introduce bootstrap programs, durable bootstrap metadata, opaque
+identifiers, generated evidence files, automatic reversal behavior, or
+evaluation onboarding.
 
-Evaluation is optional. Do not block registration or enablement because a
-dataset or evaluator is absent. A no-evidence deployment must retain the
-runner's explicit warning.
+## Inputs
 
-Never ask the owner to inspect raw JSON, construct hashes, write approval
-files, or learn the low-level bootstrap CLI.
+1. Read [release.json](release.json). In a published archive it identifies the
+   exact `foundry-opt` repository, commit, package path, `uv.lock` digest, and
+   optimizer skill path. In a source checkout its values are placeholders.
+2. Read all files under [references](references/).
+3. Use files under [templates](templates/) as editable starting points, not as
+   blind replacements.
+4. Validate registry and sidecar output against [schemas](schemas/).
 
-## Required owner loop
+`release.json` intentionally does not select an Azure Developer CLI version or
+an `azure.ai.agents` extension version.
 
-1. Keep the materialized `skill.lock.json` beside this skill so
-   downloaded `bootstrap.py` can always install and re-execute through the
-   exact reviewed runtime. Ambient `foundry_opt` packages are ignored.
-2. Invoke this skill script:
-   - downloaded skill: `python scripts/bootstrap.py start --repository .`
-   - source checkout of this repository:
-     `python plugins/foundry-bootstrap/scripts/bootstrap.py start --repository .`
-   `start` resumes the repository's active operation. It creates a new
-   operation only when no active operation remains.
-3. Read only the `<<<FOUNDRY_BOOTSTRAP_OWNER_MARKDOWN>>>` section to the
-   owner.
-4. Keep the `<<<FOUNDRY_BOOTSTRAP_TURN>>>` envelope for yourself. Never paste
-   or expose its raw JSON to the owner.
-5. Inspect `next_question` before asking the owner:
-   - for any question other than `foundry_target`, ask exactly
-     `next_question.title` plus `next_question.details_markdown` and present
-     any exact choices
-   - for `foundry_target`, first resolve as many `required_fields` as possible
-     with repository and Azure tools; do not expose the machine-only field
-     names or ask the owner for an Azure resource ID
-6. Resolve a `foundry_target` question in this order:
-   - if `project_endpoint` is required, search the selected agent root and
-     repository metadata, including existing profiles, `.foundry` metadata,
-     `azure.yaml`, and azd environment values; ask the owner for the Foundry
-     project endpoint only when no unique value can be established
-   - if `agent_name` is required, search the same repository evidence; ask the
-     owner only when no unique deployed agent name can be established
-   - once the project endpoint is known, derive the exact Foundry account name
-     from its hostname
-   - if `account_resource_id` is required, use Azure resource lookup tools with
-     the owner's current login, preferring Azure MCP or Azure Resource Graph,
-     and query `Microsoft.CognitiveServices/accounts` for that exact name
-   - accept an account only when one unique matching resource is found and its
-     name matches the endpoint; pass its immutable ARM resource ID with
-     `--account-resource-id "<resource-id>"`
-   - if no unique account is visible, explain which endpoint/account was
-     searched and ask the owner to correct the Azure tenant/subscription login
-     or choose among the matching subscriptions, then repeat the lookup
-   Collect every required field before invoking `answer`. Never ask the owner
-   to discover or type an ARM resource ID.
-7. Pass the owner response or tool-resolved target data back to the script
-   instead of inventing deterministic validation, planning, or provider
-   mutation logic:
-   - choice question:
-     `python scripts/bootstrap.py answer --operation-id <id> --question-id <question-id> --choice <value> [--choice <value> ...]`
-   - free-text question:
-     `python scripts/bootstrap.py answer --operation-id <id> --question-id <question-id> --response "<owner response>"`
-   - Foundry target question:
-     `python scripts/bootstrap.py answer --operation-id <id> --question-id <question-id> [--project-endpoint "<endpoint>"] [--agent-name "<name>"] [--account-resource-id "<resource-id>"]`
-   - blocked Foundry project inventory after correcting data-plane access:
-     `python scripts/bootstrap.py answer --operation-id <id> --question-id <question-id> --retry`
-   Supply every Foundry target field named by the question. Never encode an
-   owner answer as JSON.
-8. When `available_actions` includes `approve`, request that exact approval
-   from the owner and record it with
-   `python scripts/bootstrap.py approve --operation-id <id> --step <repository|connection|commit|deployment> --actor "<owner>" --summary "<approved scope>"`.
-9. Use `python scripts/bootstrap.py status --operation-id <id>` to resume
-   after interruptions, refresh stale questions, or recover the current bridge
-   state.
-10. Use `python scripts/bootstrap.py rollback --operation-id <id> --step <repository|connection|commit|deployment>`
-   only when the returned `available_actions` list includes that rollback step.
-11. If `next_question` is `null`, do not invent a new question. Show the fresh
-    owner markdown, stop on blocked/final states, or use the returned recovery
-    actions.
-12. Do not create or switch to a custom agent. Do not use another owner
-    client. Keep target validation and classification, lifecycle state,
-    planning, mutation, commit creation, deployment, receipts, and rollback in
-    the runtime.
-13. At final handoff, present the returned resource links grouped as GitHub,
-    Azure, Foundry agents, and optional evaluation resources.
+## Required process
 
-## References
+### 1. Establish a read-only baseline
 
-- [Owner flow](references/owner-flow.md)
-- [Recovery](references/recovery.md)
-- [Security](references/security.md)
+- Confirm the repository root, current branch, `HEAD`, worktree status, remotes,
+  default branch, and GitHub repository identity.
+- Stop before planning if unrelated local changes overlap a proposed file or
+  prevent an exact clean deployment commit.
+- Inventory candidate agent roots, entry points, dependency files, protocols,
+  model environment variables, editable paths, existing `azure.yaml`, registry,
+  sidecars, workflows, instructions, and issue forms.
+- Inventory GitHub environments and variables, Azure identities and federated
+  credentials, role assignments, Foundry accounts/projects/model deployments,
+  and deployed agents using read-only commands.
+- Probe `azd version`, `azd ext list`, `azd ai agent version`, and
+  `azd ai agent --help`. Use the installed tools when the required commands are
+  available. Otherwise include installation or upgrade from the official
+  channel in the approval plan. Do not pin either tool in repository files.
+- Record the actual `azd` and `azure.ai.agents` versions ultimately used.
+
+Follow [Discovery](references/discovery.md) and
+[Resource reuse](references/resource-reuse.md).
+
+### 2. Classify agents and migrate contracts
+
+For each discovered agent, propose one of:
+
+- ignored
+- registered but disabled
+- registered and enabled
+
+Migrate an existing v1 registry or sidecar in place. Preserve its agent IDs,
+paths, target bindings, policy, hard guardrails, and complete evaluation bundle
+and lineage. Do not create datasets, evaluators, evaluation definitions, or
+evaluation runs. Follow [Migration](references/migration.md).
+
+### 3. Render the exact proposed repository
+
+In the session staging area:
+
+- create or patch `.foundry-opt/registry.yaml`
+- create or patch each `<agent-root>/.foundry/foundry-opt.yaml`
+- create or patch `azure.yaml`
+- create or patch `.github/workflows/foundry-opt-deploy.yml`
+- create or patch `.github/workflows/copilot-setup-steps.yml`
+- create or patch `.github/instructions/foundry-opt.instructions.md`
+- create or patch
+  `.github/ISSUE_TEMPLATE/foundry-optimize-agent.yml`
+- create or patch `.foundry-opt/bootstrap-report.md`
+
+Preserve unrelated content in existing files. Never silently replace an
+existing workflow, environment, identity, Foundry target, or agent definition.
+Validate YAML, validate registry and sidecars with the bundled schemas, and
+search the staged tree for unresolved `__TOKEN__` values and secrets.
+
+Patch `azure.yaml` to connect to an exact existing Foundry project or to declare
+the approved missing project and agent services. Keep existing unrelated
+services. Use `azure.ai.agent` services and source-code or container settings
+that match each discovered agent.
+
+### 4. Request one combined approval
+
+Show:
+
+- discovery and agent classifications
+- actual tool versions already present and any approved install/upgrade action
+- exact staged file diffs
+- exact GitHub, Azure, and Foundry resources to reuse
+- exact missing resources to create, including names, types, scopes, regions,
+  OIDC subjects, roles, and deterministic resource IDs where available
+- preserved evaluation bundles and the statement that no evaluation assets
+  will be created
+- exact branch, base commit, paths, commit message, and intended commit
+- exact `azd` environment, services, project endpoints, and deployment command
+
+Ask for one explicit approval of the entire plan. A partial answer is not
+approval.
+
+### 5. Apply only the approved plan
+
+1. Install or upgrade `azd` or `azure.ai.agents` only if the approved capability
+   plan requires it, then record the resulting versions.
+2. Apply the staged repository files byte-for-byte and rerun validation.
+3. Re-query every remote resource immediately before mutation. Reuse an exact
+   match, create a still-missing resource, and stop on drift or conflict.
+4. Configure GitHub environments and non-secret variables, Azure identity,
+   federated credentials, and least-privilege role assignments from the
+   approved plan. Do not store credentials in the repository.
+5. Create the approved local commit containing only approved paths.
+6. Verify `HEAD` is that commit and the deployment worktree is clean.
+7. Select the approved azd environment. Run `azd provision` only for approved
+   missing resources declared by `azure.yaml`; otherwise skip it.
+8. Run the approved `azd deploy` command from the exact local commit.
+9. Verify resulting resource identities and links without changing
+   unapproved settings.
+10. Complete `.foundry-opt/bootstrap-report.md` with versions, commit, reused
+    and created resources, deployments, and remaining work.
+
+### 6. Stop safely on failure
+
+Do not undo successful work. Do not continue to a dependent step. Update the
+report and owner response with:
+
+- last successful step
+- completed local and remote changes
+- failed command or API action and concise error
+- pending actions that were not attempted
+- current local commit and worktree status
+- links or immutable IDs for resources that now exist
+
+Follow [Failure handling](references/failure-handling.md).
+
+## Templates and schemas
+
+See [Template map](templates/README.md) for destination paths and editing rules.
+The schemas describe repository contracts, not the `azure.yaml` provider
+surface. Validate `azure.yaml` with the installed `azure.ai.agents` capability
+before approval and again before deployment.

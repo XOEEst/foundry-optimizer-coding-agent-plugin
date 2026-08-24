@@ -1,0 +1,118 @@
+name: Release foundry-bootstrap skill
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "foundry-bootstrap-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the release commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Build static ZIP and checksum
+        id: package
+        shell: bash
+        env:
+          RUNTIME_REPOSITORY: https://github.com/${{ github.repository }}.git
+          RUNTIME_COMMIT: ${{ github.sha }}
+          RUNTIME_PACKAGE_PATH: .
+          OPTIMIZER_SKILL_PATH: plugins/foundry-agent-optimizer
+        run: |
+          set -euo pipefail
+          source_root="plugins/foundry-bootstrap"
+          work_root="$RUNNER_TEMP/foundry-bootstrap-release"
+          package_root="$work_root/foundry-bootstrap"
+          artifact="$work_root/foundry-bootstrap-skill.zip"
+          checksum="$artifact.sha256"
+
+          test -f "$source_root/SKILL.md"
+          test -f "$source_root/release.json"
+          test -f uv.lock
+          test ! -d "$source_root/scripts"
+          if find "$source_root" -type f \( -name '*.py' -o -name '*.ps1' -o -name '*.sh' -o -name '*.cmd' -o -name '*.bat' \) -print -quit | grep -q .; then
+            echo "Executable source files are not allowed in the static skill." >&2
+            exit 1
+          fi
+
+          rm -rf "$work_root"
+          mkdir -p "$package_root"
+          cp -R "$source_root/." "$package_root/"
+
+          uv_lock_sha256="$(sha256sum uv.lock | cut -d' ' -f1)"
+          jq -n \
+            --arg repository "$RUNTIME_REPOSITORY" \
+            --arg commit "$RUNTIME_COMMIT" \
+            --arg package_path "$RUNTIME_PACKAGE_PATH" \
+            --arg uv_lock_sha256 "$uv_lock_sha256" \
+            --arg optimizer_skill_path "$OPTIMIZER_SKILL_PATH" \
+            '{
+              repository: $repository,
+              commit: $commit,
+              package_path: $package_path,
+              uv_lock_sha256: $uv_lock_sha256,
+              optimizer_skill_path: $optimizer_skill_path
+            }' >"$package_root/release.json"
+
+          jq -e \
+            --arg repository "$RUNTIME_REPOSITORY" \
+            --arg commit "$RUNTIME_COMMIT" \
+            --arg package_path "$RUNTIME_PACKAGE_PATH" \
+            --arg uv_lock_sha256 "$uv_lock_sha256" \
+            --arg optimizer_skill_path "$OPTIMIZER_SKILL_PATH" \
+            '. == {
+              repository: $repository,
+              commit: $commit,
+              package_path: $package_path,
+              uv_lock_sha256: $uv_lock_sha256,
+              optimizer_skill_path: $optimizer_skill_path
+            }' "$package_root/release.json" >/dev/null
+
+          (
+            cd "$work_root"
+            zip -X -q -r "$(basename "$artifact")" foundry-bootstrap
+            sha256sum "$(basename "$artifact")" >"$(basename "$checksum")"
+          )
+
+          echo "artifact=$artifact" >>"$GITHUB_OUTPUT"
+          echo "checksum=$checksum" >>"$GITHUB_OUTPUT"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: foundry-bootstrap-skill
+          path: |
+            ${{ steps.package.outputs.artifact }}
+            ${{ steps.package.outputs.checksum }}
+          if-no-files-found: error
+
+      - name: Create tagged GitHub release
+        if: ${{ github.ref_type == 'tag' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT: ${{ steps.package.outputs.artifact }}
+          CHECKSUM: ${{ steps.package.outputs.checksum }}
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release already exists; refusing to replace its assets." >&2
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            "$ARTIFACT" \
+            "$CHECKSUM" \
+            --verify-tag \
+            --generate-notes \
+            --title "$GITHUB_REF_NAME"

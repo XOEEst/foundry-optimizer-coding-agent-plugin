@@ -19,62 +19,33 @@ LEGACY_OPTIMIZER_ROOT = (
     / "skills"
     / "foundry-agent-optimizer"
 )
-EXPECTED_PLUGIN_FILES = {
-    "plugins/README.md",
-    "plugins/foundry-agent-optimizer/README.md",
-    "plugins/foundry-agent-optimizer/SKILL.md",
-    "plugins/foundry-agent-optimizer/references/.gitattributes",
-    "plugins/foundry-agent-optimizer/references/ADAPTER_MAPPING.md",
-    "plugins/foundry-agent-optimizer/references/TENZING_ATTRIBUTION.md",
-    "plugins/foundry-agent-optimizer/references/tenzing/.github/ISSUE_TEMPLATE/JitAccess.yml",
-    "plugins/foundry-agent-optimizer/references/tenzing/.github/acl/access.yml",
-    "plugins/foundry-agent-optimizer/references/tenzing/.github/compliance/inventory.yml",
-    "plugins/foundry-agent-optimizer/references/tenzing/.github/policies/jit.yml",
-    "plugins/foundry-agent-optimizer/references/tenzing/.gitignore",
-    "plugins/foundry-agent-optimizer/references/tenzing/INIT.md",
-    "plugins/foundry-agent-optimizer/references/tenzing/LICENSE",
-    "plugins/foundry-agent-optimizer/references/tenzing/README.md",
-    "plugins/foundry-agent-optimizer/references/tenzing/assets/logo.svg",
-    "plugins/foundry-agent-optimizer/references/tenzing/climb.md",
-    "plugins/foundry-agent-optimizer/references/tenzing/climb_config/background.md",
-    "plugins/foundry-agent-optimizer/references/tenzing/climb_config/data.md",
-    "plugins/foundry-agent-optimizer/references/tenzing/climb_config/dos-and-donts.md",
-    "plugins/foundry-agent-optimizer/references/tenzing/climb_config/environment.md",
-    "plugins/foundry-agent-optimizer/references/tenzing/climb_config/evaluation.md",
-    "plugins/foundry-agent-optimizer/references/tenzing/climb_config/objective.md",
-    "plugins/foundry-agent-optimizer/references/tenzing/climb_config/tracking-experiments.md",
-    "plugins/foundry-agent-optimizer/README.md",
-    "plugins/foundry-bootstrap/SKILL.md",
-    "plugins/foundry-bootstrap/references/owner-flow.md",
-    "plugins/foundry-bootstrap/references/README.md",
-    "plugins/foundry-bootstrap/references/recovery.md",
-    "plugins/foundry-bootstrap/references/security.md",
-    "plugins/foundry-bootstrap/scripts/README.md",
-    "plugins/foundry-bootstrap/scripts/bootstrap.py",
-    "plugins/foundry-bootstrap/scripts/install-runtime.ps1",
-    "plugins/foundry-bootstrap/scripts/install-runtime.sh",
-    "plugins/foundry-bootstrap/skill.lock.template.json",
-    "plugins/foundry-bootstrap/templates/README.md",
-}
-EXPECTED_LOCK_TEMPLATE = {
-    "schema_version": "__SCHEMA_VERSION__",
-    "runtime_repository": "__RUNTIME_REPOSITORY__",
-    "runtime_commit": "__RUNTIME_COMMIT__",
-    "uv_lock_sha256": "__UV_LOCK_SHA256__",
-    "package_path": "__PACKAGE_PATH__",
+EXPECTED_BOOTSTRAP_FILES = {
+    "SKILL.md",
+    "release.json",
+    "references/README.md",
+    "references/discovery.md",
+    "references/failure-handling.md",
+    "references/migration.md",
+    "references/owner-flow.md",
+    "references/recovery.md",
+    "references/resource-reuse.md",
+    "references/security.md",
+    "schemas/registry.schema.json",
+    "schemas/sidecar.schema.json",
+    "templates/README.md",
+    "templates/azure.yaml",
+    "templates/bootstrap-report.md",
+    "templates/copilot-setup-steps.yml",
+    "templates/foundry-opt-deploy.yml",
+    "templates/foundry-opt.instructions.md",
+    "templates/foundry-optimize-agent.yml",
+    "templates/registry.yaml",
+    "templates/sidecar.yaml",
 }
 
 
 def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
-
-
-def _plugin_files() -> set[str]:
-    return {
-        path.relative_to(REPOSITORY_ROOT).as_posix()
-        for path in PLUGINS_ROOT.rglob("*")
-        if path.is_file()
-    }
 
 
 def _parse_frontmatter(path: Path) -> tuple[dict[str, object], str]:
@@ -88,101 +59,100 @@ def _parse_frontmatter(path: Path) -> tuple[dict[str, object], str]:
     return frontmatter, body
 
 
-def test_plugins_readme_and_discovery_boundary_are_explicit() -> None:
-    readme = _read(PLUGINS_ROOT / "README.md")
-    normalized = " ".join(readme.split())
+def _bootstrap_files() -> set[str]:
+    return {
+        path.relative_to(BOOTSTRAP_ROOT).as_posix()
+        for path in BOOTSTRAP_ROOT.rglob("*")
+        if path.is_file()
+    }
 
-    assert "`foundry-bootstrap/`" in normalized
-    assert "`foundry-agent-optimizer/`" in normalized
-    assert "shared `foundry_opt` runtime package" in normalized
-    assert "canonical issue-time optimizer skill folder" in normalized
+
+def test_plugins_discovery_boundary_contains_both_skills() -> None:
     assert (BOOTSTRAP_ROOT / "SKILL.md").is_file()
     assert (OPTIMIZER_ROOT / "SKILL.md").is_file()
     assert not LEGACY_OPTIMIZER_ROOT.exists()
 
 
-def test_bootstrap_skill_frontmatter_and_owner_contract_describes_canonical_launchers() -> None:
+def test_bootstrap_skill_is_static_and_uses_one_combined_approval() -> None:
     frontmatter, body = _parse_frontmatter(BOOTSTRAP_ROOT / "SKILL.md")
     normalized = " ".join(body.split())
 
     assert frontmatter == {
         "name": "foundry-bootstrap",
         "description": (
-            "Guide a first-time owner through the downloadable bootstrap "
-            "start/resume/approval loop over the shared foundry_opt runtime."
+            "Bootstrap repository agents for Microsoft Foundry with read-only "
+            "discovery, one combined approval, static templates, and standard "
+            "Git, GitHub, Azure, and azd tools."
         ),
     }
-    assert "only owner client over `BootstrapRunner`" in normalized
-    assert "python scripts/bootstrap.py start --repository ." in normalized
-    assert "`<<<FOUNDRY_BOOTSTRAP_OWNER_MARKDOWN>>>`" in normalized
-    assert "`<<<FOUNDRY_BOOTSTRAP_TURN>>>`" in normalized
-    assert "`next_question.title` plus `next_question.details_markdown`" in normalized
-    assert "Never paste or expose its raw JSON to the owner" in normalized
-    assert "--project-endpoint" in normalized
-    assert "--agent-name" in normalized
-    assert "--account-resource-id" in normalized
-    assert "resolve as many `required_fields` as possible" in normalized
-    assert "Never ask the owner to discover or type an ARM resource ID." in normalized
-    assert "--retry" in normalized
-    assert "--response-json" not in normalized
-    assert "status --operation-id <id>" in normalized
-    assert "rollback --operation-id <id>" in normalized
-    assert "Do not create or switch to a custom agent." in normalized
-    assert "Keep target validation and classification" in normalized
+    assert "read-only repository, Git, GitHub, Azure, and Foundry" in normalized
+    assert "one combined approval request" in normalized
+    assert "session staging area" in normalized
+    assert "azd ai agent version" in normalized
+    assert "azd deploy" in normalized
+    assert "Never push." in normalized
+    assert "Leave successful local and remote changes in place" in normalized
+    assert "Do not create datasets, evaluators, evaluation definitions, or evaluation runs." in normalized
 
 
-def test_plugin_tree_contains_only_allowed_boundary_files() -> None:
-    assert _plugin_files() == EXPECTED_PLUGIN_FILES
-
-    assert "canonical issue-time optimizer skill folder" in _read(OPTIMIZER_ROOT / "README.md")
-    assert "do not maintain a second full copy" in _read(OPTIMIZER_ROOT / "README.md")
-    assert (OPTIMIZER_ROOT / "references" / "ADAPTER_MAPPING.md").is_file()
-    assert (OPTIMIZER_ROOT / "references" / "TENZING_ATTRIBUTION.md").is_file()
-    scripts_readme = _read(BOOTSTRAP_ROOT / "scripts" / "README.md")
-    assert "canonical checked-in home for the reviewed owner bridge" in scripts_readme
-    assert "bootstrap.py" in scripts_readme
-    assert "only owner client over `BootstrapRunner`" in scripts_readme
-    assert "install-runtime.ps1" in scripts_readme
-    assert "install-runtime.sh" in scripts_readme
-    references_readme = _read(BOOTSTRAP_ROOT / "references" / "README.md")
-    assert "[Owner flow](owner-flow.md)" in references_readme
-    assert "[Recovery](recovery.md)" in references_readme
-    assert "[Security](security.md)" in references_readme
-    assert "Provider plans, receipts, schemas" in _read(
-        BOOTSTRAP_ROOT / "templates" / "README.md"
-    )
-
-
-def test_lock_template_uses_exact_placeholder_fields_and_only_canonical_launchers() -> None:
-    template = json.loads(_read(BOOTSTRAP_ROOT / "skill.lock.template.json"))
-
-    assert template == EXPECTED_LOCK_TEMPLATE
-    assert {
-        path.relative_to(REPOSITORY_ROOT).as_posix()
-        for path in PLUGINS_ROOT.rglob("*.py")
-    } == {"plugins/foundry-bootstrap/scripts/bootstrap.py"}
-    assert {
-        path.relative_to(REPOSITORY_ROOT).as_posix()
-        for path in PLUGINS_ROOT.rglob("*.ps1")
-    } == {"plugins/foundry-bootstrap/scripts/install-runtime.ps1"}
-    assert {
-        path.relative_to(REPOSITORY_ROOT).as_posix()
-        for path in PLUGINS_ROOT.rglob("*.sh")
-    } == {"plugins/foundry-bootstrap/scripts/install-runtime.sh"}
+def test_bootstrap_tree_is_exactly_static_content() -> None:
+    assert _bootstrap_files() == EXPECTED_BOOTSTRAP_FILES
+    assert not (BOOTSTRAP_ROOT / "scripts").exists()
     assert not any(
-        path.name in {"launch-bootstrap.ps1", "launch-bootstrap.sh"}
-        for path in PLUGINS_ROOT.rglob("*")
+        path.suffix.casefold() in {".py", ".ps1", ".sh", ".cmd", ".bat", ".exe"}
+        for path in BOOTSTRAP_ROOT.rglob("*")
         if path.is_file()
     )
 
+    combined = "\n".join(
+        _read(path)
+        for path in BOOTSTRAP_ROOT.rglob("*")
+        if path.is_file() and path.suffix.casefold() in {".md", ".json", ".yaml", ".yml"}
+    ).casefold()
+    for retired_term in (
+        "bootstrap.py",
+        "skill.lock",
+        "operation-id",
+        "operation_id",
+        "receipt",
+        "rollback",
+        "compensation",
+    ):
+        assert retired_term not in combined
 
-def test_build_configuration_includes_plugin_skill_in_source_artifacts() -> None:
+
+def test_static_template_map_and_release_contract_are_complete() -> None:
+    template_readme = _read(BOOTSTRAP_ROOT / "templates" / "README.md")
+    for name in (
+        "registry.yaml",
+        "sidecar.yaml",
+        "azure.yaml",
+        "foundry-opt-deploy.yml",
+        "copilot-setup-steps.yml",
+        "foundry-opt.instructions.md",
+        "foundry-optimize-agent.yml",
+        "bootstrap-report.md",
+    ):
+        assert f"`{name}`" in template_readme
+
+    release = json.loads(_read(BOOTSTRAP_ROOT / "release.json"))
+    assert list(release) == [
+        "repository",
+        "commit",
+        "package_path",
+        "uv_lock_sha256",
+        "optimizer_skill_path",
+    ]
+    assert all(value.startswith("__") and value.endswith("__") for value in release.values())
+    assert "azd" not in release
+    assert "azure.ai.agents" not in release
+
+
+def test_build_configuration_includes_plugin_skills_in_source_artifacts() -> None:
     pyproject = tomllib.loads(_read(REPOSITORY_ROOT / "pyproject.toml"))
     project = pyproject["project"]
     build_backend = pyproject["tool"]["uv"]["build-backend"]
-    scripts = pyproject["project"]["scripts"]
 
     assert project["scripts"] == {"foundry-opt": "foundry_opt:main"}
     assert "plugins/**" in build_backend["source-include"]
-    assert scripts == {"foundry-opt": "foundry_opt:main"}
-    assert "foundry-bootstrap" not in scripts
+    assert "foundry-bootstrap" not in project["scripts"]

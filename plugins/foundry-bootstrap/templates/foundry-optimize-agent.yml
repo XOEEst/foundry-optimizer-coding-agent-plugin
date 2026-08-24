@@ -1,0 +1,92 @@
+name: Optimize a Foundry agent
+description: Run one bounded, evidence-backed optimization job.
+title: "[Optimize job] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Assign the completed issue to Copilot. Select one stable repository
+        agent ID from `.foundry-opt/registry.yaml`. Blank optional verification
+        inputs preserve the sidecar defaults.
+
+  - type: input
+    id: repo_agent_id
+    attributes:
+      label: Repository agent ID
+      description: Enter one exact agent ID from `.foundry-opt/registry.yaml`.
+      placeholder: example-agent
+    validations:
+      required: true
+
+  - type: textarea
+    id: optimization_goal
+    attributes:
+      label: Optimization goal
+      description: Describe the behavior or quality outcome that should improve.
+    validations:
+      required: true
+
+  - type: textarea
+    id: observed_failures
+    attributes:
+      label: Observed failures or evidence
+      description: Summarize failing cases, traces, evaluation patterns, or user feedback without sensitive data.
+    validations:
+      required: true
+
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints and guardrails
+      description: Add constraints beyond repository policy, or state that repository defaults apply.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: candidate_budget
+    attributes:
+      label: Changed candidates
+      options:
+        - "2"
+    validations:
+      required: true
+
+  - type: textarea
+    id: editable_scope
+    attributes:
+      label: Optional narrower editable scope
+      description: One repository-relative policy-approved path pattern per line.
+      render: text
+
+  - type: input
+    id: primary_metric
+    attributes:
+      label: Optional primary metric
+      description: Leave blank to use the sidecar default.
+
+  - type: textarea
+    id: issue_evaluators
+    attributes:
+      label: Optional exact evaluator IDs
+      description: One immutable evaluator ID per line. Append `weight=<positive>` to override equal weighting.
+      render: text
+
+  - type: input
+    id: verification_dataset
+    attributes:
+      label: Optional exact verification dataset ID or URI
+      description: Supply only with exact evaluator IDs; blank keeps repository defaults.
+
+  - type: textarea
+    id: verification_checks
+    attributes:
+      label: Optional verification commands
+      description: "One `command: ...` entry per line. Blank keeps repository defaults."
+      render: text
+
+  - type: input
+    id: acknowledge_no_evidence
+    attributes:
+      label: Optional no-evidence acknowledgement
+      description: Type `acknowledge` only when no approved evidence is available.
+      placeholder: acknowledge

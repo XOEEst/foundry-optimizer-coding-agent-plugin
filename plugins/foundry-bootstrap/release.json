@@ -1,0 +1,7 @@
+{
+  "repository": "__FOUNDRY_OPT_REPOSITORY__",
+  "commit": "__FOUNDRY_OPT_COMMIT__",
+  "package_path": "__FOUNDRY_OPT_PACKAGE_PATH__",
+  "uv_lock_sha256": "__FOUNDRY_OPT_UV_LOCK_SHA256__",
+  "optimizer_skill_path": "__FOUNDRY_OPT_OPTIMIZER_SKILL_PATH__"
+}

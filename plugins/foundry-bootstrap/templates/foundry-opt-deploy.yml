@@ -1,0 +1,94 @@
+name: Deploy Foundry agents
+
+on:
+  push:
+    branches:
+      - "__DEFAULT_BRANCH__"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: foundry-production
+    env:
+      AZD_ENVIRONMENT: "__AZD_ENVIRONMENT__"
+      AZURE_CLIENT_ID: ${{ vars.AZURE_OPTIMIZER_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+    steps:
+      - name: Check out the exact source commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Require the current default branch tip
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          default_branch="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.default_branch')"
+          default_tip="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${default_branch}" --jq '.sha')"
+          test "$GITHUB_REF" = "refs/heads/${default_branch}"
+          test "$GITHUB_SHA" = "$default_tip"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+
+      - name: Install the current Azure Developer CLI
+        uses: Azure/setup-azd@17a3d5f2aa75a53c7f6fa815c18ef1445c73257f
+
+      - name: Install or upgrade the current Foundry extensions
+        shell: bash
+        run: |
+          set -euo pipefail
+          for extension in azure.ai.agents azure.ai.projects; do
+            if azd ext list | grep -q "$extension"; then
+              azd ext upgrade "$extension"
+            else
+              azd ext install "$extension"
+            fi
+          done
+          azd version
+          azd ai agent version
+          {
+            echo "### Deployment tools"
+            echo
+            echo '```text'
+            azd version
+            azd ai agent version
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Authenticate azd with GitHub OIDC
+        shell: bash
+        run: |
+          set -euo pipefail
+          azd auth login \
+            --client-id "$AZURE_CLIENT_ID" \
+            --tenant-id "$AZURE_TENANT_ID" \
+            --federated-credential-provider github \
+            --no-prompt
+
+      - name: Select the approved azd environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! azd env select "$AZD_ENVIRONMENT" --no-prompt; then
+            azd env new "$AZD_ENVIRONMENT" --no-prompt
+          fi
+          azd env set AZURE_SUBSCRIPTION_ID "$AZURE_SUBSCRIPTION_ID"
+
+      - name: Deploy the exact committed source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          azd deploy --no-prompt

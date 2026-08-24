@@ -1,10 +1,9 @@
 # References
 
-Owner references for the downloadable bootstrap skill:
-
-- [Owner flow](owner-flow.md) - what the owner sees and decides
-- [Recovery](recovery.md) - resume, stale questions, failures, and rollback
-- [Security](security.md) - exact pins, approval seams, identities, and state
-
-The bundled `scripts/bootstrap.py` commands are skill implementation details.
-Owners normally invoke `/foundry-bootstrap`, not these commands directly.
+- [Owner flow](owner-flow.md) - the concise owner interaction
+- [Discovery](discovery.md) - read-only repository and cloud inventory
+- [Migration](migration.md) - in-place registry and sidecar upgrades
+- [Resource reuse](resource-reuse.md) - exact-match and conflict rules
+- [Failure handling](failure-handling.md) - stop-and-document behavior
+- [Interrupted runs](recovery.md) - begin a fresh discovery after interruption
+- [Security](security.md) - identity, source, and secret boundaries

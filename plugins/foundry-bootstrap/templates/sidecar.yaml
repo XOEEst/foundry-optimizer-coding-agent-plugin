@@ -1,0 +1,74 @@
+schema_version: 2
+repo_agent_id: "__REPO_AGENT_ID__"
+source_root: "__AGENT_ROOT__"
+package_root: "__AGENT_PACKAGE_ROOT__"
+editable_paths:
+  - "__AGENT_ROOT__/main.py"
+  - "__AGENT_ROOT__/prompts/**"
+  - "tests/__REPO_AGENT_ID__/**"
+shared_source_relations: []
+runtime:
+  schema_version: 1
+  kind: hosted
+  runtime: python_3_13
+  entrypoint:
+    - python
+    - main.py
+  dependency_resolution: remote_build
+  protocol_name: responses
+  protocol_version: "2.0.0"
+  cpu: "0.5"
+  memory: 1Gi
+  model_environment_variable: MICROSOFT_FOUNDRY_MODEL_DEPLOYMENT_NAME
+foundry_project:
+  schema_version: 1
+  project_endpoint: "__FOUNDRY_PROJECT_ENDPOINT__"
+  account_resource_id: "__FOUNDRY_ACCOUNT_RESOURCE_ID__"
+  agent_name: "__FOUNDRY_AGENT_NAME__"
+  model_deployment_aliases:
+    - "__BASELINE_MODEL_DEPLOYMENT__"
+baseline_model: "__BASELINE_MODEL_DEPLOYMENT__"
+allowed_models:
+  - "__BASELINE_MODEL_DEPLOYMENT__"
+min_candidates: 2
+max_candidates: 2
+primary_metric: primary_metric
+decision_policy:
+  schema_version: 1
+  minimum_aggregate_delta: 0.01
+  focused_cases_required: true
+  max_regressions: 0
+max_issue_evaluators: 8
+hard_guardrails:
+  - schema_version: 1
+    evaluator_name: violence
+    required_pass_rate: 1.0
+    required: true
+  - schema_version: 1
+    evaluator_name: sexual
+    required_pass_rate: 1.0
+    required: true
+  - schema_version: 1
+    evaluator_name: self_harm
+    required_pass_rate: 1.0
+    required: true
+  - schema_version: 1
+    evaluator_name: hate_unfairness
+    required_pass_rate: 1.0
+    required: true
+  - schema_version: 1
+    evaluator_name: indirect_attack
+    required_pass_rate: 1.0
+    required: true
+deployment:
+  schema_version: 1
+  environment: foundry-production
+  enabled: true
+  require_aligned_binding: true
+verification:
+  schema_version: 1
+  mode: "off"
+  repository_checks: []
+  evaluation_gate_policy: allow_no_evidence
+  bundle: null
+  lineage: null

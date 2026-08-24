@@ -1,43 +1,35 @@
-# Security
+# Security boundaries
 
-## Trusted runtime
+## Source
 
-- The skill lock identifies the exact runtime repository, commit, package path,
-  and lock digest.
-- Installer scripts fetch and verify that exact revision before execution.
-- Downloaded skills ignore ambient Python packages and re-execute through the
-  verified runtime interpreter.
-- Resume refuses a different runtime revision.
-
-## Explicit mutation approvals
-
-The runner separates four mutation seams:
-
-1. repository files
-2. GitHub-to-Azure connection
-3. local Git commit
-4. Foundry deployment
-
-An approval is bound to the current immutable state generation and reviewed
-plan. Stale or mismatched approvals are rejected.
+- Treat the published `release.json` as provenance for the `foundry-opt`
+  runtime and optimizer skill only.
+- Verify the runtime commit and `uv.lock` digest before installing the
+  optimizer workflow dependencies.
+- Deploy only from the clean local commit shown in the combined approval.
+- Do not execute content discovered in an untrusted branch during discovery.
 
 ## Identity
 
-- Local deployment uses the owner's current Azure CLI/default credential.
-- Future GitHub workflows use OIDC and the committed Azure client ID.
-- Static Azure credentials are not stored in the repository or operation
-  state.
-- Foundry User access is scoped to reviewed projects.
+- Use the owner's current Azure identity for local inventory and deployment.
+- Use GitHub OIDC for workflows.
+- Scope federated credentials to the exact repository and approved environment.
+- Assign the least role at the narrowest resource scope that supports the
+  approved action.
+- Store client, tenant, and subscription IDs as non-secret GitHub variables.
+  Do not store access tokens, client secrets, or credentials in repository
+  files or reports.
 
-## Exact source
+## Remote safety
 
-- Deployment requires a clean, reviewed local commit.
-- Packaging reads source from that Git object, not dirty working-tree bytes.
-- Downloaded Foundry code is compared with the exact uploaded archive.
-- Publication never mutates an explicit version route.
+- Read immediately before create or deploy.
+- Match immutable IDs and full configuration, not display names.
+- Never alter an existing resource merely to make it match the plan.
+- Never deploy through an endpoint or identity whose ownership is uncertain.
 
-## Private state
+## Repository safety
 
-Operation state contains reviewed decisions, hashes, redacted receipts, and
-resource identifiers. It must not contain access tokens, static credentials,
-raw customer datasets, evaluator source, or archive bytes.
+- Preserve unrelated files and user changes.
+- Show exact staged diffs before approval.
+- Reject unresolved template tokens and secret-looking values.
+- Commit only approved paths and do not push.

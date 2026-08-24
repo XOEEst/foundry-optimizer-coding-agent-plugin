@@ -1,0 +1,80 @@
+name: Foundry optimizer Copilot setup
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/copilot-setup-steps.yml
+      - .foundry-opt/registry.yaml
+      - "**/.foundry/foundry-opt.yaml"
+
+permissions:
+  contents: read
+
+jobs:
+  copilot-setup-steps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 59
+    environment: copilot
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Check out the agent repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
+        with:
+          enable-cache: true
+
+      - name: Fetch and verify the exact optimizer runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime_repository="__FOUNDRY_OPT_REPOSITORY__"
+          runtime_commit="__FOUNDRY_OPT_COMMIT__"
+          package_path="__FOUNDRY_OPT_PACKAGE_PATH__"
+          expected_lock_sha256="__FOUNDRY_OPT_UV_LOCK_SHA256__"
+          optimizer_skill_path="__FOUNDRY_OPT_OPTIMIZER_SKILL_PATH__"
+          shared_root="$RUNNER_TEMP/foundry-opt-shared"
+
+          rm -rf "$shared_root"
+          git init "$shared_root"
+          git -C "$shared_root" remote add origin "$runtime_repository"
+          git -C "$shared_root" fetch --depth=1 origin "$runtime_commit"
+          git -C "$shared_root" checkout --detach FETCH_HEAD
+          test "$(git -C "$shared_root" rev-parse HEAD)" = "$runtime_commit"
+
+          if [[ "$package_path" == "." ]]; then
+            package_root="$shared_root"
+          else
+            package_root="$shared_root/$package_path"
+          fi
+          actual_lock_sha256="$(sha256sum "$package_root/uv.lock" | cut -d' ' -f1)"
+          test "$actual_lock_sha256" = "$expected_lock_sha256"
+          test -f "$shared_root/$optimizer_skill_path/SKILL.md"
+
+          uv sync --frozen --project "$package_root"
+          echo "FOUNDRY_OPT_PACKAGE_ROOT=$package_root" >>"$GITHUB_ENV"
+          echo "$package_root/.venv/bin" >>"$GITHUB_PATH"
+
+          skill_root="$HOME/.copilot/skills/foundry-agent-optimizer"
+          rm -rf "$skill_root"
+          mkdir -p "$(dirname "$skill_root")"
+          cp -a "$shared_root/$optimizer_skill_path" "$skill_root"
+
+      - name: Validate repository contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          foundry-opt preflight --repository . --offline
