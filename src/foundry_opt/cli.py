@@ -17,9 +17,9 @@ import typer
 from pydantic import ValidationError
 
 from foundry_opt import __version__
-from foundry_opt.bootstrap.errors import BootstrapConfigError
+from foundry_opt.contract_errors import BootstrapConfigError
 from foundry_opt.bootstrap.cli import register_bootstrap_commands
-from foundry_opt.bootstrap.workflow_integration import (
+from foundry_opt.repository_selection import (
     build_registered_deployment_plan,
     normalize_issue_author_permission,
     resolve_registry_selection,

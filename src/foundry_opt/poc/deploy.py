@@ -14,9 +14,9 @@ from typing import Literal, Protocol, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from foundry_opt.bootstrap.canonical import canonical_sha256
-from foundry_opt.bootstrap.contracts import BootstrapLock, RootRegistry
-from foundry_opt.bootstrap.workflow_integration import (
+from foundry_opt.canonical import canonical_sha256
+from foundry_opt.repository_contracts import BootstrapLock, RootRegistry
+from foundry_opt.repository_selection import (
     RegistrySelection,
     resolve_registry_selection,
 )

@@ -66,7 +66,7 @@ from foundry_opt.poc.state import (
 )
 from foundry_opt.poc.source import SourcePackagingError, package_git_source
 from foundry_opt.poc.verification import VerificationResolution
-from foundry_opt.bootstrap.workflow_integration import protected_editable_patterns_for_repository
+from foundry_opt.repository_selection import protected_editable_patterns_for_repository
 
 
 DEFAULT_POLICY_PATH = Path(".github/foundry-optimizer.yaml")

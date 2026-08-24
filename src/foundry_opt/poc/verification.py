@@ -4,13 +4,13 @@ from typing import Literal, Protocol, runtime_checkable
 
 from pydantic import Field, model_validator
 
-from foundry_opt.bootstrap.contracts import (
+from foundry_opt.repository_contracts import (
     BootstrapSidecar,
     EvaluationGatePolicy,
     HardGuardrail,
     VerificationBundle,
 )
-from foundry_opt.bootstrap.errors import BootstrapConfigError
+from foundry_opt.contract_errors import BootstrapConfigError
 from foundry_opt.models import FrozenModel
 from foundry_opt.poc.config import IssueEvaluatorEntry, OptimizeIssueRequest
 from foundry_opt.poc.issue import ISSUE_NAMED_CHECK_GUIDANCE

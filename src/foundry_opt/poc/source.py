@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Callable
 
-from foundry_opt.bootstrap.discovery import (
+from foundry_opt.source_discovery import (
     fingerprint_content_sha256,
     fingerprint_files,
     is_fingerprintable_path,
