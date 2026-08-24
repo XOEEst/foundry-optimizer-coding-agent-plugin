@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from foundry_opt.bootstrap.contracts import (
+from foundry_opt.repository_contracts import (
     ActivationBinding,
     BootstrapSidecar,
     DefaultEvaluatorBundle,
@@ -18,7 +18,7 @@ from foundry_opt.bootstrap.contracts import (
     VerificationBundle,
     VerificationSettings,
 )
-from foundry_opt.bootstrap.errors import BootstrapConfigError
+from foundry_opt.contract_errors import BootstrapConfigError
 from foundry_opt.poc.config import IssueEvaluatorEntry, OptimizeIssueRequest
 from foundry_opt.poc.verification import resolve_verification
 from foundry_opt.verification import VerificationCheckSpec, VerificationDatasetInput

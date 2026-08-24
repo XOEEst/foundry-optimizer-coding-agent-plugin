@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from foundry_opt.bootstrap.contracts import (
+from foundry_opt.repository_contracts import (
     ActivationBinding,
     BootstrapSidecar,
     DefaultEvaluatorBundle,

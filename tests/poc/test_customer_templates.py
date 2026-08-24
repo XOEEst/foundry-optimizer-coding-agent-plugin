@@ -6,8 +6,7 @@ from pathlib import Path
 
 import yaml
 
-from foundry_opt.bootstrap.contracts import BootstrapSidecar, RootRegistry, SemanticPatchSpec
-from foundry_opt.bootstrap.legacy import import_legacy_single_agent_documents
+from foundry_opt.repository_contracts import BootstrapSidecar, RootRegistry
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 CUSTOMER_TEMPLATE_ROOT = REPOSITORY_ROOT / "src" / "foundry_opt" / "templates" / "customer-repo"
@@ -21,9 +20,7 @@ OPTIONAL_CUSTOM_AGENT = (
     REPOSITORY_ROOT / "examples" / "custom-agents" / "foundry-optimizer.agent.md"
 )
 EXPECTED_WORKFLOWS = {"agent-ci.yml", "copilot-setup-steps.yml", "foundry-opt-validation.yml", "foundry-opt-deploy.yml"}
-FIXTURE_ROOT = REPOSITORY_ROOT / "tests" / "bootstrap" / "fixtures" / "templates"
 RUNTIME_SHA = "770ad878f0658e9368b042d9a7f6732e49ff0200"
-LEGACY_RUNTIME_SHA = "c899b718f3baebcfd08209ee5184d0cf61d8153d"
 FORBIDDEN_STRINGS = ("FOUNDRY_OPT_SHARED_REPO_SSH_KEY", "git@github.com", "known_hosts", "StrictHostKeyChecking")
 
 
@@ -32,18 +29,18 @@ def _read(path: Path) -> str:
 
 
 def _yaml_paths() -> list[Path]:
-    return sorted({*CUSTOMER_TEMPLATE_ROOT.rglob("*.yml"), *CUSTOMER_TEMPLATE_ROOT.rglob("*.yaml"), *FIXTURE_ROOT.rglob("*.yml"), *FIXTURE_ROOT.rglob("*.yaml")})
+    return sorted(
+        {
+            *CUSTOMER_TEMPLATE_ROOT.rglob("*.yml"),
+            *CUSTOMER_TEMPLATE_ROOT.rglob("*.yaml"),
+        }
+    )
 
 
 def _workflow_text(path: Path) -> str:
     text = _read(path)
     assert "persist-credentials: false" in text, path
     return text
-
-
-def _apply_semantic_patch(fixture: SemanticPatchSpec, original: str) -> str:
-    assert fixture.replacement_text is not None
-    return original.replace(fixture.match_text, fixture.replacement_text)
 
 
 def test_every_customer_template_yaml_document_parses() -> None:
@@ -88,16 +85,6 @@ def test_default_bootstrap_does_not_install_a_custom_agent() -> None:
     text = _read(OPTIONAL_CUSTOM_AGENT)
     assert "target: github-copilot" in text
     assert "explicitly selects" in text
-
-
-def test_legacy_single_agent_files_exist_only_as_migration_fixtures() -> None:
-    assert f"commit: {LEGACY_RUNTIME_SHA}" in _read(FIXTURE_ROOT / "legacy-single-agent-foundry-opt.lock.yml")
-    proposal = import_legacy_single_agent_documents(
-        lock_document=_read(FIXTURE_ROOT / "legacy-single-agent-foundry-opt.lock.yml"),
-        policy_document=_read(FIXTURE_ROOT / "legacy-single-agent-foundry-optimizer.yaml"),
-        metadata_document=_read(FIXTURE_ROOT / "legacy-single-agent-agent-metadata.yaml"),
-    )
-    assert proposal.registry.agents[0].config_path == "agent/.foundry/foundry-opt.yaml"
 
 
 def test_setup_uses_venv_python_and_offline_unsets_broker() -> None:
@@ -161,14 +148,6 @@ def test_issue_form_uses_built_in_parser_contract() -> None:
         "builtin.task_completion/versions/19"
     ) in serialized
     assert "Leave blank to reuse repository defaults" in serialized
-
-
-def test_semantic_patch_fixture_targets_legacy_workflow_and_applies_cleanly() -> None:
-    fixture = SemanticPatchSpec.from_document(_read(FIXTURE_ROOT / "semantic-patch-setup-workflow.yaml"))
-    assert fixture.target_path == ".github/workflows/deploy-foundry-agent.yml"
-    original = "paths:\n" + fixture.match_text
-    patched = _apply_semantic_patch(fixture, original)
-    assert yaml.safe_load(patched) == {"paths": [".foundry-opt/registry.yaml", "agent/.foundry/foundry-opt.yaml"]}
 
 
 def test_customer_templates_omit_forbidden_strings_and_private_material() -> None:
