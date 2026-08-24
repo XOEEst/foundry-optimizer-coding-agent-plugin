@@ -132,6 +132,18 @@ class DistributionSettings(BootstrapDocument):
     repository: RepositoryUrl
     channel: str
     pin: GitCommit | None = None
+    package_path: str = "."
+    uv_lock_sha256: Sha256 | None = None
+    optimizer_skill_path: str = "plugins/foundry-agent-optimizer"
+
+    @field_validator("package_path", "optimizer_skill_path")
+    @classmethod
+    def validate_distribution_paths(cls, value: str, info) -> str:
+        return _validate_safe_path(
+            value,
+            field=info.field_name,
+            allow_dot=info.field_name == "package_path",
+        )
 
 
 class GitHubSettings(BootstrapDocument):
@@ -186,6 +198,7 @@ class ExplicitAgentEntry(BootstrapDocument):
 
 
 class RootRegistry(BootstrapDocument):
+    schema_version: Literal[1, 2] = 1
     distribution: DistributionSettings
     github: GitHubSettings
     identity: IdentitySettings
@@ -194,7 +207,23 @@ class RootRegistry(BootstrapDocument):
     @model_validator(mode='after')
     def validate_agents(self) -> Self:
         _casefold_unique([a.agent_id for a in self.agents], field='agents')
+        if self.schema_version == 2:
+            if self.distribution.pin is None:
+                raise BootstrapConfigError(
+                    "registry v2 requires distribution.pin"
+                )
+            if self.distribution.uv_lock_sha256 is None:
+                raise BootstrapConfigError(
+                    "registry v2 requires distribution.uv_lock_sha256"
+                )
         return self
+
+    @property
+    def has_exact_runtime_provenance(self) -> bool:
+        return (
+            self.distribution.pin is not None
+            and self.distribution.uv_lock_sha256 is not None
+        )
 
 
 class BindingAssessment(BootstrapDocument):
