@@ -7,7 +7,6 @@ from typing import Any, Callable
 
 import pytest
 
-from foundry_opt.poc.bootstrap import BootstrapReceipt, write_bootstrap_receipt
 from foundry_opt.poc.candidate import CandidateWorkspace
 from foundry_opt.poc.config import IssueEvaluatorEntry
 from foundry_opt.poc.controller import OptimizeJobController
@@ -35,7 +34,6 @@ from foundry_opt.poc.github import (
     PullRequestReceipt,
 )
 from foundry_opt.poc.runtime import (
-    BOOTSTRAP_RECEIPT_ENV,
     BROKER_SOCKET_ENV,
     DEADLINE_SECONDS_ENV,
     STATE_ROOT_ENV,
@@ -309,25 +307,10 @@ def _create_runtime_repository(tmp_path: Path) -> tuple[Path, str, dict[str, str
     _git(repository, "commit", "-m", "config")
     base_commit = _git(repository, "rev-parse", "HEAD")
 
-    shared_checkout = tmp_path / "shared-checkout"
-    shared_checkout.mkdir()
-    receipt_path = tmp_path / "bootstrap-receipt.json"
-    write_bootstrap_receipt(
-        receipt_path,
-        BootstrapReceipt.create(
-            repository="https://github.com/example-org/shared-skill",
-            commit=shared_commit,
-            package_path=".",
-            skill_path="skills/foundry-agent-optimizer",
-            lock_sha256=lock_sha256,
-            checkout_root=str(shared_checkout.resolve()),
-        ),
-    )
     state_root = tmp_path / "state-root"
     state_root.mkdir()
     broker_socket = tmp_path / "broker.sock"
     environment = {
-        BOOTSTRAP_RECEIPT_ENV: str(receipt_path),
         BROKER_SOCKET_ENV: str(broker_socket),
         STATE_ROOT_ENV: str(state_root),
         DEADLINE_SECONDS_ENV: "90",

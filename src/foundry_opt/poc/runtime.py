@@ -73,7 +73,6 @@ DEFAULT_METADATA_PATH = Path(".foundry/agent-metadata.yaml")
 DEFAULT_REGISTRY_PATH = Path(".foundry-opt/registry.yaml")
 DEFAULT_PIN_PATH = Path(".github/foundry-opt.lock.yml")
 REGISTRY_PATH_ENV = "FOUNDRY_OPT_REGISTRY"
-BOOTSTRAP_RECEIPT_ENV = "FOUNDRY_OPT_BOOTSTRAP_RECEIPT"
 BROKER_SOCKET_ENV = "FOUNDRY_OPT_BROKER_SOCKET"
 STATE_ROOT_ENV = "FOUNDRY_OPT_STATE_ROOT"
 DEADLINE_SECONDS_ENV = "FOUNDRY_OPT_RUNTIME_DEADLINE_SECONDS"
@@ -527,8 +526,6 @@ def load_runtime_paths(
     policy_path: Path | str | None = None,
     metadata_path: Path | str | None = None,
     registry_path: Path | str | None = None,
-    pin_path: Path | str | None = None,
-    bootstrap_receipt_path: Path | str | None = None,
     broker_socket_path: Path | str | None = None,
     state_root: Path | str | None = None,
 ) -> RuntimePaths:
@@ -542,7 +539,6 @@ def load_runtime_paths(
         repository_root / DEFAULT_METADATA_PATH if metadata_path is None else Path(metadata_path),
         field="metadata_path",
     )
-    del pin_path, bootstrap_receipt_path
     configured_registry_path = (
         registry_path
         if registry_path is not None
@@ -643,14 +639,11 @@ def load_runtime_settings(
     registry_loader: Callable[
         [str | bytes | Mapping[str, object]], RepositoryRegistry
     ] = RepositoryRegistry.from_document,
-    pin_loader: Callable[[Path | str], SharedPin] | None = None,
-    bootstrap_receipt_reader: Callable[[Path | str], object] | None = None,
     repository_head_loader: Callable[[Path], str] = load_repository_head,
     base_commit_resolver: Callable[..., str] = resolve_base_commit,
 ) -> RuntimeSettings:
     policy = policy_loader(paths.policy_path, metadata_path=paths.metadata_path)
     metadata = metadata_loader(paths.metadata_path)
-    del pin_loader, bootstrap_receipt_reader
     registry = registry_loader(paths.registry_path.read_text(encoding="utf-8"))
     if not registry.has_exact_runtime_provenance:
         raise RuntimeIntegrationError(
@@ -1629,8 +1622,6 @@ def capture_route_fingerprint(
     policy_path: Path | str | None = None,
     metadata_path: Path | str | None = None,
     registry_path: Path | str | None = None,
-    pin_path: Path | str | None = None,
-    bootstrap_receipt_path: Path | str | None = None,
     broker_socket_path: Path | str | None = None,
     state_root: Path | str | None = None,
     deadline_seconds: float | str | None = None,
@@ -1641,8 +1632,6 @@ def capture_route_fingerprint(
     registry_loader: Callable[
         [str | bytes | Mapping[str, object]], RepositoryRegistry
     ] = RepositoryRegistry.from_document,
-    pin_loader: Callable[[Path | str], SharedPin] | None = None,
-    bootstrap_receipt_reader: Callable[[Path | str], object] | None = None,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> RouteFingerprint:
     runtime_paths = paths or load_runtime_paths(
@@ -1651,8 +1640,6 @@ def capture_route_fingerprint(
         policy_path=policy_path,
         metadata_path=metadata_path,
         registry_path=registry_path,
-        pin_path=pin_path,
-        bootstrap_receipt_path=bootstrap_receipt_path,
         broker_socket_path=broker_socket_path,
         state_root=state_root,
     )
@@ -1663,8 +1650,6 @@ def capture_route_fingerprint(
         policy_loader=policy_loader,
         metadata_loader=metadata_loader,
         registry_loader=registry_loader,
-        pin_loader=pin_loader,
-        bootstrap_receipt_reader=bootstrap_receipt_reader,
     )
     credential = credential_builder(
         build_oidc_config(runtime_settings.metadata, role="optimizer"),
@@ -1741,8 +1726,6 @@ def build_runtime_controller(
     policy_path: Path | str | None = None,
     metadata_path: Path | str | None = None,
     registry_path: Path | str | None = None,
-    pin_path: Path | str | None = None,
-    bootstrap_receipt_path: Path | str | None = None,
     broker_socket_path: Path | str | None = None,
     state_root: Path | str | None = None,
     deadline_seconds: float | str | None = None,
@@ -1761,8 +1744,6 @@ def build_runtime_controller(
     registry_loader: Callable[
         [str | bytes | Mapping[str, object]], RepositoryRegistry
     ] = RepositoryRegistry.from_document,
-    pin_loader: Callable[[Path | str], SharedPin] | None = None,
-    bootstrap_receipt_reader: Callable[[Path | str], object] | None = None,
 ) -> OptimizeJobController:
     runtime_paths = paths or load_runtime_paths(
         repository,
@@ -1771,8 +1752,6 @@ def build_runtime_controller(
         policy_path=policy_path,
         metadata_path=metadata_path,
         registry_path=registry_path,
-        pin_path=pin_path,
-        bootstrap_receipt_path=bootstrap_receipt_path,
         broker_socket_path=broker_socket_path,
         state_root=state_root,
     )
@@ -1784,8 +1763,6 @@ def build_runtime_controller(
         policy_loader=policy_loader,
         metadata_loader=metadata_loader,
         registry_loader=registry_loader,
-        pin_loader=pin_loader,
-        bootstrap_receipt_reader=bootstrap_receipt_reader,
     )
     _assert_identity_matches_settings(identity, runtime_settings)
     expected_route = captured_route or identity.route_fingerprint
@@ -2365,7 +2342,6 @@ def _noop_deadline() -> None:
 
 
 __all__ = [
-    "BOOTSTRAP_RECEIPT_ENV",
     "BROKER_SOCKET_ENV",
     "BrokerClosure",
     "BrokerIssueComments",

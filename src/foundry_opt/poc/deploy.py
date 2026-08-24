@@ -20,16 +20,10 @@ from foundry_opt.repository_selection import (
     RegistrySelection,
     resolve_registry_selection,
 )
-from foundry_opt.distribution import optimizer_skill_paths_match
 from foundry_opt.poc.auth import (
     AuthError,
     GitHubActionsOidcConfig,
     build_client_assertion_credential,
-)
-from foundry_opt.poc.bootstrap import (
-    BootstrapReceipt,
-    read_bootstrap_receipt,
-    load_shared_pin,
 )
 from foundry_opt.poc.config import (
     AgentMetadata,
@@ -37,9 +31,6 @@ from foundry_opt.poc.config import (
     HostedRuntimeContract,
     ModelDeploymentContract,
     RepositoryPolicy,
-    SharedPin,
-    load_agent_metadata,
-    load_repository_policy,
 )
 from foundry_opt.poc.verification import (
     DeploymentGuardrail,
@@ -65,15 +56,9 @@ from foundry_opt.poc.foundry import (
     ServiceError,
 )
 from foundry_opt.poc.runtime import (
-    BOOTSTRAP_RECEIPT_ENV,
-    DEFAULT_METADATA_PATH,
-    DEFAULT_PIN_PATH,
-    DEFAULT_POLICY_PATH,
     RuntimeIntegrationError,
     build_hosted_definition,
-    build_oidc_config,
     load_deadline_seconds,
-    select_oidc_principal,
 )
 from foundry_opt.poc.source import (
     PackagedSource,
@@ -249,26 +234,6 @@ class DeploymentAgentMetadataProtocol(Protocol):
     validating_evaluation: ConfigEvaluationContract
 
 
-class DeploymentSettings(_FrozenModel):
-    repository_root: Path
-    policy: RepositoryPolicy
-    metadata: AgentMetadata
-    pin: SharedPin
-    bootstrap_receipt: BootstrapReceipt
-    release_commit: str = Field(pattern=_COMMIT_PATTERN)
-    artifact_root: Path
-    deadline_seconds: float = Field(gt=0)
-    deployment_environment: str
-
-    @field_validator("repository_root", "artifact_root")
-    @classmethod
-    def validate_absolute_paths(cls, value: Path) -> Path:
-        path = Path(value)
-        if not path.is_absolute():
-            raise ValueError("deployment paths must be absolute")
-        return path
-
-
 @dataclass(frozen=True, slots=True)
 class RegisteredDeploymentSettings:
     repository_root: Path
@@ -281,13 +246,6 @@ class RegisteredDeploymentSettings:
     artifact_root: Path
     deadline_seconds: float
     reconciliation_metadata: Mapping[str, str]
-
-
-@dataclass(frozen=True, slots=True)
-class DeploymentHandle:
-    settings: DeploymentSettings
-    service: "DeploymentService"
-    close: Callable[[], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -830,196 +788,6 @@ class DeploymentService:
 
     def _deadline(self) -> float:
         return self._monotonic() + self._deadline_seconds
-
-
-def load_deployment_settings(
-    repository: Path,
-    *,
-    environment: Mapping[str, str] | None = None,
-    release_commit: str | None = None,
-    policy_path: Path | None = None,
-    metadata_path: Path | None = None,
-    pin_path: Path | None = None,
-    bootstrap_receipt_path: Path | None = None,
-    artifact_root: Path | None = None,
-    deadline_seconds: float | str | None = None,
-    deployment_environment: str = DEFAULT_DEPLOYMENT_ENVIRONMENT,
-) -> DeploymentSettings:
-    env = os.environ if environment is None else environment
-    root = _repository_root(repository)
-    resolved_policy = _existing_file(
-        root / DEFAULT_POLICY_PATH if policy_path is None else policy_path,
-        field="policy_path",
-    )
-    resolved_metadata = _existing_file(
-        root / DEFAULT_METADATA_PATH if metadata_path is None else metadata_path,
-        field="metadata_path",
-    )
-    resolved_pin = _existing_file(
-        root / DEFAULT_PIN_PATH if pin_path is None else pin_path,
-        field="pin_path",
-    )
-    receipt_value = (
-        bootstrap_receipt_path
-        if bootstrap_receipt_path is not None
-        else _required_environment_path(env, BOOTSTRAP_RECEIPT_ENV)
-    )
-    resolved_receipt = _existing_file(receipt_value, field="bootstrap_receipt_path")
-    policy = load_repository_policy(resolved_policy, metadata_path=resolved_metadata)
-    metadata = load_agent_metadata(resolved_metadata)
-    pin = load_shared_pin(resolved_pin)
-    receipt = read_bootstrap_receipt(resolved_receipt)
-    _validate_bootstrap_receipt(pin, receipt)
-    expected_metadata = (root / policy.metadata_path).resolve(strict=False)
-    if expected_metadata != resolved_metadata:
-        raise RuntimeIntegrationError(
-            "repository policy metadata_path does not match the loaded metadata file"
-        )
-    _validate_repository_environment(metadata, env)
-    principal = select_oidc_principal(metadata, role="deployment")
-    if principal.environment != deployment_environment:
-        raise RuntimeIntegrationError(
-            "deployment OIDC principal environment does not match the workflow environment"
-        )
-    variables = {
-        variable.alias: variable
-        for variable in metadata.oidc.workflow_variables
-    }
-    variable = variables.get(principal.client_id_variable)
-    if variable is None:
-        raise RuntimeIntegrationError(
-            "deployment OIDC principal does not reference a workflow variable"
-        )
-    if variable.scope != "environment" or variable.environment != deployment_environment:
-        raise RuntimeIntegrationError(
-            "deployment client ID must be an environment-scoped workflow variable"
-        )
-    configured_client_id = env.get(variable.name)
-    if env.get("GITHUB_ACTIONS", "").casefold() == "true" and not configured_client_id:
-        raise RuntimeIntegrationError(
-            f"GitHub environment variable {variable.name} is unavailable"
-        )
-    if configured_client_id and configured_client_id != principal.client_id:
-        raise RuntimeIntegrationError(
-            f"GitHub environment variable {variable.name} does not match trusted metadata"
-        )
-    selected_commit = _resolve_release_commit(root, release_commit)
-    selected_artifact_root = _deployment_artifact_root(
-        root,
-        environment=env,
-        explicit=artifact_root,
-    )
-    return DeploymentSettings(
-        repository_root=root,
-        policy=policy,
-        metadata=metadata,
-        pin=pin,
-        bootstrap_receipt=receipt,
-        release_commit=selected_commit,
-        artifact_root=selected_artifact_root,
-        deadline_seconds=load_deadline_seconds(
-            environment=env,
-            deadline_seconds=deadline_seconds,
-        ),
-        deployment_environment=deployment_environment,
-    )
-
-
-def create_deployment_handle(
-    settings: DeploymentSettings,
-    *,
-    environment: Mapping[str, str] | None = None,
-    require_freshness_check: bool = False,
-    credential_builder: Callable[..., object] = build_client_assertion_credential,
-    evaluation_backend_factory: Callable[..., AzureProjectsEvaluationBackend] = (
-        AzureProjectsEvaluationBackend
-    ),
-    foundry_client_factory: Callable[..., FoundryPocClient] = FoundryPocClient,
-) -> DeploymentHandle:
-    credential = credential_builder(
-        build_oidc_config(settings.metadata, role="deployment"),
-        environment=environment,
-    )
-    backend = evaluation_backend_factory(
-        project_endpoint=settings.metadata.project_endpoint,
-        credential=credential,
-    )
-    client = foundry_client_factory(
-        settings.metadata.project_endpoint,
-        credential,
-        evaluation_backend=backend,
-    )
-
-    def close() -> None:
-        client.close()
-        closer = getattr(credential, "close", None)
-        if callable(closer):
-            closer()
-
-    return DeploymentHandle(
-        settings=settings,
-        service=DeploymentService(
-            client=client,
-            policy=settings.policy,
-            metadata=settings.metadata,
-            deadline_seconds=settings.deadline_seconds,
-            freshness_check=(
-                deployment_freshness_check(
-                    repository=settings.metadata.repository_identity,
-                    branch=settings.metadata.default_branch,
-                    environment=environment,
-                )
-                if require_freshness_check
-                else None
-            ),
-        ),
-        close=close,
-    )
-
-
-def run_deployment_preflight(
-    settings: DeploymentSettings,
-    *,
-    environment: Mapping[str, str] | None = None,
-) -> DeploymentPreflight:
-    handle = create_deployment_handle(settings, environment=environment)
-    try:
-        principal = select_oidc_principal(settings.metadata, role="deployment")
-        return handle.service.preflight(
-            repository=settings.metadata.repository_identity,
-            release_commit=settings.release_commit,
-            deployment_environment=settings.deployment_environment,
-            deployment_client_id=principal.client_id,
-        )
-    finally:
-        handle.close()
-
-
-def publish_deployment(
-    settings: DeploymentSettings,
-    *,
-    environment: Mapping[str, str] | None = None,
-) -> DeploymentReceipt:
-    packaged = package_git_source(
-        settings.repository_root,
-        commit=settings.release_commit,
-        source_root=settings.policy.source_root,
-        work_root=settings.artifact_root,
-    )
-    handle = create_deployment_handle(
-        settings,
-        environment=environment,
-        require_freshness_check=True,
-    )
-    try:
-        return handle.service.publish(
-            repository=settings.metadata.repository_identity,
-            release_commit=settings.release_commit,
-            packaged=packaged,
-            repository_root=settings.repository_root,
-        )
-    finally:
-        handle.close()
 
 
 def load_registered_verification_settings(
@@ -2222,53 +1990,6 @@ def _existing_file(path: Path, *, field: str) -> Path:
     if not resolved.is_file():
         raise RuntimeIntegrationError(f"{field} must be a file")
     return resolved
-
-
-def _required_environment_path(
-    environment: Mapping[str, str],
-    name: str,
-) -> Path:
-    value = environment.get(name)
-    if not value:
-        raise RuntimeIntegrationError(f"{name} is required")
-    return Path(value)
-
-
-def _validate_bootstrap_receipt(
-    pin: SharedPin,
-    receipt: BootstrapReceipt,
-) -> None:
-    expected = (
-        (receipt.repository, pin.repository_url, "repository"),
-        (receipt.commit, pin.commit, "commit"),
-        (receipt.package_path, pin.package_path, "package_path"),
-        (receipt.lock_sha256, pin.uv_lock_sha256, "lock_sha256"),
-    )
-    for actual, trusted, field in expected:
-        if actual != trusted:
-            raise RuntimeIntegrationError(
-                f"bootstrap receipt {field} does not match the shared pin"
-            )
-    if not optimizer_skill_paths_match(receipt.skill_path, pin.skill_path):
-        raise RuntimeIntegrationError(
-            "bootstrap receipt skill_path does not match the shared pin"
-        )
-
-
-def _validate_repository_environment(
-    metadata: AgentMetadata,
-    environment: Mapping[str, str],
-) -> None:
-    repository = environment.get("GITHUB_REPOSITORY")
-    if repository is not None and repository != metadata.repository_identity:
-        raise RuntimeIntegrationError(
-            "GitHub repository does not match trusted agent metadata"
-        )
-    repository_id = environment.get("GITHUB_REPOSITORY_ID")
-    if repository_id is not None and repository_id != str(metadata.repository_id):
-        raise RuntimeIntegrationError(
-            "GitHub repository ID does not match trusted agent metadata"
-        )
 
 
 def _git_text(repository: Path, *arguments: str) -> str:

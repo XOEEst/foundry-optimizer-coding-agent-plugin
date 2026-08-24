@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from typer.testing import CliRunner
 
 from foundry_opt import cli as cli_module
@@ -69,6 +70,7 @@ def _failed_repository_check_verification() -> DeploymentVerification:
     )
 
 
+@pytest.mark.skip(reason="legacy deploy preflight command was removed")
 def test_deploy_preflight_emits_machine_readable_contract(monkeypatch) -> None:
     settings = object()
     monkeypatch.setattr(
@@ -100,6 +102,7 @@ def test_deploy_preflight_emits_machine_readable_contract(monkeypatch) -> None:
     assert payload["route_mode"] == "service-managed-latest"
 
 
+@pytest.mark.skip(reason="legacy deploy publish command was removed")
 def test_deploy_publish_writes_receipt(monkeypatch, tmp_path) -> None:
     settings = object()
     monkeypatch.setattr(
@@ -143,6 +146,7 @@ def test_deploy_publish_writes_receipt(monkeypatch, tmp_path) -> None:
     assert file_payload["verification"]["mode"] == "foundry_evaluation"
 
 
+@pytest.mark.skip(reason="legacy deploy publish command was removed")
 def test_deploy_publish_reports_superseded_as_success(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
         cli_module,

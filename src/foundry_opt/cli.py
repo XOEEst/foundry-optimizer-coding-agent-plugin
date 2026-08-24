@@ -26,16 +26,13 @@ from foundry_opt.repository_selection import (
     verify_issue_dataset_authority,
     verify_issue_evaluator_authority,
 )
+from foundry_opt.repository_contracts import RepositoryRegistry
+from foundry_opt.runtime_provenance import verify_runtime_checkout
 from foundry_opt.poc import runtime as poc_runtime
 from foundry_opt.poc.auth import (
     AuthError,
     build_client_assertion_credential,
     detect_github_actions_oidc,
-)
-from foundry_opt.distribution import (
-    load_shared_pin,
-    read_bootstrap_receipt,
-    verify_shared_checkout,
 )
 from foundry_opt.poc.candidate import CandidateError
 from foundry_opt.poc.config import (
@@ -49,19 +46,15 @@ from foundry_opt.poc.config import (
 )
 from foundry_opt.poc.controller import ControllerError, OptimizeJobController
 from foundry_opt.poc.deploy import (
-    DEFAULT_DEPLOYMENT_ENVIRONMENT,
     DEPLOYMENT_ROOT_ENV,
     DeploymentError,
     DeploymentGuardrailError,
     DeploymentPostPublishError,
     DeploymentRepositoryChecksError,
     DeploymentSupersededError,
-    load_deployment_settings,
     load_registered_deployment_settings,
     load_registered_verification_settings,
-    publish_deployment,
     publish_registered_deployment,
-    run_deployment_preflight,
     verify_registered_deployment,
 )
 from foundry_opt.poc.foundry import (
@@ -86,10 +79,10 @@ from foundry_opt.poc.github import (
 )
 from foundry_opt.poc.issue import IssueDocumentError, parse_issue_body
 from foundry_opt.poc.runtime import (
-    BOOTSTRAP_RECEIPT_ENV,
     BROKER_SOCKET_ENV,
     DEADLINE_SECONDS_ENV,
     DEFAULT_DEADLINE_SECONDS,
+    REGISTRY_PATH_ENV,
     RUNTIME_SIDECAR_FILENAME,
     STATE_ROOT_ENV,
     ControllerFoundryOperations,
@@ -131,7 +124,7 @@ app.add_typer(issue_app, name="issue")
 app.add_typer(job_app, name="job")
 app.add_typer(acceptance_app, name="acceptance")
 app.add_typer(deploy_app, name="deploy")
-_PIN_PATH = Path(".github/foundry-opt.lock.yml")
+_REGISTRY_PATH = Path(".foundry-opt/registry.yaml")
 _POLICY_PATH = Path(".github/foundry-optimizer.yaml")
 _METADATA_PATH = Path(".foundry/agent-metadata.yaml")
 _MAX_EVENT_BYTES = 1024 * 1024
@@ -265,7 +258,12 @@ def validate_config(
     """Validate the target repository contract and optional shared checkout."""
 
     root = _repository_root(repository)
-    pin = load_shared_pin(root / _PIN_PATH)
+    registry_path = Path(
+        os.environ.get("FOUNDRY_OPT_REGISTRY", root / _REGISTRY_PATH)
+    )
+    registry = RepositoryRegistry.from_document(
+        registry_path.read_text(encoding="utf-8")
+    )
     metadata = load_agent_metadata(root / _METADATA_PATH)
     policy = load_repository_policy(
         root / _POLICY_PATH,
@@ -276,8 +274,8 @@ def validate_config(
         metadata.repository_identity,
         metadata.repository_id,
     )
-    receipt = (
-        verify_shared_checkout(pin, shared_checkout)
+    checkout = (
+        verify_runtime_checkout(registry, shared_checkout)
         if shared_checkout is not None
         else None
     )
@@ -287,9 +285,9 @@ def validate_config(
             "allowed_models": list(policy.allowed_models),
             "metadata_path": policy.metadata_path,
             "repository": metadata.repository_identity,
-            "shared_commit": pin.commit,
-            "shared_receipt_sha256": (
-                receipt.receipt_sha256 if receipt is not None else None
+            "shared_commit": registry.distribution.pin,
+            "shared_uv_lock_sha256": (
+                checkout.uv_lock_sha256 if checkout is not None else None
             ),
             "source_root": policy.source_root,
             "status": "valid",
@@ -302,10 +300,15 @@ def preflight(
     repository: Path = typer.Option(Path("."), "--repository"),
     offline: bool = typer.Option(False, "--offline"),
 ) -> None:
-    """Verify bootstrap, policy, metadata, OIDC, and broker prerequisites."""
+    """Verify policy, metadata, registry, OIDC, and broker prerequisites."""
 
     root = _repository_root(repository)
-    pin = load_shared_pin(root / _PIN_PATH)
+    registry_path = Path(
+        os.environ.get("FOUNDRY_OPT_REGISTRY", root / _REGISTRY_PATH)
+    )
+    registry = RepositoryRegistry.from_document(
+        registry_path.read_text(encoding="utf-8")
+    )
     metadata = load_agent_metadata(root / _METADATA_PATH)
     policy = load_repository_policy(
         root / _POLICY_PATH,
@@ -317,10 +320,6 @@ def preflight(
         metadata.repository_id,
     )
 
-    receipt_path = _required_environment_path(
-        "FOUNDRY_OPT_BOOTSTRAP_RECEIPT",
-        offline=offline,
-    )
     broker_socket = _required_environment_path(
         "FOUNDRY_OPT_BROKER_SOCKET",
         offline=offline,
@@ -329,13 +328,6 @@ def preflight(
         "FOUNDRY_OPT_STATE_ROOT",
         offline=offline,
     )
-    receipt = read_bootstrap_receipt(receipt_path) if receipt_path else None
-    if receipt is not None and (
-        receipt.repository != pin.repository_url
-        or receipt.commit != pin.commit
-        or receipt.lock_sha256 != pin.uv_lock_sha256
-    ):
-        raise typer.BadParameter("bootstrap receipt does not match the shared pin")
     if not offline and not detect_github_actions_oidc():
         raise typer.BadParameter("GitHub Actions OIDC is unavailable")
     if broker_socket is not None and not broker_socket.exists():
@@ -368,58 +360,10 @@ def preflight(
             ),
             "oidc": not offline,
             "repository": metadata.repository_identity,
-            "shared_commit": pin.commit,
+            "shared_commit": registry.distribution.pin,
             "status": "ready",
         }
     )
-
-
-@deploy_app.command("preflight")
-def deploy_preflight(
-    repository: Path = typer.Option(Path("."), "--repository"),
-    release_commit: str | None = typer.Option(None, "--release-commit"),
-    policy_path: Path | None = typer.Option(None, "--policy"),
-    metadata_path: Path | None = typer.Option(None, "--metadata"),
-    pin_path: Path | None = typer.Option(None, "--pin"),
-    bootstrap_receipt_path: Path | None = typer.Option(
-        None,
-        "--bootstrap-receipt",
-        envvar=BOOTSTRAP_RECEIPT_ENV,
-    ),
-    artifact_root: Path | None = typer.Option(
-        None,
-        "--artifact-root",
-        envvar=DEPLOYMENT_ROOT_ENV,
-    ),
-    deployment_environment: str = typer.Option(
-        DEFAULT_DEPLOYMENT_ENVIRONMENT,
-        "--environment",
-    ),
-    deadline_seconds: float = typer.Option(
-        DEFAULT_DEADLINE_SECONDS,
-        "--deadline-seconds",
-        envvar=DEADLINE_SECONDS_ENV,
-    ),
-) -> None:
-    """Validate the exact merge commit and service-managed latest deployment mode."""
-
-    try:
-        settings = load_deployment_settings(
-            repository,
-            environment=os.environ,
-            release_commit=release_commit,
-            policy_path=policy_path,
-            metadata_path=metadata_path,
-            pin_path=pin_path,
-            bootstrap_receipt_path=bootstrap_receipt_path,
-            artifact_root=artifact_root,
-            deadline_seconds=deadline_seconds,
-            deployment_environment=deployment_environment,
-        )
-        result = run_deployment_preflight(settings, environment=os.environ)
-        _echo_json(result.model_dump(mode="json"))
-    except _JOB_COMMAND_ERRORS as error:
-        _emit_blocked(error)
 
 
 @deploy_app.command("plan")
@@ -459,106 +403,6 @@ def deploy_plan(
             _echo_json({"status": "planned", **payload})
         except _JOB_COMMAND_ERRORS as error:
             _emit_blocked(error)
-
-
-@deploy_app.command("publish")
-def deploy_publish(
-    repository: Path = typer.Option(Path("."), "--repository"),
-    release_commit: str | None = typer.Option(None, "--release-commit"),
-    receipt: Path | None = typer.Option(None, "--receipt"),
-    policy_path: Path | None = typer.Option(None, "--policy"),
-    metadata_path: Path | None = typer.Option(None, "--metadata"),
-    pin_path: Path | None = typer.Option(None, "--pin"),
-    bootstrap_receipt_path: Path | None = typer.Option(
-        None,
-        "--bootstrap-receipt",
-        envvar=BOOTSTRAP_RECEIPT_ENV,
-    ),
-    artifact_root: Path | None = typer.Option(
-        None,
-        "--artifact-root",
-        envvar=DEPLOYMENT_ROOT_ENV,
-    ),
-    deployment_environment: str = typer.Option(
-        DEFAULT_DEPLOYMENT_ENVIRONMENT,
-        "--environment",
-    ),
-    deadline_seconds: float = typer.Option(
-        DEFAULT_DEADLINE_SECONDS,
-        "--deadline-seconds",
-        envvar=DEADLINE_SECONDS_ENV,
-    ),
-) -> None:
-    """Validate one exact source ZIP as a draft, then publish a regular version."""
-
-    try:
-        settings = load_deployment_settings(
-            repository,
-            environment=os.environ,
-            release_commit=release_commit,
-            policy_path=policy_path,
-            metadata_path=metadata_path,
-            pin_path=pin_path,
-            bootstrap_receipt_path=bootstrap_receipt_path,
-            artifact_root=artifact_root,
-            deadline_seconds=deadline_seconds,
-            deployment_environment=deployment_environment,
-        )
-        result = publish_deployment(settings, environment=os.environ)
-        payload = result.model_dump(mode="json")
-        if receipt is not None:
-            _write_json_document(receipt, payload)
-        _echo_json(payload)
-    except DeploymentGuardrailError as error:
-        payload = {
-            "error": _redact_text(str(error)) or "deployment guardrails failed",
-            "evaluation_link": error.evaluation_link,
-            "guardrails": [
-                item.model_dump(mode="json")
-                for item in error.guardrails
-            ],
-            "status": "blocked",
-            "verification": error.verification.model_dump(mode="json"),
-        }
-        if receipt is not None:
-            _write_json_document(receipt, payload)
-        _echo_json(payload)
-        raise typer.Exit(code=2)
-    except DeploymentSupersededError as error:
-        payload = {
-            "current_main_commit": error.current_main_commit,
-            "published": False,
-            "release_commit": error.release_commit,
-            "status": "superseded",
-        }
-        if receipt is not None:
-            _write_json_document(receipt, payload)
-        _echo_json(payload)
-    except DeploymentRepositoryChecksError as error:
-        payload = {
-            "error": (
-                _redact_text(str(error))
-                or "deployment repository checks did not all pass"
-            ),
-            "status": "blocked",
-            "verification": error.verification.model_dump(mode="json"),
-        }
-        if receipt is not None:
-            _write_json_document(receipt, payload)
-        _echo_json(payload)
-        raise typer.Exit(code=2)
-    except DeploymentPostPublishError as error:
-        payload = {
-            "error": _redact_text(str(error)) or "post-publish verification failed",
-            "published_version": error.reference.version,
-            "status": "blocked",
-        }
-        if receipt is not None:
-            _write_json_document(receipt, payload)
-        _echo_json(payload)
-        raise typer.Exit(code=2)
-    except _JOB_COMMAND_ERRORS as error:
-        _emit_blocked(error)
 
 
 @deploy_app.command("verify-registered")
@@ -922,11 +766,10 @@ def job_start(
     base_commit: str | None = typer.Option(None, "--base-commit"),
     policy_path: Path | None = typer.Option(None, "--policy"),
     metadata_path: Path | None = typer.Option(None, "--metadata"),
-    pin_path: Path | None = typer.Option(None, "--pin"),
-    bootstrap_receipt_path: Path | None = typer.Option(
+    registry_path: Path | None = typer.Option(
         None,
-        "--bootstrap-receipt",
-        envvar=BOOTSTRAP_RECEIPT_ENV,
+        "--registry",
+        envvar=REGISTRY_PATH_ENV,
     ),
     broker_socket_path: Path | None = typer.Option(
         None,
@@ -953,8 +796,7 @@ def job_start(
             base_commit=base_commit,
             policy_path=policy_path,
             metadata_path=metadata_path,
-            pin_path=pin_path,
-            bootstrap_receipt_path=bootstrap_receipt_path,
+            registry_path=registry_path,
             broker_socket_path=broker_socket_path,
             state_root=state_root,
             deadline_seconds=deadline_seconds,
@@ -1037,11 +879,10 @@ def job_handoff(
     job_id: str | None = typer.Option(None, "--job-id"),
     policy_path: Path | None = typer.Option(None, "--policy"),
     metadata_path: Path | None = typer.Option(None, "--metadata"),
-    pin_path: Path | None = typer.Option(None, "--pin"),
-    bootstrap_receipt_path: Path | None = typer.Option(
+    registry_path: Path | None = typer.Option(
         None,
-        "--bootstrap-receipt",
-        envvar=BOOTSTRAP_RECEIPT_ENV,
+        "--registry",
+        envvar=REGISTRY_PATH_ENV,
     ),
     broker_socket_path: Path | None = typer.Option(
         None,
@@ -1066,8 +907,7 @@ def job_handoff(
             job_id=job_id,
             policy_path=policy_path,
             metadata_path=metadata_path,
-            pin_path=pin_path,
-            bootstrap_receipt_path=bootstrap_receipt_path,
+            registry_path=registry_path,
             broker_socket_path=broker_socket_path,
             state_root=state_root,
             deadline_seconds=deadline_seconds,
@@ -1118,11 +958,10 @@ def job_complete(
     job_id: str | None = typer.Option(None, "--job-id"),
     policy_path: Path | None = typer.Option(None, "--policy"),
     metadata_path: Path | None = typer.Option(None, "--metadata"),
-    pin_path: Path | None = typer.Option(None, "--pin"),
-    bootstrap_receipt_path: Path | None = typer.Option(
+    registry_path: Path | None = typer.Option(
         None,
-        "--bootstrap-receipt",
-        envvar=BOOTSTRAP_RECEIPT_ENV,
+        "--registry",
+        envvar=REGISTRY_PATH_ENV,
     ),
     broker_socket_path: Path | None = typer.Option(
         None,
@@ -1147,8 +986,7 @@ def job_complete(
             job_id=job_id,
             policy_path=policy_path,
             metadata_path=metadata_path,
-            pin_path=pin_path,
-            bootstrap_receipt_path=bootstrap_receipt_path,
+            registry_path=registry_path,
             broker_socket_path=broker_socket_path,
             state_root=state_root,
             deadline_seconds=deadline_seconds,
@@ -1198,11 +1036,10 @@ def job_finish(
     ),
     policy_path: Path | None = typer.Option(None, "--policy"),
     metadata_path: Path | None = typer.Option(None, "--metadata"),
-    pin_path: Path | None = typer.Option(None, "--pin"),
-    bootstrap_receipt_path: Path | None = typer.Option(
+    registry_path: Path | None = typer.Option(
         None,
-        "--bootstrap-receipt",
-        envvar=BOOTSTRAP_RECEIPT_ENV,
+        "--registry",
+        envvar=REGISTRY_PATH_ENV,
     ),
     broker_socket_path: Path | None = typer.Option(
         None,
@@ -1235,8 +1072,7 @@ def job_finish(
             job_id=job_id,
             policy_path=policy_path,
             metadata_path=metadata_path,
-            pin_path=pin_path,
-            bootstrap_receipt_path=bootstrap_receipt_path,
+            registry_path=registry_path,
             broker_socket_path=broker_socket_path,
             state_root=state_root,
             deadline_seconds=deadline_seconds,
@@ -1274,11 +1110,10 @@ def job_resume(
     job_id: str | None = typer.Option(None, "--job-id"),
     policy_path: Path | None = typer.Option(None, "--policy"),
     metadata_path: Path | None = typer.Option(None, "--metadata"),
-    pin_path: Path | None = typer.Option(None, "--pin"),
-    bootstrap_receipt_path: Path | None = typer.Option(
+    registry_path: Path | None = typer.Option(
         None,
-        "--bootstrap-receipt",
-        envvar=BOOTSTRAP_RECEIPT_ENV,
+        "--registry",
+        envvar=REGISTRY_PATH_ENV,
     ),
     broker_socket_path: Path | None = typer.Option(
         None,
@@ -1303,8 +1138,7 @@ def job_resume(
             job_id=job_id,
             policy_path=policy_path,
             metadata_path=metadata_path,
-            pin_path=pin_path,
-            bootstrap_receipt_path=bootstrap_receipt_path,
+            registry_path=registry_path,
             broker_socket_path=broker_socket_path,
             state_root=state_root,
             deadline_seconds=deadline_seconds,
@@ -1334,11 +1168,10 @@ def acceptance_smoke(
     cleanup: bool = typer.Option(True, "--cleanup/--no-cleanup"),
     policy_path: Path | None = typer.Option(None, "--policy"),
     metadata_path: Path | None = typer.Option(None, "--metadata"),
-    pin_path: Path | None = typer.Option(None, "--pin"),
-    bootstrap_receipt_path: Path | None = typer.Option(
+    registry_path: Path | None = typer.Option(
         None,
-        "--bootstrap-receipt",
-        envvar=BOOTSTRAP_RECEIPT_ENV,
+        "--registry",
+        envvar=REGISTRY_PATH_ENV,
     ),
     broker_socket_path: Path | None = typer.Option(
         None,
@@ -1374,8 +1207,7 @@ def acceptance_smoke(
             job_id=acceptance_job_id,
             policy_path=policy_path,
             metadata_path=metadata_path,
-            pin_path=pin_path,
-            bootstrap_receipt_path=bootstrap_receipt_path,
+            registry_path=registry_path,
             broker_socket_path=broker_socket_path,
             state_root=acceptance_state_root,
         )
@@ -1446,8 +1278,7 @@ def _prepare_start_runtime(
     base_commit: str | None,
     policy_path: Path | None,
     metadata_path: Path | None,
-    pin_path: Path | None,
-    bootstrap_receipt_path: Path | None,
+    registry_path: Path | None,
     broker_socket_path: Path | None,
     state_root: Path | None,
     deadline_seconds: float,
@@ -1466,8 +1297,7 @@ def _prepare_start_runtime(
         job_id=start.job_id,
         policy_path=policy_path,
         metadata_path=metadata_path,
-        pin_path=pin_path,
-        bootstrap_receipt_path=bootstrap_receipt_path,
+        registry_path=registry_path,
         broker_socket_path=broker_socket_path,
         state_root=state_root,
     )
@@ -1535,8 +1365,7 @@ def _load_existing_runtime(
     job_id: str | None,
     policy_path: Path | None,
     metadata_path: Path | None,
-    pin_path: Path | None,
-    bootstrap_receipt_path: Path | None,
+    registry_path: Path | None,
     broker_socket_path: Path | None,
     state_root: Path | None,
     deadline_seconds: float,
@@ -1555,8 +1384,7 @@ def _load_existing_runtime(
         job_id=resolved_job_id,
         policy_path=policy_path,
         metadata_path=metadata_path,
-        pin_path=pin_path,
-        bootstrap_receipt_path=bootstrap_receipt_path,
+        registry_path=registry_path,
         broker_socket_path=broker_socket_path,
         state_root=state_root,
     )
