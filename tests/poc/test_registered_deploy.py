@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -179,6 +178,14 @@ def _registered_repository(
             encoding="utf-8"
         )
     )
+    registry["schema_version"] = 2
+    registry["distribution"].update(
+        {
+            "package_path": ".",
+            "uv_lock_sha256": "b" * 64,
+            "optimizer_skill_path": "plugins/foundry-agent-optimizer",
+        }
+    )
     registry["identity"] = {
         "schema_version": 1,
         "kind": "user_assigned_managed_identity",
@@ -204,63 +211,6 @@ def _registered_repository(
         ),
         encoding="utf-8",
     )
-    registry_bytes = (repository / ".foundry-opt" / "registry.yaml").read_bytes()
-    sidecar_bytes = (
-        repository / "agent" / ".foundry" / "foundry-opt.yaml"
-    ).read_bytes()
-    (repository / ".foundry-opt" / "bootstrap.lock.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "engine": "repository-engine",
-                "runtime_repository": registry["distribution"]["repository"],
-                "channel": "repository",
-                "runtime_commit": registry["distribution"]["pin"],
-                "managed_files": [
-                    {
-                        "schema_version": 1,
-                        "path": ".foundry-opt/registry.yaml",
-                        "ownership_mode": "owned",
-                        "owner_scope": "repository",
-                        "template_id": "registry",
-                        "template_base_sha256": hashlib.sha256(
-                            registry_bytes
-                        ).hexdigest(),
-                        "applied_sha256": hashlib.sha256(
-                            registry_bytes
-                        ).hexdigest(),
-                        "semantic_patch_id": None,
-                    },
-                    {
-                        "schema_version": 1,
-                        "path": "agent/.foundry/foundry-opt.yaml",
-                        "ownership_mode": "owned",
-                        "owner_scope": "agent",
-                        "template_id": "sidecar",
-                        "template_base_sha256": hashlib.sha256(
-                            sidecar_bytes
-                        ).hexdigest(),
-                        "applied_sha256": hashlib.sha256(
-                            sidecar_bytes
-                        ).hexdigest(),
-                        "semantic_patch_id": None,
-                    },
-                ],
-                "github_environments": [],
-                "cloud_resources": [],
-                "sidecar_paths": ["agent/.foundry/foundry-opt.yaml"],
-                "last_activation": {
-                    "schema_version": 1,
-                    "outcome": "succeeded",
-                    "detail": None,
-                },
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ),
-        encoding="utf-8",
-    )
-
     _git(repository, "init")
     _git(repository, "config", "user.email", "test@example.invalid")
     _git(repository, "config", "user.name", "Test")

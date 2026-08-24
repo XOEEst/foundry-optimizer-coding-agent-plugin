@@ -12,10 +12,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from foundry_opt.canonical import canonical_sha256
-from foundry_opt.repository_contracts import BootstrapLock, RootRegistry
+from foundry_opt.repository_contracts import RootRegistry
 from foundry_opt.repository_selection import (
     RegistrySelection,
     resolve_registry_selection,
@@ -1115,15 +1115,8 @@ def _load_registered_settings(
 
     registry_path = root / ".foundry-opt" / "registry.yaml"
     sidecar_path = root / selection.config_path
-    lock_path = root / ".foundry-opt" / "bootstrap.lock.json"
     live_registry_bytes = registry_path.read_bytes()
     live_sidecar_bytes = sidecar_path.read_bytes()
-    try:
-        live_lock_bytes = lock_path.read_bytes()
-    except OSError as error:
-        raise RuntimeIntegrationError(
-            "registered deployment managed lock is missing"
-        ) from error
     if (
         live_selection.config_path != selection.config_path
         or hashlib.sha256(live_registry_bytes).hexdigest()
@@ -1149,11 +1142,6 @@ def _load_registered_settings(
         commit=release_commit,
         relative_path=selection.config_path,
     )
-    lock_bytes = read_git_file(
-        root,
-        commit=release_commit,
-        relative_path=".foundry-opt/bootstrap.lock.json",
-    )
     if _normalized_text_bytes(live_registry_bytes) != _normalized_text_bytes(
         registry_bytes
     ):
@@ -1166,48 +1154,11 @@ def _load_registered_settings(
         raise RuntimeIntegrationError(
             "registered deployment sidecar does not match the exact source commit"
         )
-    if _normalized_text_bytes(live_lock_bytes) != _normalized_text_bytes(
-        lock_bytes
-    ):
-        raise RuntimeIntegrationError(
-            "registered deployment managed lock does not match the exact source commit"
-        )
     registry = RootRegistry.from_document(registry_bytes.decode("utf-8"))
-    try:
-        lock = BootstrapLock.model_validate_json(lock_bytes)
-    except ValidationError as error:
+    if not registry.has_exact_runtime_provenance:
         raise RuntimeIntegrationError(
-            "registered deployment managed lock is invalid"
-        ) from error
-    if (
-        lock.runtime_repository != registry.distribution.repository
-        or lock.runtime_commit != registry.distribution.pin
-    ):
-        raise RuntimeIntegrationError(
-            "registered deployment lock and distribution pin do not match"
+            "registered deployment requires registry v2 exact runtime provenance"
         )
-    managed = {entry.path: entry for entry in lock.managed_files}
-    for path, live_content, committed_content in (
-        (
-            ".foundry-opt/registry.yaml",
-            live_registry_bytes,
-            registry_bytes,
-        ),
-        (
-            selection.config_path,
-            live_sidecar_bytes,
-            sidecar_bytes,
-        ),
-    ):
-        entry = managed.get(path)
-        accepted_hashes = {
-            hashlib.sha256(live_content).hexdigest(),
-            hashlib.sha256(committed_content).hexdigest(),
-        }
-        if entry is None or entry.applied_sha256 not in accepted_hashes:
-            raise RuntimeIntegrationError(
-                f"registered deployment managed digest does not match: {path}"
-            )
     if registry.github.deployment_environment != sidecar.deployment.environment:
         raise RuntimeIntegrationError(
             "registry and sidecar deployment environments do not match"
