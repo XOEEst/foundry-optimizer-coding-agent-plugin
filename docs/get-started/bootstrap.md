@@ -7,6 +7,10 @@ say:
 Use /foundry-bootstrap to bootstrap this repository.
 ```
 
+A published archive is optional when developing from a source checkout. The
+skill derives provenance from its own exact Git commit and proceeds
+automatically when that commit is remotely fetchable.
+
 ## Before approval
 
 The skill performs read-only inspection:

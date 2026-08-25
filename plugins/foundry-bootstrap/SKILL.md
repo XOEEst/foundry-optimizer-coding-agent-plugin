@@ -34,9 +34,30 @@ evaluation onboarding.
 
 ## Inputs
 
-1. Read [release.json](release.json). In a published archive it identifies the
-   exact `foundry-opt` repository, commit, package path, `uv.lock` digest, and
-   optimizer skill path. In a source checkout its values are placeholders.
+1. Resolve exact retained-runtime provenance:
+   - When [release.json](release.json) contains concrete values, use its
+     repository, commit, package path, `uv.lock` digest, and optimizer skill
+     path.
+   - When it contains `__...__` placeholders, derive provenance from the
+     skill's own Git checkout: canonical `origin` URL, exact `HEAD`, package
+     root relative to the checkout, SHA-256 of that package root's `uv.lock`,
+     and the optimizer skill path relative to the checkout.
+   - A published archive is not required for a source checkout. Prove that a
+     clean temporary checkout can fetch the exact commit before using it:
+
+     ```text
+     git init <temporary-directory>
+     git -C <temporary-directory> remote add origin <repository>
+     git -C <temporary-directory> fetch --depth=1 origin <commit>
+     ```
+
+     Require `FETCH_HEAD` to equal the derived commit and verify the expected
+     package, lock file, and optimizer skill exist there. A pushed branch or
+     tag is sufficient; a GitHub Release is optional.
+   - If the derived commit is not remotely fetchable, stop with its exact
+     repository, commit, and lock digest plus the instruction to push that
+     commit or install a published archive. Do not ask the owner to supply
+     runtime provenance or choose among provenance sources.
 2. Read all files under [references](references/).
 3. Use files under [templates](templates/) as editable starting points, not as
    blind replacements.
@@ -74,6 +95,8 @@ Record the sources actually used in the bootstrap report.
 
 - Confirm the repository root, current branch, `HEAD`, worktree status, remotes,
   default branch, and GitHub repository identity.
+- Resolve and verify retained-runtime provenance from `release.json` or the
+  skill's source checkout before rendering repository contracts.
 - Stop before planning if unrelated local changes overlap a proposed file or
   prevent an exact clean deployment commit.
 - Run `git check-ignore -v --no-index` for every planned registry, report,

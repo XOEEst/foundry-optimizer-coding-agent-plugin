@@ -24,7 +24,8 @@ shows a fresh exact diff and asks again.
 ## Expected result
 
 - `.foundry-opt/registry.yaml` is version 2 and contains exact `foundry-opt`
-  provenance from the published skill's `release.json`.
+  provenance from the published skill or its remotely fetchable source
+  checkout.
 - Each selected agent has a version 2 sidecar.
 - Existing evaluation bundles and lineage remain unchanged; bootstrap creates no
   evaluation assets.

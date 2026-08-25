@@ -12,12 +12,12 @@ explicitly patches them. Set:
 ```yaml
 schema_version: 2
 distribution:
-  repository: <release.json repository>
+  repository: <resolved runtime repository>
   channel: reviewed
-  pin: <release.json commit>
-  package_path: <release.json package_path>
-  uv_lock_sha256: <release.json uv_lock_sha256>
-  optimizer_skill_path: <release.json optimizer_skill_path>
+  pin: <resolved exact runtime commit>
+  package_path: <resolved package path>
+  uv_lock_sha256: <resolved uv.lock SHA-256>
+  optimizer_skill_path: <resolved optimizer skill path>
 ```
 
 Retain `distribution.schema_version: 1`. Validate the complete result with
