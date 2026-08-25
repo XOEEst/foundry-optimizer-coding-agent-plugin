@@ -111,15 +111,17 @@ def test_bootstrap_skill_resolves_ignored_contract_paths_before_approval() -> No
     assert "git add -f" in combined
 
 
-def test_source_checkout_derives_runtime_provenance_without_release_archive() -> None:
+def test_local_skill_checkout_reuses_remote_runtime_provenance() -> None:
     _, body = _parse_frontmatter(BOOTSTRAP_ROOT / "SKILL.md")
     normalized = " ".join(body.split())
 
     assert "A published archive is not required" in normalized
-    assert "derive provenance from the skill's own Git checkout" in normalized
+    assert "The bootstrap skill directory itself may remain local" in normalized
+    assert "configured upstream ref" in normalized
+    assert "Do not require the skill checkout's `HEAD` to be remotely reachable" in normalized
     assert "fetch --depth=1 origin <commit>" in body
     assert "Do not ask the owner to supply runtime provenance" in normalized
-    assert "remotely fetchable" in normalized
+    assert "compatible runtime commit" in normalized
 
 
 def test_bootstrap_tree_is_exactly_static_content() -> None:

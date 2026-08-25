@@ -8,8 +8,9 @@ Use /foundry-bootstrap to bootstrap this repository.
 ```
 
 A published archive is optional when developing from a source checkout. The
-skill derives provenance from its own exact Git commit and proceeds
-automatically when that commit is remotely fetchable.
+skill folder may remain local: `/skills reload` picks up instruction and
+template edits. The skill separately reuses a compatible runtime commit from
+its configured upstream, so only changes to shared runtime code require a push.
 
 ## Before approval
 

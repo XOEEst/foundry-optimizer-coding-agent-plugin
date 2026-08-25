@@ -12,11 +12,13 @@ The bootstrap skill is a static folder/ZIP. Standard release automation:
 
 The skill contains no Python bridge, runtime installer, or skill lock.
 
-For source development, a release archive is optional. When `release.json`
-contains placeholders, the skill derives the runtime repository, exact commit,
-package path, `uv.lock` digest, and optimizer skill path from its own checkout.
-It verifies that a clean temporary clone can fetch that exact commit. A pushed
-branch or tag therefore supports bootstrap without creating a GitHub Release.
+For source development, a release archive is optional and the bootstrap skill
+folder does not need to be pushed. When `release.json` contains placeholders,
+the skill selects a compatible commit from its configured upstream or another
+remote ancestor, then derives the package path, `uv.lock` digest, and optimizer
+skill path from a clean fetch of that commit. Local instruction and template
+edits take effect after `/skills reload`; only new shared runtime code needs a
+remotely reachable commit.
 
 ## Retained runtime provenance
 

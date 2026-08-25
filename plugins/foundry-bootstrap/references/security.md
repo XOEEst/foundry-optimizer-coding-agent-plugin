@@ -2,9 +2,10 @@
 
 ## Source
 
-- Treat concrete `release.json` values or verified, remotely fetchable source
-  checkout values as provenance for the `foundry-opt` runtime and optimizer
-  skill only.
+- Treat concrete `release.json` values or a verified, remotely fetchable
+  upstream runtime commit as provenance for the `foundry-opt` runtime and
+  optimizer skill only. Local bootstrap skill instructions and templates are
+  not runtime provenance.
 - Verify the runtime commit and `uv.lock` digest before installing the
   optimizer workflow dependencies.
 - Deploy only from the clean local commit shown in the combined approval.

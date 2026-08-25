@@ -38,12 +38,19 @@ evaluation onboarding.
    - When [release.json](release.json) contains concrete values, use its
      repository, commit, package path, `uv.lock` digest, and optimizer skill
      path.
-   - When it contains `__...__` placeholders, derive provenance from the
-     skill's own Git checkout: canonical `origin` URL, exact `HEAD`, package
-     root relative to the checkout, SHA-256 of that package root's `uv.lock`,
-     and the optimizer skill path relative to the checkout.
+   - When it contains `__...__` placeholders, resolve the retained runtime
+     independently from the bootstrap skill files. The bootstrap skill
+     directory itself may remain local, include unpushed instruction or
+     template edits, and be refreshed with `/skills reload`.
+   - Prefer the skill repository's configured upstream ref as the runtime
+     candidate. If no upstream exists, select the nearest remote-ref tip that
+     is an ancestor of the local checkout. Require the candidate to contain the
+     package, `uv.lock`, registry v2 contract, and optimizer skill used by the
+     rendered workflows. Do not require the skill checkout's `HEAD` to be
+     remotely reachable.
    - A published archive is not required for a source checkout. Prove that a
-     clean temporary checkout can fetch the exact commit before using it:
+     clean temporary checkout can fetch the compatible runtime commit before
+     using it:
 
      ```text
      git init <temporary-directory>
@@ -51,12 +58,13 @@ evaluation onboarding.
      git -C <temporary-directory> fetch --depth=1 origin <commit>
      ```
 
-     Require `FETCH_HEAD` to equal the derived commit and verify the expected
-     package, lock file, and optimizer skill exist there. A pushed branch or
-     tag is sufficient; a GitHub Release is optional.
-   - If the derived commit is not remotely fetchable, stop with its exact
-     repository, commit, and lock digest plus the instruction to push that
-     commit or install a published archive. Do not ask the owner to supply
+     Require `FETCH_HEAD` to equal the selected runtime commit. Compute the
+     package path, `uv.lock` SHA-256, and optimizer skill path from that fetched
+     tree, not from unpushed local files. A pushed runtime branch or tag is
+     sufficient; a GitHub Release is optional.
+   - If no compatible runtime commit is remotely fetchable, stop with the
+     inspected repository and refs plus the instruction for the plugin
+     maintainer to publish a compatible runtime. Do not ask the owner to supply
      runtime provenance or choose among provenance sources.
 2. Read all files under [references](references/).
 3. Use files under [templates](templates/) as editable starting points, not as
