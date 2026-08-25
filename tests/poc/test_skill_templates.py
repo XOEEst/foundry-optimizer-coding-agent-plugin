@@ -111,6 +111,7 @@ def test_skill_and_tenzing_attribution_stay_in_sync() -> None:
     assert "early draft pull request" in skill
     assert "separate `foundry-bootstrap` skill" in skill
     assert "deployable winning patch" in skill
+    assert "definition-scoped inline criteria" in skill
 
     assert "redacted, idempotent candidate update to the original issue" in adapter
     assert "fresh baseline and current best" in adapter

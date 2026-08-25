@@ -53,6 +53,29 @@ This is preservation, not onboarding. Do not enumerate, create, update, or run
 evaluation assets. If a preserved reference cannot be represented by the v2
 schema, stop and report the exact incompatibility.
 
+## Definition-scoped inline criteria
+
+Foundry evaluation definitions may contain inline criteria such as
+`StringCheck` entries. Their exact criterion IDs can be definition-scoped
+tokens such as `policy_coverage_<uuid>` rather than evaluator resource URIs.
+These are valid persisted evaluator identifiers because the immutable
+development and validating definitions provide their scope.
+
+When development and validating definitions use different exact IDs for the
+same criteria:
+
+- preserve the development IDs, in definition order, in
+  `verification.bundle.development_evaluator_ids`
+- preserve the validating IDs, in definition order, in
+  `verification.bundle.validating_evaluator_ids`
+- build the default objective in development-definition order
+- retain immutable evaluator URIs unchanged in both lists
+- include every embedded criterion, including hard guardrails, exactly once
+
+Do not replace inline IDs with invented evaluator URIs, drop them, or append a
+hard-guardrail alias when that guardrail is already embedded in the explicit
+split evaluator lists.
+
 ## Existing v2 files
 
 Patch only values justified by current repository or cloud evidence. Preserve

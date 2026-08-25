@@ -40,6 +40,11 @@ runtime/protocol settings, Foundry target, model policy, guardrails,
 deployment settings, repository checks, and any existing default evaluation
 bundle.
 
+Evaluation bundles may preserve exact definition-scoped inline criterion IDs.
+When development and validating definitions use different IDs, the bundle
+stores `development_evaluator_ids` and `validating_evaluator_ids` separately;
+immutable evaluator URIs remain unchanged.
+
 Bootstrap preserves existing bundles but does not generate new evaluation
 assets.
 

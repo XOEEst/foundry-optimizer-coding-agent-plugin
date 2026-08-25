@@ -36,6 +36,11 @@ VersionedEvaluatorUri = Annotated[str, StringConstraints(pattern=r"^azureai://ac
 RegistryEvaluatorId = Annotated[str, StringConstraints(pattern=r"^azureml://registries/[^/]+/evaluators/[^/]+/versions/[^/]+$")]
 BuiltInEvaluatorId = Annotated[str, StringConstraints(pattern=r"^azureai://built-in/evaluators/[^/]+$")]
 EvaluatorIdentifier = VersionedEvaluatorUri | BuiltInEvaluatorId | RegistryEvaluatorId
+DefinitionScopedEvaluatorId = Annotated[
+    str,
+    StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$"),
+]
+PersistedEvaluatorIdentifier = EvaluatorIdentifier | DefinitionScopedEvaluatorId
 EvaluationDefinitionId = Annotated[str, StringConstraints(pattern=r"^(?:[A-Za-z0-9][A-Za-z0-9._-]*|azureai://accounts/[^/]+/projects/[^/]+/evaluationDefinitions/[^/]+/versions/[^/]+)$")]
 ApplyPhase = Literal["repository", "github", "azure", "evaluations"]
 OperationStage = Literal["planned", "applying", "verifying", "completed", "failed", "compensation_required"]
@@ -113,6 +118,67 @@ def _validate_weight(value: float | None, *, field: str) -> float | None:
     if not math.isfinite(value) or value <= 0:
         raise BootstrapConfigError(f"{field} must be finite and positive")
     return value
+
+
+def _normalized_evaluator_aliases(evaluator_id: str) -> tuple[str, ...]:
+    candidates = [evaluator_id]
+    segments = [segment for segment in evaluator_id.split('/') if segment]
+    if 'versions' in segments:
+        version_index = segments.index('versions')
+        if version_index >= 1:
+            candidates.append(segments[version_index - 1])
+    elif segments:
+        candidates.append(segments[-1])
+    aliases: list[str] = []
+    for candidate in candidates:
+        normalized = re.sub(r'[^a-z0-9]+', '_', candidate.casefold()).strip('_')
+        if not normalized:
+            continue
+        aliases.append(normalized)
+        for prefix in ('builtin_', 'evaluator_'):
+            if normalized.startswith(prefix):
+                aliases.append(normalized[len(prefix):])
+    return tuple(dict.fromkeys(aliases))
+
+
+def _evaluator_id_covers_guardrail(evaluator_id: str, guardrail_name: str) -> bool:
+    normalized_guardrail = re.sub(
+        r'[^a-z0-9]+',
+        '_',
+        guardrail_name.casefold(),
+    ).strip('_')
+    return any(
+        alias == normalized_guardrail
+        or alias.startswith(f'{normalized_guardrail}_')
+        for alias in _normalized_evaluator_aliases(evaluator_id)
+    )
+
+
+def _validate_explicit_guardrail_coverage(
+    *,
+    verification: object,
+    hard_guardrails: Sequence['HardGuardrail'],
+) -> None:
+    bundle = getattr(verification, 'bundle', None)
+    if bundle is None or not bundle.development_evaluator_ids:
+        return
+    for field, evaluator_ids in (
+        ('development_evaluator_ids', bundle.development_evaluator_ids),
+        ('validating_evaluator_ids', bundle.validating_evaluator_ids),
+    ):
+        missing = [
+            guardrail.evaluator_name
+            for guardrail in hard_guardrails
+            if not any(
+                _evaluator_id_covers_guardrail(evaluator_id, guardrail.evaluator_name)
+                for evaluator_id in evaluator_ids
+            )
+        ]
+        if missing:
+            raise BootstrapConfigError(
+                f'{field} must cover every hard guardrail; missing: '
+                + ', '.join(sorted(missing))
+            )
 
 
 class BootstrapDocument(FrozenModel):
@@ -380,7 +446,7 @@ class ImmutableDefinitionReference(BootstrapDocument):
 
 
 class EvaluatorReference(BootstrapDocument):
-    evaluator_id: EvaluatorIdentifier
+    evaluator_id: PersistedEvaluatorIdentifier
     provenance: EvaluatorProvenance
 
 
@@ -525,6 +591,10 @@ class SelectedAgentProfile(BootstrapDocument):
             raise BootstrapConfigError('max_issue_evaluators must be between 1 and 8')
         if not self.hard_guardrails:
             raise BootstrapConfigError('hard_guardrails must not be empty')
+        _validate_explicit_guardrail_coverage(
+            verification=self.verification,
+            hard_guardrails=self.hard_guardrails,
+        )
         _validate_reviewed_target_matches_project(
             self.foundry_target,
             self.foundry_project,
@@ -538,6 +608,8 @@ class VerificationBundle(BootstrapDocument):
     development_definition: ImmutableDefinitionReference
     validating_definition: ImmutableDefinitionReference
     default_evaluator_bundle: DefaultEvaluatorBundle
+    development_evaluator_ids: tuple[PersistedEvaluatorIdentifier, ...] = ()
+    validating_evaluator_ids: tuple[PersistedEvaluatorIdentifier, ...] = ()
 
     @model_validator(mode='after')
     def validate_bundle(self) -> Self:
@@ -549,7 +621,52 @@ class VerificationBundle(BootstrapDocument):
         explicit_definition_ids = {self.development_definition.definition_id, self.validating_definition.definition_id}
         if bundle_definition_ids != explicit_definition_ids:
             raise BootstrapConfigError('default bundle definitions must match explicit development/validating definitions')
+        has_development_ids = bool(self.development_evaluator_ids)
+        has_validating_ids = bool(self.validating_evaluator_ids)
+        if has_development_ids != has_validating_ids:
+            raise BootstrapConfigError(
+                'development and validating evaluator IDs must be provided together'
+            )
+        if has_development_ids:
+            objective_ids = tuple(
+                evaluator.reference.evaluator_id
+                for evaluator in self.default_evaluator_bundle.objective.evaluators
+            )
+            if self.development_evaluator_ids != objective_ids:
+                raise BootstrapConfigError(
+                    'development evaluator IDs must match the default objective order'
+                )
+            if len(self.validating_evaluator_ids) != len(objective_ids):
+                raise BootstrapConfigError(
+                    'validating evaluator IDs must match the default objective length'
+                )
+            _casefold_unique(
+                self.development_evaluator_ids,
+                field='development_evaluator_ids',
+            )
+            _casefold_unique(
+                self.validating_evaluator_ids,
+                field='validating_evaluator_ids',
+            )
         return self
+
+    @property
+    def resolved_development_evaluator_ids(self) -> tuple[str, ...]:
+        if self.development_evaluator_ids:
+            return self.development_evaluator_ids
+        return tuple(
+            evaluator.reference.evaluator_id
+            for evaluator in self.default_evaluator_bundle.objective.evaluators
+        )
+
+    @property
+    def resolved_validating_evaluator_ids(self) -> tuple[str, ...]:
+        if self.validating_evaluator_ids:
+            return self.validating_evaluator_ids
+        return tuple(
+            evaluator.reference.evaluator_id
+            for evaluator in self.default_evaluator_bundle.objective.evaluators
+        )
 
 
 class VerificationSettings(BootstrapDocument):
@@ -796,6 +913,10 @@ class BootstrapSidecar(FrozenModel):
             raise BootstrapConfigError('max_issue_evaluators must be between 1 and 8')
         if not self.hard_guardrails:
             raise BootstrapConfigError('hard_guardrails must not be empty')
+        _validate_explicit_guardrail_coverage(
+            verification=self.verification,
+            hard_guardrails=self.hard_guardrails,
+        )
         _validate_reviewed_target_matches_project(
             self.foundry_target,
             self.foundry_project,

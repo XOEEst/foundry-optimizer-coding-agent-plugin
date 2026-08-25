@@ -293,10 +293,9 @@ def build_registered_deployment_plan(
         default_evaluator_ids=(
             ()
             if active is None
-            else tuple(
-                item.reference.evaluator_id
-                for item in active.objective.evaluators
-            )
+            else selection.sidecar.require_verification_bundle(
+                detail="registered deployment requires a verification bundle"
+            ).resolved_development_evaluator_ids
         ),
         verification=verification,
         receipt_inputs=receipt_inputs,

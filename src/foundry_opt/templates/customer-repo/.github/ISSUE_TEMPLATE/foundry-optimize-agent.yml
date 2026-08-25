@@ -80,7 +80,7 @@ body:
     id: issue_evaluators
     attributes:
       label: Optional exact evaluator IDs
-      description: One immutable evaluator ID per line. Append `weight=<positive>` to override equal weighting. IDs are merged with repository-default policy and safety evaluators. Blank uses only the repository default evaluator bundle. Invalid or unclear entries fail preflight.
+      description: One immutable evaluator ID per line. Append `weight=<positive>` to override equal weighting. IDs are merged with URI-based repository defaults. If the defaults contain definition-scoped inline criteria, only an exact evaluator URI already present in both definitions may be selected; other overrides fail preflight. Blank uses only the repository default evaluator bundle.
       placeholder: |
         azureml://registries/azureml/evaluators/builtin.task_completion/versions/19
       render: text

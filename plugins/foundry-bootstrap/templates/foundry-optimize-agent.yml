@@ -68,7 +68,7 @@ body:
     id: issue_evaluators
     attributes:
       label: Optional exact evaluator IDs
-      description: One immutable evaluator ID per line. Append `weight=<positive>` to override equal weighting.
+      description: One immutable evaluator ID per line. Append `weight=<positive>` to override equal weighting. Repositories with definition-scoped inline criteria accept only an exact evaluator URI already present in both default definitions; other overrides fail preflight.
       render: text
 
   - type: input

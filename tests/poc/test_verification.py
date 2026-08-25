@@ -11,6 +11,7 @@ from foundry_opt.repository_contracts import (
     EvaluationLineage,
     EvaluatorNormalization,
     EvaluatorReference,
+    HardGuardrail,
     ImmutableDatasetReference,
     ImmutableDefinitionReference,
     ResolvedEvaluator,
@@ -20,7 +21,7 @@ from foundry_opt.repository_contracts import (
 )
 from foundry_opt.contract_errors import BootstrapConfigError
 from foundry_opt.poc.config import IssueEvaluatorEntry, OptimizeIssueRequest
-from foundry_opt.poc.verification import resolve_verification
+from foundry_opt.poc.verification import deployment_evaluator_ids, resolve_verification
 from foundry_opt.verification import VerificationCheckSpec, VerificationDatasetInput
 
 
@@ -73,6 +74,71 @@ def _bundle() -> VerificationBundle:
             definitions=(development_definition, validating_definition),
         ),
     )
+
+
+def _inline_split_bundle() -> VerificationBundle:
+    development_evaluator_ids = (
+        "advisory_safety_7124618c-5a0d-49b0-a9dc-ad55e4c32030",
+        "policy_coverage_9d3e2d8b-81e6-436b-96a3-b46a46ef6dce",
+        "azureml://registries/azureml/evaluators/builtin.task_completion/versions/19",
+    )
+    validating_evaluator_ids = (
+        "advisory_safety_4cef6e56-2b2e-4150-9331-da56485dac56",
+        "policy_coverage_030f008b-0351-4ae3-8d6b-bb112ffee5c4",
+        "azureml://registries/azureml/evaluators/builtin.task_completion/versions/19",
+    )
+    objective = ResolvedWeightedObjective.create(
+        tuple(
+            ResolvedEvaluator(
+                reference=EvaluatorReference(
+                    evaluator_id=evaluator_id,
+                    provenance="reused_existing",
+                ),
+                normalization=EvaluatorNormalization(kind="pass_fail"),
+                weight=1.0,
+            )
+            for evaluator_id in development_evaluator_ids
+        )
+    )
+    development = ImmutableDatasetReference(
+        dataset_id="azureai://accounts/example/projects/example/data/development/versions/1"
+    )
+    validating = ImmutableDatasetReference(
+        dataset_id="azureai://accounts/example/projects/example/data/validating/versions/1"
+    )
+    development_definition = ImmutableDefinitionReference(
+        definition_id="eval_development"
+    )
+    validating_definition = ImmutableDefinitionReference(
+        definition_id="eval_validating"
+    )
+    return VerificationBundle(
+        development_dataset=development,
+        validating_dataset=validating,
+        development_definition=development_definition,
+        validating_definition=validating_definition,
+        default_evaluator_bundle=DefaultEvaluatorBundle(
+            objective=objective,
+            datasets=(development, validating),
+            definitions=(development_definition, validating_definition),
+        ),
+        development_evaluator_ids=development_evaluator_ids,
+        validating_evaluator_ids=validating_evaluator_ids,
+    )
+
+
+def _inline_split_profile() -> BootstrapSidecar:
+    profile = _profile(bundle=_inline_split_bundle())
+    document = profile.model_dump(mode="json")
+    document["hard_guardrails"] = [
+        {
+            "schema_version": 1,
+            "evaluator_name": "advisory_safety",
+            "required_pass_rate": 1.0,
+            "required": True,
+        }
+    ]
+    return BootstrapSidecar.from_document(document)
 
 
 def _profile(
@@ -230,6 +296,126 @@ def test_resolver_uses_repository_default_bundle_when_no_issue_override_exists()
     assert resolution.foundry_evaluation is not None
     assert resolution.foundry_evaluation.source == "repository_default_bundle"
     assert resolution.provenance == ("repository_default_bundle",)
+
+
+def test_resolver_preserves_definition_scoped_evaluator_ids_for_each_split() -> None:
+    profile = _inline_split_profile()
+
+    resolution = resolve_verification(profile=profile)
+
+    assert resolution.foundry_evaluation is not None
+    assert resolution.foundry_evaluation.development_evaluator_ids == (
+        "advisory_safety_7124618c-5a0d-49b0-a9dc-ad55e4c32030",
+        "policy_coverage_9d3e2d8b-81e6-436b-96a3-b46a46ef6dce",
+        "azureml://registries/azureml/evaluators/builtin.task_completion/versions/19",
+    )
+    assert resolution.foundry_evaluation.validating_evaluator_ids == (
+        "advisory_safety_4cef6e56-2b2e-4150-9331-da56485dac56",
+        "policy_coverage_030f008b-0351-4ae3-8d6b-bb112ffee5c4",
+        "azureml://registries/azureml/evaluators/builtin.task_completion/versions/19",
+    )
+
+
+def test_explicit_split_evaluators_do_not_duplicate_embedded_guardrails() -> None:
+    bundle = _inline_split_bundle()
+
+    assert deployment_evaluator_ids(
+        bundle=bundle,
+        hard_guardrails=(
+            HardGuardrail(
+                evaluator_name="advisory_safety",
+                required_pass_rate=1.0,
+            ),
+        ),
+    ) == bundle.development_evaluator_ids
+
+
+def test_inline_defaults_allow_only_exact_common_uri_issue_overrides() -> None:
+    profile = _inline_split_profile()
+    common_uri = (
+        "azureml://registries/azureml/evaluators/"
+        "builtin.task_completion/versions/19"
+    )
+    issue = OptimizeIssueRequest(
+        repo_agent_id="example-agent",
+        goal="Keep task completion as the primary evaluator.",
+        observed_failures=("A known task completion case fails.",),
+        candidate_budget=2,
+        issue_evaluators=(IssueEvaluatorEntry(evaluator_id=common_uri),),
+    )
+
+    resolution = resolve_verification(profile=profile, issue=issue)
+
+    assert resolution.foundry_evaluation is not None
+    assert resolution.foundry_evaluation.development_evaluator_ids == (
+        profile.verification.bundle.resolved_development_evaluator_ids
+    )
+    assert resolution.foundry_evaluation.validating_evaluator_ids == (
+        profile.verification.bundle.resolved_validating_evaluator_ids
+    )
+
+
+def test_inline_defaults_reject_ambiguous_uri_issue_override() -> None:
+    profile = _inline_split_profile()
+    issue = OptimizeIssueRequest(
+        repo_agent_id="example-agent",
+        goal="Reweight safety.",
+        observed_failures=("A safety case fails.",),
+        candidate_budget=2,
+        issue_evaluators=(
+            IssueEvaluatorEntry(
+                evaluator_id="azureai://built-in/evaluators/safety",
+            ),
+        ),
+    )
+
+    with pytest.raises(
+        BootstrapConfigError,
+        match="definition-scoped criteria",
+    ):
+        resolve_verification(profile=profile, issue=issue)
+
+
+def test_split_evaluator_ids_must_be_complete_and_ordered() -> None:
+    bundle = _inline_split_bundle()
+    document = bundle.model_dump(mode="json")
+    document["validating_evaluator_ids"] = []
+
+    with pytest.raises(
+        BootstrapConfigError,
+        match="development and validating evaluator IDs must be provided together",
+    ):
+        VerificationBundle.from_document(document)
+
+    document = bundle.model_dump(mode="json")
+    development_ids = list(document["development_evaluator_ids"])
+    development_ids.reverse()
+    document["development_evaluator_ids"] = development_ids
+
+    with pytest.raises(
+        BootstrapConfigError,
+        match="development evaluator IDs must match the default objective order",
+    ):
+        VerificationBundle.from_document(document)
+
+
+def test_explicit_split_evaluator_ids_must_cover_hard_guardrails() -> None:
+    profile = _inline_split_profile()
+    document = profile.model_dump(mode="json")
+    document["hard_guardrails"] = [
+        {
+            "schema_version": 1,
+            "evaluator_name": "missing_guardrail",
+            "required_pass_rate": 1.0,
+            "required": True,
+        }
+    ]
+
+    with pytest.raises(
+        BootstrapConfigError,
+        match="must cover every hard guardrail; missing: missing_guardrail",
+    ):
+        BootstrapSidecar.from_document(document)
 
 
 def test_resolver_allows_issue_checks_to_override_foundry_defaults() -> None:

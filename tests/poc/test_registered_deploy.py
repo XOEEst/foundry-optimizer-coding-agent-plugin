@@ -14,6 +14,7 @@ from foundry_opt.repository_contracts import (
     EvaluationLineage,
     EvaluatorNormalization,
     EvaluatorReference,
+    HardGuardrail,
     ImmutableDatasetReference,
     ImmutableDefinitionReference,
     ResolvedEvaluator,
@@ -120,6 +121,63 @@ def _evaluated_sidecar() -> BootstrapSidecar:
             )
         }
     )
+
+
+def _split_evaluated_sidecar() -> BootstrapSidecar:
+    profile = _evaluated_sidecar()
+    development_evaluator_ids = (
+        "advisory_safety_7124618c-5a0d-49b0-a9dc-ad55e4c32030",
+        "policy_coverage_9d3e2d8b-81e6-436b-96a3-b46a46ef6dce",
+        "azureml://registries/azureml/evaluators/builtin.task_completion/versions/19",
+    )
+    validating_evaluator_ids = (
+        "advisory_safety_4cef6e56-2b2e-4150-9331-da56485dac56",
+        "policy_coverage_030f008b-0351-4ae3-8d6b-bb112ffee5c4",
+        "azureml://registries/azureml/evaluators/builtin.task_completion/versions/19",
+    )
+    objective = ResolvedWeightedObjective.create(
+        tuple(
+            ResolvedEvaluator(
+                reference=EvaluatorReference(
+                    evaluator_id=evaluator_id,
+                    provenance="reused_existing",
+                ),
+                normalization=EvaluatorNormalization(kind="pass_fail"),
+                weight=1.0,
+            )
+            for evaluator_id in development_evaluator_ids
+        )
+    )
+    current_bundle = profile.require_verification_bundle(
+        detail="fixture requires a verification bundle"
+    )
+    bundle = current_bundle.model_copy(
+        update={
+            "default_evaluator_bundle": current_bundle.default_evaluator_bundle.model_copy(
+                update={"objective": objective}
+            ),
+            "development_evaluator_ids": development_evaluator_ids,
+            "validating_evaluator_ids": validating_evaluator_ids,
+        }
+    )
+    current_lineage = profile.verification.lineage
+    assert current_lineage is not None
+    document = profile.model_dump(mode="json")
+    document["hard_guardrails"] = [
+        HardGuardrail(
+            evaluator_name="advisory_safety",
+            required_pass_rate=1.0,
+        ).model_dump(mode="json")
+    ]
+    document["verification"] = VerificationSettings(
+        mode="required",
+        evaluation_gate_policy="require_foundry_evaluation",
+        bundle=bundle,
+        lineage=current_lineage.model_copy(
+            update={"bundle_objective_hash": objective.objective_hash}
+        ),
+    ).model_dump(mode="json")
+    return BootstrapSidecar.from_document(document)
 
 
 def _repository_checks_sidecar(
@@ -269,6 +327,32 @@ def test_registered_settings_project_the_sidecar_contract(tmp_path: Path) -> Non
     )
     assert "violence" in settings.metadata.development_evaluation.custom_evaluator_ids
     assert settings.selection.sidecar.default_evaluator_bundle.objective.objective_hash
+
+
+def test_registered_settings_preserve_split_specific_evaluator_ids(
+    tmp_path: Path,
+) -> None:
+    sidecar = _split_evaluated_sidecar()
+    repository, commit, environment = _registered_repository(
+        tmp_path,
+        sidecar=sidecar,
+    )
+
+    settings = load_registered_deployment_settings(
+        repository,
+        repo_agent_id="example-agent",
+        exact_source=commit,
+        environment=environment,
+    )
+
+    assert (
+        settings.metadata.development_evaluation.custom_evaluator_ids
+        == sidecar.verification.bundle.resolved_development_evaluator_ids
+    )
+    assert (
+        settings.metadata.validating_evaluation.custom_evaluator_ids
+        == sidecar.verification.bundle.resolved_validating_evaluator_ids
+    )
 
 
 def test_registered_settings_support_repository_checks_without_bundle(

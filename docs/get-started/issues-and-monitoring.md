@@ -40,8 +40,12 @@ Foundry Optimizer resolves verification in this order:
 1. **Issue evaluators, optionally with an issue development dataset**
    - Evaluator-only overrides reuse the repository/runtime default
      development and validating definitions and datasets.
-   - Issue evaluator IDs are merged with default evaluator IDs, preserving
-     policy and safety evaluators with deterministic de-duplication.
+   - Issue evaluator IDs are merged with URI-based default evaluator IDs,
+     preserving policy and safety evaluators with deterministic
+     de-duplication.
+   - If the repository definitions contain inline criteria, an issue may
+     select only an exact evaluator URI already present in both definitions;
+     ambiguous additions fail preflight.
    - Supplying a dataset replaces only the development dataset; validation
      continues to use the repository default.
 2. **Repository defaults**

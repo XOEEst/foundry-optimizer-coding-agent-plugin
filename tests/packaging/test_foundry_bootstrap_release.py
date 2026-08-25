@@ -169,6 +169,13 @@ def test_static_schemas_cover_v2_registry_and_sidecar() -> None:
         "deployment",
         "verification",
     } <= set(sidecar_schema["required"])
+    bundle_schema = sidecar_schema["properties"]["verification"]["properties"][
+        "bundle"
+    ]
+    assert {
+        "development_evaluator_ids",
+        "validating_evaluator_ids",
+    } <= set(bundle_schema["properties"])
 
 
 def test_release_workflow_uses_standard_static_zip_and_checksum_tools() -> None:

@@ -46,6 +46,7 @@ class FoundryEvaluationPlan(FrozenModel):
     validating_definition_id: str = Field(min_length=1, max_length=512)
     validating_dataset_id: str = Field(min_length=1, max_length=2048)
     validating_evaluator_ids: tuple[str, ...]
+    has_definition_scoped_criteria: bool = False
 
     @model_validator(mode="after")
     def validate_lists(self) -> "FoundryEvaluationPlan":
@@ -289,6 +290,10 @@ class DefaultVerificationResolver:
 
         if has_issue_foundry_inputs:
             if issue_evaluators and defaults is not None:
+                _validate_issue_evaluator_compatibility(
+                    defaults=defaults,
+                    issue_evaluators=issue_evaluators,
+                )
                 provenance: list[VerificationProvenance] = []
                 if issue_dataset is not None:
                     provenance.append("issue_dataset")
@@ -435,15 +440,16 @@ def _foundry_defaults(profile: object) -> FoundryEvaluationPlan | None:
     bundle = getattr(verification, "bundle", None)
     if bundle is None:
         return None
-    objective = bundle.default_evaluator_bundle.objective
-    evaluator_ids = tuple(item.reference.evaluator_id for item in objective.evaluators)
     return FoundryEvaluationPlan(
         development_definition_id=bundle.development_definition.definition_id,
         development_dataset_id=bundle.development_dataset.dataset_id,
-        development_evaluator_ids=evaluator_ids,
+        development_evaluator_ids=bundle.resolved_development_evaluator_ids,
         validating_definition_id=bundle.validating_definition.definition_id,
         validating_dataset_id=bundle.validating_dataset.dataset_id,
-        validating_evaluator_ids=evaluator_ids,
+        validating_evaluator_ids=bundle.resolved_validating_evaluator_ids,
+        has_definition_scoped_criteria=bool(
+            bundle.development_evaluator_ids
+        ),
     )
 
 
@@ -462,6 +468,42 @@ def _merge_evaluator_ids(
     return tuple(merged)
 
 
+def _uses_definition_scoped_evaluator_ids(
+    plan: FoundryEvaluationPlan,
+) -> bool:
+    return plan.has_definition_scoped_criteria
+
+
+def _validate_issue_evaluator_compatibility(
+    *,
+    defaults: FoundryEvaluationPlan,
+    issue_evaluators: tuple[IssueEvaluatorEntry, ...],
+) -> None:
+    if not _uses_definition_scoped_evaluator_ids(defaults):
+        return
+    development = {
+        evaluator_id.casefold()
+        for evaluator_id in defaults.development_evaluator_ids
+    }
+    validating = {
+        evaluator_id.casefold()
+        for evaluator_id in defaults.validating_evaluator_ids
+    }
+    ambiguous = [
+        entry.evaluator_id
+        for entry in issue_evaluators
+        if entry.evaluator_id.casefold() not in development
+        or entry.evaluator_id.casefold() not in validating
+    ]
+    if ambiguous:
+        raise BootstrapConfigError(
+            'issue evaluator overrides cannot add or remap evaluator URIs when '
+            'repository defaults contain definition-scoped criteria; use only '
+            'an exact evaluator URI already present in both definitions: '
+            + ', '.join(ambiguous)
+        )
+
+
 def deployment_unverified_warning() -> DeploymentVerificationWarning:
     return DeploymentVerificationWarning(
         code="deployment-unverified",
@@ -477,6 +519,8 @@ def deployment_evaluator_ids(
     bundle: VerificationBundle,
     hard_guardrails: tuple[HardGuardrail, ...],
 ) -> tuple[str, ...]:
+    if bundle.development_evaluator_ids:
+        return bundle.resolved_development_evaluator_ids
     return tuple(
         dict.fromkeys(
             (

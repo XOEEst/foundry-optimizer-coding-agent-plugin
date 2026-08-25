@@ -56,8 +56,11 @@ repository setup uses the separate `foundry-bootstrap` skill.
   definitions.
 - An issue development dataset is valid only with exact evaluator IDs.
 - The validating dataset always remains the repository default.
-- Merge issue evaluator IDs with repository policy and safety evaluator IDs
-  using deterministic de-duplication.
+- Merge issue evaluator IDs with URI-based repository policy and safety
+  evaluator IDs using deterministic de-duplication.
+- When repository definitions contain definition-scoped inline criteria, allow
+  only issue evaluator URIs already present in both definitions. Reject
+  ambiguous additions or remapping before running evaluations.
 - Named `check: ...` entries remain repository-owned; issue input may provide
   exact `command: ...` checks only.
 - Arbitrary evaluator, dataset, metric, or command overrides require a trusted

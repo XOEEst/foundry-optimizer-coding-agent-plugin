@@ -50,7 +50,10 @@ Important details:
 
 - An issue dataset without issue evaluators is ignored for quantitative selection.
 - Issue evaluators without an issue dataset are valid when repository defaults already provide the development and validating datasets.
-- Issue evaluator IDs are merged with the repository-default evaluator bundle instead of replacing policy and safety evaluators.
+- Issue evaluator IDs are merged with URI-based repository defaults instead of
+  replacing policy and safety evaluators. When immutable definitions contain
+  inline criteria, only an exact evaluator URI already present in both
+  definitions may be selected; ambiguous additions fail preflight.
 - Repository checks can support a recommendation, but they do not create a measured Foundry winner.
 
 See [Issues and monitoring](../get-started/issues-and-monitoring.md) for the same precedence in plain language.

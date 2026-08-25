@@ -3,7 +3,11 @@ from __future__ import annotations
 import pytest
 
 from foundry_opt.contract_errors import BootstrapConfigError
-from foundry_opt.repository_contracts import RootRegistry
+from foundry_opt.repository_contracts import (
+    EvaluatorReference,
+    IssueEvaluatorRequestEntry,
+    RootRegistry,
+)
 
 
 def _registry(*, schema_version: int) -> dict[str, object]:
@@ -67,3 +71,29 @@ def test_registry_v2_exposes_complete_runtime_provenance() -> None:
     assert registry.distribution.optimizer_skill_path == (
         "plugins/foundry-agent-optimizer"
     )
+
+
+def test_evaluator_reference_preserves_definition_scoped_string_check_id() -> None:
+    reference = EvaluatorReference.from_document(
+        {
+            "evaluator_id": (
+                "policy_coverage_9d3e2d8b-81e6-436b-96a3-b46a46ef6dce"
+            ),
+            "provenance": "reused_existing",
+        }
+    )
+
+    assert reference.evaluator_id == (
+        "policy_coverage_9d3e2d8b-81e6-436b-96a3-b46a46ef6dce"
+    )
+
+
+def test_issue_evaluator_request_still_requires_immutable_resource_id() -> None:
+    with pytest.raises(BootstrapConfigError, match="evaluator_id"):
+        IssueEvaluatorRequestEntry.from_document(
+            {
+                "evaluator_id": (
+                    "policy_coverage_9d3e2d8b-81e6-436b-96a3-b46a46ef6dce"
+                ),
+            }
+        )

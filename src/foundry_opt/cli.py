@@ -1724,13 +1724,29 @@ def _issue_request_path(job_root: Path) -> Path:
 
 
 def _runtime_foundry_plan(settings: RuntimeSettings) -> FoundryEvaluationPlan:
+    development_evaluator_ids = (
+        settings.metadata.development_evaluation.custom_evaluator_ids
+    )
+    validating_evaluator_ids = (
+        settings.metadata.validating_evaluation.custom_evaluator_ids
+    )
     return FoundryEvaluationPlan(
         development_definition_id=settings.metadata.development_evaluation.resolved_evaluation_id,
         development_dataset_id=settings.metadata.development_evaluation.dataset_id,
-        development_evaluator_ids=settings.metadata.development_evaluation.custom_evaluator_ids,
+        development_evaluator_ids=development_evaluator_ids,
         validating_definition_id=settings.metadata.validating_evaluation.resolved_evaluation_id,
         validating_dataset_id=settings.metadata.validating_evaluation.dataset_id,
-        validating_evaluator_ids=settings.metadata.validating_evaluation.custom_evaluator_ids,
+        validating_evaluator_ids=validating_evaluator_ids,
+        has_definition_scoped_criteria=(
+            development_evaluator_ids != validating_evaluator_ids
+            and any(
+                '://' not in evaluator_id
+                for evaluator_id in (
+                    *development_evaluator_ids,
+                    *validating_evaluator_ids,
+                )
+            )
+        ),
     )
 
 

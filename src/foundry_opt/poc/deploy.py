@@ -1709,6 +1709,12 @@ def build_deployment_agent_metadata(
 ) -> DeploymentAgentMetadata:
     sidecar = selection.sidecar
     if verification.mode == "foundry_evaluation":
+        bundle = sidecar.require_verification_bundle(
+            detail=(
+                "deployment metadata requires an activated repository default "
+                "evaluator bundle"
+            )
+        )
         development_definition = sidecar.development_definition
         validating_definition = sidecar.validating_definition
         development_dataset = sidecar.development_dataset
@@ -1722,13 +1728,21 @@ def build_deployment_agent_metadata(
             raise RuntimeIntegrationError(
                 "deployment metadata requires an activated repository default evaluator bundle"
             )
-        evaluator_ids = verification.evaluator_ids
+        if bundle.development_evaluator_ids:
+            development_evaluator_ids = (
+                bundle.resolved_development_evaluator_ids
+            )
+            validating_evaluator_ids = bundle.resolved_validating_evaluator_ids
+        else:
+            development_evaluator_ids = verification.evaluator_ids
+            validating_evaluator_ids = verification.evaluator_ids
         development_evaluation_id = development_definition.definition_id
         development_dataset_id = development_dataset.dataset_id
         validating_evaluation_id = validating_definition.definition_id
         validating_dataset_id = validating_dataset.dataset_id
     else:
-        evaluator_ids = ()
+        development_evaluator_ids = ()
+        validating_evaluator_ids = ()
         development_evaluation_id = _UNUSED_DEPLOYMENT_VERIFICATION_TOKEN
         development_dataset_id = _UNUSED_DEPLOYMENT_VERIFICATION_TOKEN
         validating_evaluation_id = _UNUSED_DEPLOYMENT_VERIFICATION_TOKEN
@@ -1768,14 +1782,14 @@ def build_deployment_agent_metadata(
                 "split": "development",
                 "resolved_evaluation_id": development_evaluation_id,
                 "dataset_id": development_dataset_id,
-                "custom_evaluator_ids": evaluator_ids,
+                "custom_evaluator_ids": development_evaluator_ids,
             },
             "validating_evaluation": {
                 "name": "validating",
                 "split": "validating",
                 "resolved_evaluation_id": validating_evaluation_id,
                 "dataset_id": validating_dataset_id,
-                "custom_evaluator_ids": evaluator_ids,
+                "custom_evaluator_ids": validating_evaluator_ids,
             },
         }
     )

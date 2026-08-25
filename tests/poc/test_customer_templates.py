@@ -146,6 +146,7 @@ def test_issue_form_uses_built_in_parser_contract() -> None:
         "azureml://registries/azureml/evaluators/"
         "builtin.task_completion/versions/19"
     ) in serialized
+    assert "definition-scoped inline criteria" in serialized
     assert "Leave blank to reuse repository defaults" in serialized
 
 

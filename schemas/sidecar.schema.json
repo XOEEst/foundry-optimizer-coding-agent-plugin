@@ -324,6 +324,10 @@
             {
               "pattern": "^azureml://registries/[^/]+/evaluators/[^/]+/versions/[^/]+$",
               "type": "string"
+            },
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$",
+              "type": "string"
             }
           ],
           "title": "Evaluator Id"
@@ -789,6 +793,31 @@
         "development_definition": {
           "$ref": "#/$defs/ImmutableDefinitionReference"
         },
+        "development_evaluator_ids": {
+          "default": [],
+          "items": {
+            "anyOf": [
+              {
+                "pattern": "^azureai://accounts/[^/]+/projects/[^/]+/evaluators/[^/]+/versions/[^/]+$",
+                "type": "string"
+              },
+              {
+                "pattern": "^azureai://built-in/evaluators/[^/]+$",
+                "type": "string"
+              },
+              {
+                "pattern": "^azureml://registries/[^/]+/evaluators/[^/]+/versions/[^/]+$",
+                "type": "string"
+              },
+              {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$",
+                "type": "string"
+              }
+            ]
+          },
+          "title": "Development Evaluator Ids",
+          "type": "array"
+        },
         "schema_version": {
           "const": 1,
           "default": 1,
@@ -800,6 +829,31 @@
         },
         "validating_definition": {
           "$ref": "#/$defs/ImmutableDefinitionReference"
+        },
+        "validating_evaluator_ids": {
+          "default": [],
+          "items": {
+            "anyOf": [
+              {
+                "pattern": "^azureai://accounts/[^/]+/projects/[^/]+/evaluators/[^/]+/versions/[^/]+$",
+                "type": "string"
+              },
+              {
+                "pattern": "^azureai://built-in/evaluators/[^/]+$",
+                "type": "string"
+              },
+              {
+                "pattern": "^azureml://registries/[^/]+/evaluators/[^/]+/versions/[^/]+$",
+                "type": "string"
+              },
+              {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$",
+                "type": "string"
+              }
+            ]
+          },
+          "title": "Validating Evaluator Ids",
+          "type": "array"
         }
       },
       "required": [

@@ -355,7 +355,55 @@
           "type": [
             "object",
             "null"
-          ]
+          ],
+          "properties": {
+            "development_evaluator_ids": {
+              "type": "array",
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^azureai://accounts/[^/]+/projects/[^/]+/evaluators/[^/]+/versions/[^/]+$"
+                  },
+                  {
+                    "type": "string",
+                    "pattern": "^azureai://built-in/evaluators/[^/]+$"
+                  },
+                  {
+                    "type": "string",
+                    "pattern": "^azureml://registries/[^/]+/evaluators/[^/]+/versions/[^/]+$"
+                  },
+                  {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$"
+                  }
+                ]
+              }
+            },
+            "validating_evaluator_ids": {
+              "type": "array",
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^azureai://accounts/[^/]+/projects/[^/]+/evaluators/[^/]+/versions/[^/]+$"
+                  },
+                  {
+                    "type": "string",
+                    "pattern": "^azureai://built-in/evaluators/[^/]+$"
+                  },
+                  {
+                    "type": "string",
+                    "pattern": "^azureml://registries/[^/]+/evaluators/[^/]+/versions/[^/]+$"
+                  },
+                  {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$"
+                  }
+                ]
+              }
+            }
+          }
         },
         "lineage": {
           "type": [
