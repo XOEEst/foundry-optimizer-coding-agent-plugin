@@ -76,6 +76,9 @@ Record the sources actually used in the bootstrap report.
   default branch, and GitHub repository identity.
 - Stop before planning if unrelated local changes overlap a proposed file or
   prevent an exact clean deployment commit.
+- Run `git check-ignore -v --no-index` for every planned registry, report,
+  sidecar, workflow, instruction, issue-form, and `azure.yaml` destination.
+  Record the exact ignore rule and its source.
 - Inventory candidate agent roots, entry points, dependency files, protocols,
   model environment variables, editable paths, existing `azure.yaml`, registry,
   sidecars, workflows, instructions, and issue forms.
@@ -110,6 +113,7 @@ evaluation runs. Follow [Migration](references/migration.md).
 
 In the session staging area:
 
+- patch `.gitignore` when a repository rule ignores a required tracked file
 - create or patch `.foundry-opt/registry.yaml`
 - create or patch each `<agent-root>/.foundry/foundry-opt.yaml`
 - create or patch `azure.yaml`
@@ -119,11 +123,16 @@ In the session staging area:
 - create or patch
   `.github/ISSUE_TEMPLATE/foundry-optimize-agent.yml`
 - create or patch `.foundry-opt/bootstrap-report.md`
+- remove `.foundry-opt/bootstrap.lock.json` only when discovery confirms it is
+  untracked metadata from retired bootstrap tooling
 
 Preserve unrelated content in existing files. Never silently replace an
 existing workflow, environment, identity, Foundry target, or agent definition.
 Validate YAML, validate registry and sidecars with the bundled schemas, and
 search the staged tree for unresolved `__TOKEN__` values and secrets.
+Re-run `git check-ignore -v --no-index` against every planned tracked path after
+rendering. A reviewed `.gitignore` correction must make each path addable;
+`git add -f` is not a substitute for resolving the repository contract.
 
 Patch `azure.yaml` to connect to an exact existing Foundry project or to declare
 the approved missing project and agent services. Keep existing unrelated

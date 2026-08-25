@@ -99,6 +99,18 @@ def test_bootstrap_skill_is_static_and_uses_one_combined_approval() -> None:
     assert "Do not create datasets, evaluators, evaluation definitions, or evaluation runs." in normalized
 
 
+def test_bootstrap_skill_resolves_ignored_contract_paths_before_approval() -> None:
+    _, body = _parse_frontmatter(BOOTSTRAP_ROOT / "SKILL.md")
+    discovery = _read(BOOTSTRAP_ROOT / "references" / "discovery.md")
+    combined = f"{body}\n{discovery}"
+
+    assert "git check-ignore -v --no-index" in combined
+    assert ".gitignore" in combined
+    assert ".foundry-opt/registry.yaml" in combined
+    assert ".foundry-opt/bootstrap-report.md" in combined
+    assert "git add -f" in combined
+
+
 def test_bootstrap_tree_is_exactly_static_content() -> None:
     assert _bootstrap_files() == EXPECTED_BOOTSTRAP_FILES
     assert not (BOOTSTRAP_ROOT / "scripts").exists()

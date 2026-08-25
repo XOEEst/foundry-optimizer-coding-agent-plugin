@@ -17,6 +17,36 @@ Complete discovery before preparing a mutation plan.
 Do not use file writes, Git index changes, branch changes, package installation,
 or formatting commands during this phase.
 
+## Ignore rules
+
+Check every path the plan may create or update:
+
+```text
+git check-ignore -v --no-index -- <path>...
+```
+
+Include `.foundry-opt/registry.yaml`,
+`.foundry-opt/bootstrap-report.md`, every agent sidecar, `azure.yaml`, and the
+GitHub workflow, instruction, and issue-form destinations. Record whether each
+match comes from the repository `.gitignore`, `.git/info/exclude`, or a global
+excludes file.
+
+When a repository `.gitignore` rule blocks a required tracked file, stage the
+smallest clear `.gitignore` correction with the other proposed files. Prefer
+removing an obsolete directory-wide rule; otherwise unignore the required
+parent directory and exact tracked files. Preserve unrelated ignore behavior.
+Do not use `git add -f` to conceal an unresolved repository rule.
+
+Local or global exclude rules cannot be fixed by a repository patch. Include
+their exact correction in the approval plan or stop until the owner corrects
+them. Re-run the command against the rendered paths before approval and after
+applying the approved changes.
+
+Treat an untracked `.foundry-opt/bootstrap.lock.json` as removable only when its
+contents and surrounding evidence identify retired bootstrap tooling. Never
+delete `.foundry-opt/registry.yaml`, `.foundry-opt/bootstrap-report.md`, or an
+unknown file as legacy metadata.
+
 ## Tool capability probes
 
 Run non-mutating probes and capture their output:

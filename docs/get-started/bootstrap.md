@@ -16,6 +16,8 @@ The skill performs read-only inspection:
 - inspects GitHub environments/variables and Azure identity/OIDC/RBAC;
 - checks existing Python and NuGet package sources and whether approved proxy
   feeds are required;
+- checks Git ignore rules for every required tracked bootstrap file and stages
+  the smallest necessary `.gitignore` correction;
 - classifies remote state as adopt, create, or conflict;
 - stages proposed files in the session workspace;
 - shows exact local diffs, remote actions, commit intent, and deployment plan.
@@ -61,7 +63,8 @@ The skill does not push or merge.
 Registry v1 and existing profiles migrate in place. Stable agent IDs, custom
 paths, Foundry targets, identity, workflow settings, and evaluation bundles
 are preserved. Legacy locks, journals, receipts, and `.foundry-proposed`
-siblings are removed after approval and recorded in the report.
+siblings are removed after approval and recorded in the report. Bootstrap does
+not use `git add -f` to conceal ignored repository contracts.
 
 ## Evaluation
 
