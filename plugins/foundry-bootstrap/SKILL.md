@@ -165,6 +165,25 @@ Re-run `git check-ignore -v --no-index` against every planned tracked path after
 rendering. A reviewed `.gitignore` correction must make each path addable;
 `git add -f` is not a substitute for resolving the repository contract.
 
+Render generated YAML, Markdown, and other text as UTF-8 without BOM and LF
+line endings. Build tracked-file context from Git index blobs rather than
+platform-normalized worktree bytes. Respect an explicit `.gitattributes`
+binary or `-text` rule instead of converting that path.
+
+Create one immutable unified patch artifact for all reviewed tracked changes.
+Use `a/` and `b/` repository-relative paths, LF patch control lines, and no
+absolute staging paths. Before approval, from the clean target repository run:
+
+```text
+git apply --check --index --whitespace=error-all <patch>
+```
+
+Calculate and retain the SHA-256 of the exact patch bytes. Do not request
+approval unless that exact command succeeds against the recorded base `HEAD`
+and index. If it fails, correct the staged representation, regenerate the
+patch, and rerun every validation. Never substitute a worktree-only
+`git apply --check`.
+
 Patch `azure.yaml` to connect to an exact existing Foundry project or to declare
 the approved missing project and agent services. Keep existing unrelated
 services. Use `azure.ai.agent` services and source-code or container settings
@@ -178,6 +197,7 @@ Show:
 - actual tool versions already present and any approved install/upgrade action
 - exact Python and NuGet sources and any persistent source-configuration change
 - exact staged file diffs
+- SHA-256 of the exact patch bytes and the successful index-aware preflight
 - exact GitHub, Azure, and Foundry resources to reuse
 - exact missing resources to create, including names, types, scopes, regions,
   OIDC subjects, roles, and deterministic resource IDs where available
@@ -193,7 +213,17 @@ approval.
 
 1. Install or upgrade `azd` or `azure.ai.agents` only if the approved capability
    plan requires it, then record the resulting versions.
-2. Apply the staged repository files byte-for-byte and rerun validation.
+2. Confirm the base `HEAD`, clean worktree, patch SHA-256, and Git index still
+   match the approved review. Rerun
+   `git apply --check --index --whitespace=error-all <patch>`, then apply those
+   same bytes with:
+
+   ```text
+   git apply --index --whitespace=error-all <patch>
+   ```
+
+   Do not regenerate or reserialize the approved patch. Rerun repository
+   validation against the staged result.
 3. Re-query every remote resource immediately before mutation. Reuse an exact
    match, create a still-missing resource, and stop on drift or conflict.
 4. Configure GitHub environments and non-secret variables, Azure identity,

@@ -13,10 +13,11 @@ session staging area and shows one review containing:
 1. discovered agents and their proposed enabled or disabled registration
 2. existing contracts that will be migrated in place
 3. exact repository diffs
-4. cloud resources that exactly match and will be reused
-5. missing cloud resources that will be created
-6. conflicts that prevent safe progress
-7. the exact local commit and `azd deploy` plan
+4. exact patch SHA-256 and successful `git apply --check --index` result
+5. cloud resources that exactly match and will be reused
+6. missing cloud resources that will be created
+7. conflicts that prevent safe progress
+8. the exact local commit and `azd deploy` plan
 
 The owner gives one combined approval. If the plan changes, the coding agent
 shows a fresh exact diff and asks again.

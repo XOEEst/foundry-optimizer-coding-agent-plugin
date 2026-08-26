@@ -23,6 +23,8 @@ The skill performs read-only inspection:
   feeds are required;
 - checks Git ignore rules for every required tracked bootstrap file and stages
   the smallest necessary `.gitignore` correction;
+- renders one LF-normalized patch and verifies its exact bytes against both the
+  Git index and worktree with `git apply --check --index`;
 - classifies remote state as adopt, create, or conflict;
 - stages proposed files in the session workspace;
 - shows exact local diffs, remote actions, commit intent, and deployment plan.

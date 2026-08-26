@@ -19,3 +19,8 @@ Update `.foundry-opt/bootstrap-report.md` and the owner response with:
 
 Never retry a mutation against ambiguous live state. A later attempt begins
 with a fresh read-only inventory and a new exact combined plan.
+
+If patch preflight or apply fails, record the patch SHA-256, base commit, exact
+`git apply` command, and concise stderr. Do not retry with a regenerated patch
+under the existing approval. A corrected LF patch requires fresh validation
+and a new combined approval.

@@ -111,6 +111,17 @@ def test_bootstrap_skill_resolves_ignored_contract_paths_before_approval() -> No
     assert "git add -f" in combined
 
 
+def test_bootstrap_skill_preflights_the_exact_lf_patch_against_the_index() -> None:
+    _, body = _parse_frontmatter(BOOTSTRAP_ROOT / "SKILL.md")
+    normalized = " ".join(body.split())
+
+    assert "UTF-8 without BOM and LF line endings" in normalized
+    assert "git apply --check --index --whitespace=error-all" in body
+    assert "git apply --index --whitespace=error-all" in body
+    assert "SHA-256 of the exact patch bytes" in normalized
+    assert "Do not request approval" in normalized
+
+
 def test_local_skill_checkout_reuses_remote_runtime_provenance() -> None:
     _, body = _parse_frontmatter(BOOTSTRAP_ROOT / "SKILL.md")
     normalized = " ".join(body.split())
