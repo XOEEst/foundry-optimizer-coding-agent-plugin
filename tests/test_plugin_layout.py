@@ -122,6 +122,16 @@ def test_bootstrap_skill_preflights_the_exact_lf_patch_against_the_index() -> No
     assert "Do not request approval" in normalized
 
 
+def test_bootstrap_scopes_draft_only_rules_to_optimize_jobs() -> None:
+    _, body = _parse_frontmatter(BOOTSTRAP_ROOT / "SKILL.md")
+    normalized = " ".join(body.split())
+
+    assert "Optimize-job draft-only rules do not prohibit bootstrap deployment" in normalized
+    assert "existing regular-version deployment workflow" in normalized
+    assert "Do not require a draft-capable `azd deploy` extension" in normalized
+    assert "repository-wide deployment prohibition" in normalized
+
+
 def test_local_skill_checkout_reuses_remote_runtime_provenance() -> None:
     _, body = _parse_frontmatter(BOOTSTRAP_ROOT / "SKILL.md")
     normalized = " ".join(body.split())

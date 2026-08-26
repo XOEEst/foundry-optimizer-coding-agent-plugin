@@ -31,6 +31,11 @@ The skill performs read-only inspection:
 
 Conflicting existing remote resources must be resolved before approval.
 
+Draft-only optimizer rules are scoped to candidate evaluation and do not block
+bootstrap from publishing a regular immutable version. Bootstrap compares those
+rules with active merge/deployment workflows before deciding that repository
+policy prohibits publication.
+
 If direct public package feeds are unavailable, bootstrap can use
 `https://packagefeedproxy.microsoft.io/pypi/simple` for Python and
 `https://packagefeedproxy.microsoft.io/nuget/v3/index.json` for NuGet. The

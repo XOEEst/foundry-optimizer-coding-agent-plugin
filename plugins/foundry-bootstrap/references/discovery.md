@@ -17,6 +17,26 @@ Complete discovery before preparing a mutation plan.
 Do not use file writes, Git index changes, branch changes, package installation,
 or formatting commands during this phase.
 
+## Deployment policy scope
+
+Inventory every statement about drafts, regular versions, publication, and
+routing. Record its source and scope:
+
+- candidate or optimize-job execution
+- bootstrap
+- merge-time or production deployment
+- explicitly repository-wide
+
+Do not treat Copilot/optimizer draft-only instructions as deployment policy.
+Inspect active workflows and deployment documentation. A workflow that names
+and executes regular-version publication establishes regular deployment intent
+unless an equally explicit deployment-wide prohibition supersedes it.
+
+If scoped optimization rules and regular deployment coexist, preserve both:
+optimizer jobs remain draft-only, while bootstrap uses regular `azd deploy`.
+Only an unresolved contradiction between equally authoritative deployment
+contracts is a blocker.
+
 ## Ignore rules
 
 Check every path the plan may create or update:

@@ -32,6 +32,27 @@ Do not introduce bootstrap programs, durable bootstrap metadata, opaque
 identifiers, generated evidence files, automatic reversal behavior, or
 evaluation onboarding.
 
+## Policy scope and deployment versions
+
+Interpret repository policy in its stated lifecycle and actor scope:
+
+- Optimize-job draft-only rules do not prohibit bootstrap deployment. Rules
+  about Copilot candidates, optimize jobs, temporary validation, early draft
+  pull requests, or optimizer-owned versions govern optimization only.
+- An existing regular-version deployment workflow and merge-time deployment
+  documentation are affirmative evidence that repository deployment may
+  publish regular versions.
+- Bootstrap and deployment prohibitions apply only when they explicitly cover
+  bootstrap, deployment, merge-time publication, or all agent publication and
+  are not contradicted by another authoritative repository contract.
+
+Do not promote a scoped optimizer rule into a repository-wide deployment
+prohibition. Do not require a draft-capable `azd deploy` extension: the
+supported `azd deploy` path publishes a regular immutable hosted-agent version.
+If repository evidence is genuinely contradictory, report the exact files and
+statements as a policy conflict; do not invent a missing draft-deployment
+capability.
+
 ## Inputs
 
 1. Resolve exact retained-runtime provenance:
@@ -113,6 +134,9 @@ Record the sources actually used in the bootstrap report.
 - Inventory candidate agent roots, entry points, dependency files, protocols,
   model environment variables, editable paths, existing `azure.yaml`, registry,
   sidecars, workflows, instructions, and issue forms.
+- Classify every draft/regular-version statement by lifecycle: optimizer,
+  bootstrap, merge-time deployment, or repository-wide publication. Compare
+  prose with active deployment workflow behavior before declaring a conflict.
 - Inventory GitHub environments and variables, Azure identities and federated
   credentials, role assignments, Foundry accounts/projects/model deployments,
   and deployed agents using read-only commands.
