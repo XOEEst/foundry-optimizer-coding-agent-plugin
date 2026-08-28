@@ -65,8 +65,10 @@ The skill:
 5. records actual setup changes in the report;
 6. creates a local exact commit;
 7. capability-probes azd and the `azure.ai.agents` extension;
-8. runs `azd deploy <service>`;
-9. returns deployment versions and resource links.
+8. binds reused projects with `AZURE_AI_PROJECT_ID` in the selected azd
+   environment;
+9. runs `azd deploy <service>`;
+10. returns deployment versions and resource links.
 
 The skill does not push or merge.
 

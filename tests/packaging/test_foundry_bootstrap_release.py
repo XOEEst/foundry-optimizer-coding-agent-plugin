@@ -45,6 +45,11 @@ TEMPLATE_VALUES = {
     "__FOUNDRY_PROJECT_ENDPOINT__": (
         "https://example.services.ai.azure.com/api/projects/example"
     ),
+    "__FOUNDRY_PROJECT_RESOURCE_ID__": (
+        "/subscriptions/00000000-0000-0000-0000-000000000000/"
+        "resourceGroups/example/providers/Microsoft.CognitiveServices/"
+        "accounts/example/projects/example"
+    ),
     "__FOUNDRY_ACCOUNT_RESOURCE_ID__": (
         "/subscriptions/00000000-0000-0000-0000-000000000000/"
         "resourceGroups/example/providers/Microsoft.CognitiveServices/"
@@ -225,3 +230,15 @@ def test_yaml_templates_are_parseable_before_rendering() -> None:
         assert yaml.safe_load(
             (BOOTSTRAP_ROOT / "templates" / name).read_text(encoding="utf-8")
         )
+
+
+def test_deploy_template_binds_existing_foundry_project_to_azd_environment() -> None:
+    workflow = _render_template("foundry-opt-deploy.yml")
+
+    assert "AZURE_AI_PROJECT_ID:" in workflow
+    assert "AZURE_AI_PROJECT_ENDPOINT:" in workflow
+    assert 'azd env set AZURE_AI_PROJECT_ID "$AZURE_AI_PROJECT_ID"' in workflow
+    assert (
+        'test "$(azd env get-value AZURE_AI_PROJECT_ID)" '
+        '= "$AZURE_AI_PROJECT_ID"'
+    ) in workflow

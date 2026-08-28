@@ -48,6 +48,7 @@
 ## Deployment
 
 - azd environment: `__AZD_ENVIRONMENT__`
+- Foundry project ARM ID: `__FOUNDRY_PROJECT_RESOURCE_ID__`
 - command: `azd deploy`
 - deployed commit: `pending`
 - result: `pending`

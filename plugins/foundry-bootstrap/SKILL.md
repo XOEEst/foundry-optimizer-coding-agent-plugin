@@ -140,6 +140,9 @@ Record the sources actually used in the bootstrap report.
 - Inventory GitHub environments and variables, Azure identities and federated
   credentials, role assignments, Foundry accounts/projects/model deployments,
   and deployed agents using read-only commands.
+- Resolve and verify the full ARM resource ID for every reused or proposed
+  Foundry project. An endpoint alone is insufficient for an existing-project
+  `azd deploy`; retain the ID as `AZURE_AI_PROJECT_ID` in the deployment plan.
 - Probe `azd version`, `azd ext list`, `azd ai agent version`, and
   `azd ai agent --help`. Use the installed tools when the required commands are
   available. Otherwise include installation or upgrade from the official
@@ -229,6 +232,8 @@ Show:
   will be created
 - exact branch, base commit, paths, commit message, and intended commit
 - exact `azd` environment, services, project endpoints, and deployment command
+- exact `AZURE_AI_PROJECT_ID` full ARM resource ID and every azd environment
+  value required by the selected services
 
 Ask for one explicit approval of the entire plan. A partial answer is not
 approval.
@@ -255,9 +260,22 @@ approval.
    approved plan. Do not store credentials in the repository.
 5. Create the approved local commit containing only approved paths.
 6. Verify `HEAD` is that commit and the deployment worktree is clean.
-7. Select the approved azd environment. Run `azd provision` only for approved
-   missing resources declared by `azure.yaml`; otherwise skip it.
-8. Run the approved `azd deploy` command from the exact local commit.
+7. Select the approved azd environment. For every existing Foundry project,
+   set `AZURE_AI_PROJECT_ID` to its verified full ARM resource ID and set the
+   approved endpoint, subscription, location, resource group, and referenced
+   model values required by `azure.yaml`. Verify the binding before running
+   `azd deploy`:
+
+   ```text
+   azd env get-value AZURE_AI_PROJECT_ID
+   ```
+
+   Require an exact match with the approved project ID. Run `azd provision`
+   only for approved missing resources declared by `azure.yaml`; otherwise
+   skip it.
+8. Run the approved `azd deploy` command from the exact local commit. Never
+   treat an endpoint-only azd environment as sufficient for an agent service
+   that depends on an existing `azure.ai.project` service.
 9. Verify resulting resource identities and links without changing
    unapproved settings.
 10. Complete `.foundry-opt/bootstrap-report.md` with versions, commit, reused

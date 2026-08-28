@@ -136,6 +136,7 @@ Use the current authenticated tenant and subscription. Record them explicitly.
 Inspect:
 
 - Foundry accounts and projects
+- each project's full ARM resource ID as well as its endpoint
 - project endpoints and immutable ARM resource IDs
 - model deployments
 - hosted agents and versions
@@ -159,3 +160,9 @@ For each resource needed by the desired repository:
 
 Only exact and missing resources may appear in an approval plan. A conflict or
 unknown result blocks mutation.
+
+For an existing project used by an `azure.ai.agent` service, plan
+`AZURE_AI_PROJECT_ID=<full-project-ARM-resource-ID>` in the selected azd
+environment. Verify the resource with an Azure management-plane read. Do not
+infer that `endpoint:` in `azure.yaml` removes this azd environment
+requirement.

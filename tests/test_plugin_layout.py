@@ -132,6 +132,16 @@ def test_bootstrap_scopes_draft_only_rules_to_optimize_jobs() -> None:
     assert "repository-wide deployment prohibition" in normalized
 
 
+def test_bootstrap_binds_existing_project_id_before_azd_deploy() -> None:
+    _, body = _parse_frontmatter(BOOTSTRAP_ROOT / "SKILL.md")
+    normalized = " ".join(body.split())
+
+    assert "AZURE_AI_PROJECT_ID" in body
+    assert "full ARM resource ID" in normalized
+    assert "azd env get-value AZURE_AI_PROJECT_ID" in body
+    assert "before running `azd deploy`" in normalized
+
+
 def test_local_skill_checkout_reuses_remote_runtime_provenance() -> None:
     _, body = _parse_frontmatter(BOOTSTRAP_ROOT / "SKILL.md")
     normalized = " ".join(body.split())

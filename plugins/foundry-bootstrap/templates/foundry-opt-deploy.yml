@@ -20,6 +20,9 @@ jobs:
       AZURE_CLIENT_ID: ${{ vars.AZURE_OPTIMIZER_CLIENT_ID }}
       AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
       AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      AZURE_AI_PROJECT_ID: "__FOUNDRY_PROJECT_RESOURCE_ID__"
+      AZURE_AI_PROJECT_ENDPOINT: "__FOUNDRY_PROJECT_ENDPOINT__"
+      FOUNDRY_PROJECT_ENDPOINT: "__FOUNDRY_PROJECT_ENDPOINT__"
     steps:
       - name: Check out the exact source commit
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -84,6 +87,10 @@ jobs:
             azd env new "$AZD_ENVIRONMENT" --no-prompt
           fi
           azd env set AZURE_SUBSCRIPTION_ID "$AZURE_SUBSCRIPTION_ID"
+          azd env set AZURE_AI_PROJECT_ID "$AZURE_AI_PROJECT_ID"
+          azd env set AZURE_AI_PROJECT_ENDPOINT "$AZURE_AI_PROJECT_ENDPOINT"
+          azd env set FOUNDRY_PROJECT_ENDPOINT "$FOUNDRY_PROJECT_ENDPOINT"
+          test "$(azd env get-value AZURE_AI_PROJECT_ID)" = "$AZURE_AI_PROJECT_ID"
 
       - name: Deploy the exact committed source
         shell: bash
