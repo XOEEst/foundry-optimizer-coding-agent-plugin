@@ -166,6 +166,17 @@ def test_local_skill_checkout_reuses_remote_runtime_provenance() -> None:
     assert "compatible runtime commit" in normalized
 
 
+def test_runtime_compatibility_executes_no_evaluation_preflight() -> None:
+    _, body = _parse_frontmatter(BOOTSTRAP_ROOT / "SKILL.md")
+    normalized = " ".join(body.split())
+
+    assert "uv run --frozen --no-dev" in body
+    assert "src/foundry_opt/templates/customer-repo" in body
+    assert "registry v2 sidecar with `verification.mode: off`" in normalized
+    assert "Do not infer incompatibility from legacy loaders" in normalized
+    assert "zero exit code is authoritative" in normalized
+
+
 def test_bootstrap_tree_is_exactly_static_content() -> None:
     assert _bootstrap_files() == EXPECTED_BOOTSTRAP_FILES
     assert not (BOOTSTRAP_ROOT / "scripts").exists()

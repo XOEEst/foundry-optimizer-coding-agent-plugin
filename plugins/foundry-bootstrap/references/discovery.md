@@ -93,6 +93,15 @@ azd ext install azure.ai.agents
 azd ext upgrade azure.ai.agents
 ```
 
+For retained `foundry-opt` runtime compatibility, execute the exact fetched
+runtime against its bundled registry-v2/no-evaluation customer template. Do
+not classify compatibility by source inspection. A runtime may intentionally
+support both legacy metadata and current registry/profile contracts.
+
+If the isolated dependency restore fails, classify that as a package-feed
+failure and apply the approved feed fallback. Only a completed preflight with a
+nonzero exit is runtime incompatibility.
+
 ## Package feed inventory
 
 Identify Python and NuGet restore commands plus existing `pyproject.toml`,

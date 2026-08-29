@@ -83,6 +83,21 @@ capability.
      package path, `uv.lock` SHA-256, and optimizer skill path from that fetched
      tree, not from unpushed local files. A pushed runtime branch or tag is
      sufficient; a GitHub Release is optional.
+   - Execute the fetched runtime's real no-evaluation compatibility probe. Its
+     bundled `src/foundry_opt/templates/customer-repo` is the minimal supported
+     registry v2 sidecar with `verification.mode: off` and no evaluation
+     bundle:
+
+     ```text
+     uv run --frozen --no-dev --project <package-root> foundry-opt preflight \
+       --repository <checkout>/src/foundry_opt/templates/customer-repo --offline
+     ```
+
+     Use the approved Python feed fallback if dependency restoration cannot
+     reach PyPI. A zero exit code is authoritative for this compatibility
+     question. Do not infer incompatibility from legacy loaders, compatibility
+     fields, old documentation, or the fact that `preflight` also supports
+     older repository layouts.
    - If no compatible runtime commit is remotely fetchable, stop with the
      inspected repository and refs plus the instruction for the plugin
      maintainer to publish a compatible runtime. Do not ask the owner to supply

@@ -33,6 +33,11 @@ Registry v2 records:
 Optimizer and registered deployment workflows fetch and verify that exact
 runtime.
 
+Source-checkout bootstrap verifies compatibility by running the fetched
+runtime's offline preflight against its bundled registry-v2 profile with
+verification disabled. Legacy compatibility code does not make a runtime
+incompatible with repositories that omit evaluation bundles.
+
 ## azd
 
 The skill does not pin azd or `azure.ai.agents`. It checks the installed/latest
