@@ -73,6 +73,16 @@ def test_plugins_discovery_boundary_contains_both_skills() -> None:
     assert not LEGACY_OPTIMIZER_ROOT.exists()
 
 
+def test_readme_installs_source_skills_from_plugins_directory() -> None:
+    readme = _read(REPOSITORY_ROOT / "README.md")
+
+    assert 'copilot skill add ".\\plugins"' in readme
+    assert "/skills reload" in readme
+    assert "/skills info foundry-bootstrap" in readme
+    assert "/skills info foundry-agent-optimizer" in readme
+    assert "dist\\foundry-bootstrap-skill" not in readme
+
+
 def test_bootstrap_skill_is_static_and_uses_one_combined_approval() -> None:
     frontmatter, body = _parse_frontmatter(BOOTSTRAP_ROOT / "SKILL.md")
     normalized = " ".join(body.split())

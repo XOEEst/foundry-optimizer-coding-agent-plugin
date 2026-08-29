@@ -15,34 +15,60 @@ the low-level command tree.
 These guides explain the owner decisions first. Use the advanced
 references once you need the detailed contracts.
 
-Install the `foundry-bootstrap` skill, open the agent repository in your coding
-agent, and say:
+## Install the skills from this checkout
 
-```text
-Use /foundry-bootstrap to bootstrap this repository.
+From this repository root, register the `plugins` directory once:
+
+```powershell
+copilot skill add ".\plugins"
 ```
 
-The skill shows one plain-language review or question at a time. It discovers
-agent folders, records which agents should be registered and enabled, resolves
-each enabled agent's Foundry project endpoint and agent name, prepares GitHub
-OIDC and Azure access, creates a reviewed local commit, and asks separately
-before deploying that exact commit.
+This installs both source skills:
+
+- `plugins\foundry-bootstrap`
+- `plugins\foundry-agent-optimizer`
+
+Do not install a generated package under `dist`. If either skill was previously
+registered from another directory, use `/skills info <skill-name>` to find that
+directory, remove it with `copilot skill remove "<old-directory>"`, and rerun
+the add command above.
+
+In an active Copilot CLI session, load and verify the registrations:
+
+```text
+/skills reload
+/skills info foundry-bootstrap
+/skills info foundry-agent-optimizer
+```
+
+After pulling, switching branches, or editing a skill, `/skills reload` is
+enough. Re-add the directory only when the repository checkout path changes.
+Start a new conversation if either skill was already invoked before reloading.
+
+Then open the agent repository in Copilot CLI and say:
+
+```text
+Use the /foundry-bootstrap skill to bootstrap this repository.
+```
+
+The skill discovers agent folders, records which agents should be registered
+and enabled, resolves each enabled agent's Foundry project endpoint and agent
+name, and prepares one combined review covering repository changes, GitHub
+OIDC, Azure access, the local commit, and deployment. After approval, it creates
+the reviewed local commit and deploys that exact commit without pushing it.
 
 Evaluation is optional. Owners can start with no evidence, repository checks,
 or a later issue that supplies a dataset and evaluators.
 
 ## Owner decisions
 
-Owners review only these decisions:
+The single combined approval covers:
 
 - Which discovered agents should be ignored, registered disabled, or
   registered enabled?
 - Which Foundry project endpoint and agent name should each enabled agent use?
-- Should the reviewed repository changes be applied?
-- Should GitHub environments be connected to the reviewed Azure identity?
-- Should verification be configured now, deferred, or skipped?
-- Should the exact local bootstrap commit be created?
-- Should that exact commit be deployed now with the current Azure login?
+- Which exact repository files and cloud resources will be reused or created?
+- Which local commit and deployment command will be executed?
 
 The final summary links to the GitHub repository and environments, Azure
 identity and role assignments, Foundry projects and agents, and any configured
