@@ -15,35 +15,35 @@ the low-level command tree.
 These guides explain the owner decisions first. Use the advanced
 references once you need the detailed contracts.
 
-## Install the skills from this checkout
+## Install bootstrap from this checkout
 
-From this repository root, register the `plugins` directory once:
+Repository owners install only the bootstrap skill. From this repository root:
 
 ```powershell
-copilot skill add ".\plugins"
+copilot skill add ".\plugins\foundry-bootstrap"
 ```
 
-This installs both source skills:
+Do not install a generated package under `dist`. If `foundry-bootstrap` was
+previously registered from another directory, use
+`/skills info foundry-bootstrap` to find that directory, remove it with
+`copilot skill remove "<old-directory>"`, and rerun the add command above.
 
-- `plugins\foundry-bootstrap`
-- `plugins\foundry-agent-optimizer`
-
-Do not install a generated package under `dist`. If either skill was previously
-registered from another directory, use `/skills info <skill-name>` to find that
-directory, remove it with `copilot skill remove "<old-directory>"`, and rerun
-the add command above.
-
-In an active Copilot CLI session, load and verify the registrations:
+In an active Copilot CLI session, load and verify the registration:
 
 ```text
 /skills reload
 /skills info foundry-bootstrap
-/skills info foundry-agent-optimizer
 ```
 
-After pulling, switching branches, or editing a skill, `/skills reload` is
+After pulling, switching branches, or editing the skill, `/skills reload` is
 enough. Re-add the directory only when the repository checkout path changes.
-Start a new conversation if either skill was already invoked before reloading.
+Start a new conversation if the skill was already invoked before reloading.
+
+Bootstrap still prepares the complete optimization experience. The generated
+Copilot setup workflow automatically installs `foundry-agent-optimizer` from
+the exact runtime revision, and bootstrap creates the optimizer issue form,
+Copilot environment, OIDC identity, and required workflow configuration.
+Repository owners do not install the optimizer skill manually.
 
 Then open the agent repository in Copilot CLI and say:
 
