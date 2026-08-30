@@ -10,7 +10,13 @@ This ADR originated in the earlier pre-public optimizer lineage and remains rele
 
 ## Decision
 
-Treat `.github/foundry-optimizer.yaml` as the maximum repository policy and `.foundry/agent-metadata.yaml` as trusted agent-specific configuration. Issue input may narrow candidate count and editable scope, but must never widen any repository constraint. The compatibility parser still accepts a legacy model-subset section, while the current owner issue form deliberately hides that selector. The CLI blocks optimize-job start when any accepted issue input attempts to widen policy.
+Treat each registry-selected agent sidecar as the maximum repository policy and
+trusted agent-specific configuration. Issue input may narrow candidate count
+and editable scope, but must never widen any repository constraint. The
+compatibility parser still accepts legacy policy and metadata documents, while
+newly bootstrapped repositories require only registry v2 and sidecars. The CLI
+blocks optimize-job start when any accepted issue input attempts to widen
+policy.
 
 ## Consequences
 
@@ -35,7 +41,10 @@ Tradeoffs:
 ## Evidence
 
 - Repository policy and metadata schemas in [`src/foundry_opt/poc/config.py`](../../src/foundry_opt/poc/config.py).
-- Customer-repo templates in [`src/foundry_opt/templates/customer-repo/.github/foundry-optimizer.yaml`](../../src/foundry_opt/templates/customer-repo/.github/foundry-optimizer.yaml) and [`src/foundry_opt/templates/customer-repo/.foundry/agent-metadata.yaml`](../../src/foundry_opt/templates/customer-repo/.foundry/agent-metadata.yaml).
+- Current registry and sidecar templates in
+  [`src/foundry_opt/templates/customer-repo/.foundry-opt/registry.yaml`](../../src/foundry_opt/templates/customer-repo/.foundry-opt/registry.yaml)
+  and
+  [`src/foundry_opt/templates/customer-repo/agent/.foundry/foundry-opt.yaml`](../../src/foundry_opt/templates/customer-repo/agent/.foundry/foundry-opt.yaml).
 - Strict issue parsing in [`src/foundry_opt/poc/issue.py`](../../src/foundry_opt/poc/issue.py).
 - Policy narrowing and widening rejections in [`tests/poc/test_config.py`](../../tests/poc/test_config.py) and [`tests/poc/test_cli.py`](../../tests/poc/test_cli.py).
 

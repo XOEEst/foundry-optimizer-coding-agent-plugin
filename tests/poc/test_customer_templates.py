@@ -19,7 +19,7 @@ OPTIONAL_CUSTOM_AGENT = (
     REPOSITORY_ROOT / "examples" / "custom-agents" / "foundry-optimizer.agent.md"
 )
 EXPECTED_WORKFLOWS = {"agent-ci.yml", "copilot-setup-steps.yml", "foundry-opt-validation.yml", "foundry-opt-deploy.yml"}
-RUNTIME_SHA = "770ad878f0658e9368b042d9a7f6732e49ff0200"
+RUNTIME_SHA = "30500751c96cdff4880f69b6b5eb3cb011e6af70"
 FORBIDDEN_STRINGS = ("FOUNDRY_OPT_SHARED_REPO_SSH_KEY", "git@github.com", "known_hosts", "StrictHostKeyChecking")
 
 

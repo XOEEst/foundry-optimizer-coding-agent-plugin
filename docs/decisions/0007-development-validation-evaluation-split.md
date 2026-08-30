@@ -37,7 +37,8 @@ Tradeoffs:
 
 - Optimize-job contract in the root [README](../../README.md).
 - Decision and controller logic in [`src/foundry_opt/poc/controller.py`](../../src/foundry_opt/poc/controller.py) and [`src/foundry_opt/poc/decision.py`](../../src/foundry_opt/poc/decision.py).
-- Trusted evaluation split metadata in [`src/foundry_opt/templates/customer-repo/.foundry/agent-metadata.yaml`](../../src/foundry_opt/templates/customer-repo/.foundry/agent-metadata.yaml).
+- Trusted optional evaluation split metadata in
+  [`src/foundry_opt/templates/customer-repo/agent/.foundry/foundry-opt.yaml`](../../src/foundry_opt/templates/customer-repo/agent/.foundry/foundry-opt.yaml).
 - Decision and validating-flow tests in [`tests/poc/test_controller.py`](../../tests/poc/test_controller.py), [`tests/poc/test_decision.py`](../../tests/poc/test_decision.py), and [`tests/poc/test_config.py`](../../tests/poc/test_config.py).
 
 ## Supersedes / Superseded by

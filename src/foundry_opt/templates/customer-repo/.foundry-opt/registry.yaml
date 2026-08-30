@@ -3,9 +3,9 @@ distribution:
   schema_version: 1
   repository: https://github.com/XOEEst/foundry-optimizer-coding-agent-plugin.git
   channel: reviewed
-  pin: 770ad878f0658e9368b042d9a7f6732e49ff0200
+  pin: 30500751c96cdff4880f69b6b5eb3cb011e6af70
   package_path: .
-  uv_lock_sha256: 74d7bb534c53e71a61ce197f3d5fa3169f2413373c2e42617280e78e83d6c681
+  uv_lock_sha256: e2d5957b893c84498ba33301a959fbdc146fc2efb72d9fdf0e6d207b4c8341c9
   optimizer_skill_path: plugins/foundry-agent-optimizer
 github:
   schema_version: 1

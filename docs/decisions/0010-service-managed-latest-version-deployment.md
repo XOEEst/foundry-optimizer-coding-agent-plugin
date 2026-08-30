@@ -36,7 +36,8 @@ Tradeoffs:
 
 - Production deployment contract in the root [README](../../README.md).
 - Deployment preflight and publication logic in [`src/foundry_opt/poc/deploy.py`](../../src/foundry_opt/poc/deploy.py).
-- Trusted deployment metadata template in [`src/foundry_opt/templates/customer-repo/.foundry/agent-metadata.yaml`](../../src/foundry_opt/templates/customer-repo/.foundry/agent-metadata.yaml).
+- Trusted deployment profile in
+  [`src/foundry_opt/templates/customer-repo/agent/.foundry/foundry-opt.yaml`](../../src/foundry_opt/templates/customer-repo/agent/.foundry/foundry-opt.yaml).
 - Deployment tests covering draft validation, guardrails, reconciliation, stable operation IDs, and latest-version verification in [`tests/poc/test_deploy.py`](../../tests/poc/test_deploy.py).
 
 ## Supersedes / Superseded by
