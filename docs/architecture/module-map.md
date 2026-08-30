@@ -29,6 +29,7 @@ flowchart TD
 | [`repository_contracts.py`](../../src/foundry_opt/repository_contracts.py) | Registry and agent-profile models | Neutral committed repository contract |
 | [`repository_selection.py`](../../src/foundry_opt/repository_selection.py) | Registry selection and changed-path matrix | Shared optimizer/deployment selection rules |
 | [`source_discovery.py`](../../src/foundry_opt/source_discovery.py) | Source fingerprints | Exact-source comparisons used outside bootstrap |
+| [`poc/registry_runtime.py`](../../src/foundry_opt/poc/registry_runtime.py) | Registry selection to runtime contracts | Projects per-agent sidecars into shared optimizer/deployment policy, metadata, model, evaluation, and OIDC contracts |
 | [`poc/runtime.py`](../../src/foundry_opt/poc/runtime.py) | Optimize-job runtime | Draft evaluation, candidate state, and broker handoff |
 | [`poc/deploy.py`](../../src/foundry_opt/poc/deploy.py) | Registered verify/publish commands | Exact-source production verification and publication |
 | [`packaging/`](../../src/foundry_opt/packaging/) | Deterministic package builders | Exact source archives for optimizer and registered deployment |

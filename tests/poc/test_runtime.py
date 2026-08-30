@@ -157,7 +157,7 @@ def _create_runtime_repository(tmp_path: Path) -> tuple[Path, str, dict[str, str
     (repository / ".foundry-opt" / "registry.yaml").write_text(
         "\n".join(
             (
-                "schema_version: 2",
+                "schema_version: 1",
                 "distribution:",
                 "  repository: https://github.com/example-org/shared-skill",
                 "  channel: reviewed",

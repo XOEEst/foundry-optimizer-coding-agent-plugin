@@ -12,7 +12,7 @@ body:
   - type: input
     id: repo_agent_id
     attributes:
-      label: Repository agent ID
+      label: Repository agent ID or explicit Foundry target
       description: Enter one exact agent ID from `.foundry-opt/registry.yaml`.
       placeholder: example-agent
     validations:

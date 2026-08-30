@@ -108,6 +108,9 @@ def test_bootstrap_skill_is_static_and_uses_one_combined_approval() -> None:
     assert "Never push." in normalized
     assert "Leave successful local and remote changes in place" in normalized
     assert "Do not create datasets, evaluators, evaluation definitions, or evaluation runs." in normalized
+    assert "A repository containing only agent code is a valid input" in normalized
+    assert ".github/foundry-optimizer.yaml" not in normalized
+    assert ".foundry/agent-metadata.yaml" not in normalized
 
 
 def test_bootstrap_skill_resolves_ignored_contract_paths_before_approval() -> None:
@@ -172,6 +175,8 @@ def test_runtime_compatibility_executes_no_evaluation_preflight() -> None:
 
     assert "uv run --frozen --no-dev" in body
     assert "src/foundry_opt/templates/customer-repo" in body
+    assert "git -C <fixture> init" in body
+    assert "--repository <fixture> --offline" in body
     assert "registry v2 sidecar with `verification.mode: off`" in normalized
     assert "Do not infer incompatibility from legacy loaders" in normalized
     assert "zero exit code is authoritative" in normalized

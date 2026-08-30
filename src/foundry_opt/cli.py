@@ -19,8 +19,10 @@ from pydantic import ValidationError
 from foundry_opt import __version__
 from foundry_opt.contract_errors import BootstrapConfigError
 from foundry_opt.repository_selection import (
+    RegistrySelection,
     build_registered_deployment_plan,
     normalize_issue_author_permission,
+    resolve_enabled_registry_selections,
     resolve_registry_selection,
     verify_issue_check_authority,
     verify_issue_dataset_authority,
@@ -29,6 +31,10 @@ from foundry_opt.repository_selection import (
 from foundry_opt.repository_contracts import RepositoryRegistry
 from foundry_opt.runtime_provenance import verify_runtime_checkout
 from foundry_opt.poc import runtime as poc_runtime
+from foundry_opt.poc.registry_runtime import (
+    build_agent_runtime_contracts,
+    build_repository_policy_from_registry_selection,
+)
 from foundry_opt.poc.auth import (
     AuthError,
     build_client_assertion_credential,
@@ -264,6 +270,33 @@ def validate_config(
     registry = RepositoryRegistry.from_document(
         registry_path.read_text(encoding="utf-8")
     )
+    selections = _enabled_sidecar_selections(
+        root,
+        registry=registry,
+        registry_path=registry_path,
+    )
+    checkout = (
+        verify_runtime_checkout(registry, shared_checkout)
+        if shared_checkout is not None
+        else None
+    )
+    if selections is not None:
+        _echo_json(
+            {
+                "config_paths": [
+                    selection.config_path for selection in selections
+                ],
+                "repo_agent_ids": [
+                    selection.repo_agent_id for selection in selections
+                ],
+                "shared_commit": registry.distribution.pin,
+                "shared_uv_lock_sha256": (
+                    checkout.uv_lock_sha256 if checkout is not None else None
+                ),
+                "status": "valid",
+            }
+        )
+        return
     metadata = load_agent_metadata(root / _METADATA_PATH)
     policy = load_repository_policy(
         root / _POLICY_PATH,
@@ -273,11 +306,6 @@ def validate_config(
         root,
         metadata.repository_identity,
         metadata.repository_id,
-    )
-    checkout = (
-        verify_runtime_checkout(registry, shared_checkout)
-        if shared_checkout is not None
-        else None
     )
     _echo_json(
         {
@@ -299,6 +327,7 @@ def validate_config(
 def preflight(
     repository: Path = typer.Option(Path("."), "--repository"),
     offline: bool = typer.Option(False, "--offline"),
+    repo_agent_id: str | None = typer.Option(None, "--repo-agent-id"),
 ) -> None:
     """Verify policy, metadata, registry, OIDC, and broker prerequisites."""
 
@@ -309,15 +338,10 @@ def preflight(
     registry = RepositoryRegistry.from_document(
         registry_path.read_text(encoding="utf-8")
     )
-    metadata = load_agent_metadata(root / _METADATA_PATH)
-    policy = load_repository_policy(
-        root / _POLICY_PATH,
-        metadata_path=root / _METADATA_PATH,
-    )
-    _verify_repository_identity(
+    selections = _enabled_sidecar_selections(
         root,
-        metadata.repository_identity,
-        metadata.repository_id,
+        registry=registry,
+        registry_path=registry_path,
     )
 
     broker_socket = _required_environment_path(
@@ -336,6 +360,65 @@ def preflight(
         not state_root.exists() or not state_root.is_dir()
     ):
         raise typer.BadParameter("optimize-job state root is unavailable")
+    if selections is not None and offline:
+        _echo_json(
+            {
+                "broker_socket": str(broker_socket) if broker_socket else None,
+                "oidc": False,
+                "repo_agent_ids": [
+                    selection.repo_agent_id for selection in selections
+                ],
+                "shared_commit": registry.distribution.pin,
+                "status": "ready",
+            }
+        )
+        return
+    if selections is not None:
+        paths = load_runtime_paths(root, environment=os.environ)
+        settings = load_runtime_settings(
+            paths,
+            environment=os.environ,
+            repo_agent_id=repo_agent_id,
+        )
+        _verify_repository_identity(
+            root,
+            settings.metadata.repository_identity,
+            settings.metadata.repository_id,
+        )
+        route_fingerprint = capture_route_fingerprint(
+            repository=root,
+            environment=os.environ,
+            paths=paths,
+            settings=settings,
+        )
+        _echo_json(
+            {
+                "agent_name": settings.metadata.agent_name,
+                "broker_socket": str(broker_socket) if broker_socket else None,
+                "candidate_range": [
+                    settings.policy.min_candidates,
+                    settings.policy.max_candidates,
+                ],
+                "foundry_route_fingerprint": route_fingerprint.sha256,
+                "oidc": True,
+                "repo_agent_ids": [settings.metadata.agent_name],
+                "repository": settings.metadata.repository_identity,
+                "shared_commit": registry.distribution.pin,
+                "status": "ready",
+            }
+        )
+        return
+
+    metadata = load_agent_metadata(root / _METADATA_PATH)
+    policy = load_repository_policy(
+        root / _POLICY_PATH,
+        metadata_path=root / _METADATA_PATH,
+    )
+    _verify_repository_identity(
+        root,
+        metadata.repository_identity,
+        metadata.repository_id,
+    )
     route_fingerprint = None
     if not offline:
         runtime_paths = load_runtime_paths(root, environment=os.environ)
@@ -364,6 +447,33 @@ def preflight(
             "status": "ready",
         }
     )
+
+
+def _enabled_sidecar_selections(
+    root: Path,
+    *,
+    registry: RepositoryRegistry,
+    registry_path: Path,
+) -> tuple[RegistrySelection, ...] | None:
+    if registry.schema_version != 2:
+        return None
+
+    def reader(relative: str) -> bytes:
+        if relative == ".foundry-opt/registry.yaml":
+            return registry_path.read_bytes()
+        return (root / relative).read_bytes()
+
+    selections = resolve_enabled_registry_selections(
+        root,
+        content_reader=reader,
+    )
+    for selection in selections:
+        build_repository_policy_from_registry_selection(selection)
+        build_agent_runtime_contracts(
+            selection,
+            include_evaluation=selection.sidecar.verification.bundle is not None,
+        )
+    return selections
 
 
 @deploy_app.command("plan")
@@ -1291,6 +1401,10 @@ def _prepare_start_runtime(
         issue_number=issue_number,
         job_id=job_id,
     )
+    selected_repo_agent_id = _request_repo_agent_id(
+        start.request,
+        repository_root=repository_root,
+    )
     paths = load_runtime_paths(
         repository_root,
         environment=os.environ,
@@ -1306,6 +1420,7 @@ def _prepare_start_runtime(
         environment=os.environ,
         base_commit=base_commit,
         deadline_seconds=deadline_seconds,
+        repo_agent_id=selected_repo_agent_id,
     )
     if start.issue_binding is not None:
         _assert_issue_binding_matches_metadata(start.issue_binding, settings.metadata)
@@ -1391,6 +1506,10 @@ def _load_existing_runtime(
     request, request_digest_sha256 = _load_persisted_issue_request(
         _issue_request_path(paths.job_root)
     )
+    selected_repo_agent_id = _request_repo_agent_id(
+        request,
+        repository_root=repository_root,
+    )
     state_store = JobStateStore(paths.job_state_path)
     state = state_store.load()
     event_binding, event_request = _load_runtime_issue_event(event)
@@ -1399,6 +1518,7 @@ def _load_existing_runtime(
         environment=os.environ,
         base_commit=state.identity.base_commit,
         deadline_seconds=deadline_seconds,
+        repo_agent_id=selected_repo_agent_id,
     )
     trusted_issue_binding = (
         loaded_binding.issue if loaded_binding is not None else event_binding
@@ -1717,6 +1837,23 @@ def _issue_request_from_body(body: str) -> OptimizeIssueRequest:
             "acknowledge_no_evidence": parsed.acknowledge_no_evidence,
         }
     )
+
+
+def _request_repo_agent_id(
+    request: OptimizeIssueRequest,
+    *,
+    repository_root: Path,
+) -> str | None:
+    if request.explicit_target is not None:
+        if (repository_root / ".foundry-opt" / "registry.yaml").is_file():
+            raise RuntimeIntegrationError(
+                "explicit Foundry targets are not allowed for registry-managed "
+                "workflow execution"
+            )
+        return None
+    if request.repo_agent_id == "default":
+        return None
+    return request.repo_agent_id
 
 
 def _issue_request_path(job_root: Path) -> Path:

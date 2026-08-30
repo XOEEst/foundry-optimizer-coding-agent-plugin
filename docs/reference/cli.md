@@ -9,7 +9,9 @@ Bootstrap is skill-only and has no `foundry-opt bootstrap ...` command tree.
 - `foundry-opt preflight`
 
 Validation and preflight read registry v2 runtime provenance directly. They do
-not require a bootstrap receipt.
+not require a bootstrap receipt or repository-global legacy policy/metadata
+files. Offline preflight validates every enabled sidecar. Online preflight uses
+`--repo-agent-id` to select one agent in a multi-agent repository.
 
 ## Optimize-job commands
 

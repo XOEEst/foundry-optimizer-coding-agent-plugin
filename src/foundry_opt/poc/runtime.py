@@ -64,8 +64,21 @@ from foundry_opt.poc.state import (
 )
 from foundry_opt.poc.source import SourcePackagingError, package_git_source
 from foundry_opt.poc.verification import VerificationResolution
+from foundry_opt.poc.runtime_errors import (
+    RuntimeIntegrationError,
+    RuntimeWiringError,
+)
+from foundry_opt.poc.registry_runtime import (
+    build_agent_metadata_from_registry_selection,
+    build_repository_policy_from_registry_selection,
+    resolve_registered_repository_context,
+)
 from foundry_opt.repository_contracts import RepositoryRegistry
-from foundry_opt.repository_selection import protected_editable_patterns_for_repository
+from foundry_opt.repository_selection import (
+    RegistrySelection,
+    protected_editable_patterns_for_repository,
+    resolve_registry_selection,
+)
 
 
 DEFAULT_POLICY_PATH = Path(".github/foundry-optimizer.yaml")
@@ -102,14 +115,6 @@ _BROKER_ERROR_CONTROL_PATTERN = re.compile(r"[\x00-\x1f\x7f]+")
 
 class _FrozenModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-
-
-class RuntimeWiringError(RuntimeError):
-    """The optimize-job runtime wiring could not be proven safe."""
-
-
-class RuntimeIntegrationError(RuntimeWiringError):
-    """A required runtime integration is missing or inconsistent."""
 
 
 class RuntimeSidecarError(RuntimeWiringError):
@@ -531,11 +536,11 @@ def load_runtime_paths(
 ) -> RuntimePaths:
     env = os.environ if environment is None else environment
     repository_root = _repository_root(repository)
-    resolved_policy_path = _resolve_existing_file(
+    resolved_policy_path = _resolve_any_path(
         repository_root / DEFAULT_POLICY_PATH if policy_path is None else Path(policy_path),
         field="policy_path",
     )
-    resolved_metadata_path = _resolve_existing_file(
+    resolved_metadata_path = _resolve_any_path(
         repository_root / DEFAULT_METADATA_PATH if metadata_path is None else Path(metadata_path),
         field="metadata_path",
     )
@@ -634,6 +639,7 @@ def load_runtime_settings(
     environment: Mapping[str, str] | None = None,
     base_commit: str | None = None,
     deadline_seconds: float | str | None = None,
+    repo_agent_id: str | None = None,
     policy_loader: Callable[..., RepositoryPolicy] = load_repository_policy,
     metadata_loader: Callable[[Path | str], AgentMetadata] = load_agent_metadata,
     registry_loader: Callable[
@@ -642,8 +648,6 @@ def load_runtime_settings(
     repository_head_loader: Callable[[Path], str] = load_repository_head,
     base_commit_resolver: Callable[..., str] = resolve_base_commit,
 ) -> RuntimeSettings:
-    policy = policy_loader(paths.policy_path, metadata_path=paths.metadata_path)
-    metadata = metadata_loader(paths.metadata_path)
     registry = registry_loader(paths.registry_path.read_text(encoding="utf-8"))
     if not registry.has_exact_runtime_provenance:
         raise RuntimeIntegrationError(
@@ -661,6 +665,37 @@ def load_runtime_settings(
             "uv_lock_sha256": distribution.uv_lock_sha256,
         }
     )
+    selection = _registered_runtime_selection(
+        paths,
+        registry,
+        repo_agent_id=repo_agent_id,
+    )
+    if selection is None:
+        policy = policy_loader(paths.policy_path, metadata_path=paths.metadata_path)
+        metadata = metadata_loader(paths.metadata_path)
+    else:
+        context = resolve_registered_repository_context(
+            registry,
+            environment=os.environ if environment is None else environment,
+            account_resource_id=(
+                selection.sidecar.foundry_project.account_resource_id
+            ),
+        )
+        policy = build_repository_policy_from_registry_selection(selection)
+        metadata = build_agent_metadata_from_registry_selection(
+            selection,
+            repository_identity=context.repository_identity,
+            repository_id=context.repository_id,
+            default_branch=context.default_branch,
+            tenant_id=context.tenant_id,
+            subscription_id=context.subscription_id,
+            client_id=context.client_id,
+            client_id_variable=registry.github.client_id_variable,
+            oidc_subject_prefix=context.oidc_subject_prefix,
+            oidc_role="optimizer",
+            oidc_environment=registry.github.optimizer_environment,
+            include_evaluation=selection.sidecar.verification.bundle is not None,
+        )
     repository_head = repository_head_loader(paths.repository_root)
     resolved_base_commit = base_commit_resolver(
         paths.repository_root,
@@ -670,9 +705,15 @@ def load_runtime_settings(
         environment=environment,
         deadline_seconds=deadline_seconds,
     )
-    expected_metadata_path = (paths.repository_root / policy.metadata_path).resolve(strict=False)
-    if expected_metadata_path != paths.metadata_path:
-        raise RuntimeIntegrationError("repository policy metadata_path does not match the loaded metadata file")
+    if selection is None:
+        expected_metadata_path = (
+            paths.repository_root / policy.metadata_path
+        ).resolve(strict=False)
+        if expected_metadata_path != paths.metadata_path:
+            raise RuntimeIntegrationError(
+                "repository policy metadata_path does not match the loaded "
+                "metadata file"
+            )
     _validate_policy_models(policy, metadata)
     return RuntimeSettings(
         repository_root=paths.repository_root,
@@ -682,6 +723,52 @@ def load_runtime_settings(
         repository_head=repository_head,
         base_commit=resolved_base_commit,
         deadline_seconds=configured_deadline,
+    )
+
+
+def _registered_runtime_selection(
+    paths: RuntimePaths,
+    registry: RepositoryRegistry,
+    *,
+    repo_agent_id: str | None,
+) -> RegistrySelection | None:
+    if registry.schema_version != 2:
+        return None
+    enabled = tuple(agent for agent in registry.agents if agent.enabled)
+    normalized_agent_id = (
+        None if repo_agent_id in {None, "default"} else repo_agent_id
+    )
+    if normalized_agent_id is None:
+        if len(enabled) != 1:
+            raise RuntimeIntegrationError(
+                "registry runtime selection requires repo_agent_id when "
+                "multiple agents are enabled"
+            )
+        selected = enabled[0]
+    else:
+        matches = [
+            agent for agent in enabled if agent.agent_id == normalized_agent_id
+        ]
+        if len(matches) != 1:
+            raise RuntimeIntegrationError(
+                "repo_agent_id must resolve exactly one enabled registry agent"
+            )
+        selected = matches[0]
+    if not (paths.repository_root / selected.config_path).is_file():
+        raise RuntimeIntegrationError(
+            f"enabled registry agent {selected.agent_id!r} requires a profile "
+            "at config_path"
+        )
+
+    def reader(relative: str) -> bytes:
+        if relative == ".foundry-opt/registry.yaml":
+            return paths.registry_path.read_bytes()
+        return (paths.repository_root / relative).read_bytes()
+
+    return resolve_registry_selection(
+        paths.repository_root,
+        repo_agent_id=selected.agent_id,
+        content_reader=reader,
     )
 
 

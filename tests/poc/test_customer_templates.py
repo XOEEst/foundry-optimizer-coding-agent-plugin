@@ -59,6 +59,12 @@ def test_registry_sidecars_and_pin_align_to_runtime_sha() -> None:
 def test_customer_templates_do_not_ship_the_legacy_shared_pin() -> None:
     assert not (CUSTOMER_TEMPLATE_ROOT / ".github" / "foundry-opt.lock.yml").exists()
     assert not (
+        CUSTOMER_TEMPLATE_ROOT / ".github" / "foundry-optimizer.yaml"
+    ).exists()
+    assert not (
+        CUSTOMER_TEMPLATE_ROOT / ".foundry" / "agent-metadata.yaml"
+    ).exists()
+    assert not (
         CUSTOMER_TEMPLATE_ROOT / ".foundry-opt" / "bootstrap.lock.json"
     ).exists()
     assert not any(
@@ -141,6 +147,7 @@ def test_issue_form_uses_built_in_parser_contract() -> None:
     assert "Optional narrower model set" not in serialized
     assert "id: candidate_models" not in serialized
     assert "Optional primary metric" in serialized
+    assert "Repository agent ID or explicit Foundry target" in serialized
     assert "task_completion" in serialized
     assert (
         "azureml://registries/azureml/evaluators/"

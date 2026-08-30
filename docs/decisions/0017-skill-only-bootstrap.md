@@ -28,6 +28,10 @@ test-only provider stack. Owners could not reliably complete the flow.
   the available/latest capability-compatible `azure.ai.agents` azd extension.
 - Optimizer and registered deployment retain neutral registry/profile,
   selection, fingerprint, and exact-source runtime modules.
+- Repositories may begin with agent code only. Bootstrap generates registry v2
+  and per-agent sidecars; optimizer and deployment project their compatibility
+  contracts from those files in memory rather than requiring repository-global
+  legacy policy or metadata files.
 - Evaluation onboarding is deferred to a future dedicated skill.
 
 ## Consequences

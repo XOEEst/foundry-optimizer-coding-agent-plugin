@@ -21,6 +21,9 @@ or rollback.
 The [`foundry-agent-optimizer`](../../plugins/foundry-agent-optimizer/) skill
 uses [`poc/runtime.py`](../../src/foundry_opt/poc/runtime.py) for exact
 registry provenance, draft evaluation, candidate state, and issue handoff.
+It selects the issue's registry agent and projects that agent's sidecar into
+runtime contracts in memory. No repository-global legacy policy or metadata
+file is required.
 
 ## Deployment
 
@@ -36,6 +39,7 @@ Optimizer and registered deployment share:
 - [`repository_contracts.py`](../../src/foundry_opt/repository_contracts.py)
 - [`repository_selection.py`](../../src/foundry_opt/repository_selection.py)
 - [`source_discovery.py`](../../src/foundry_opt/source_discovery.py)
+- [`poc/registry_runtime.py`](../../src/foundry_opt/poc/registry_runtime.py)
 
 The registry and agent profiles are trusted configuration. The bootstrap
 report is owner-readable history, not deployment authority.

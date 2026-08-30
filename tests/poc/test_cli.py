@@ -1294,7 +1294,7 @@ def _create_runtime_repository(tmp_path: Path) -> tuple[Path, str, dict[str, str
     runtime_registry.write_text(
         "\n".join(
             (
-                "schema_version: 2",
+                "schema_version: 1",
                 "distribution:",
                 "  repository: https://github.com/example-org/shared-skill",
                 "  channel: reviewed",
@@ -1457,6 +1457,158 @@ def _create_runtime_repository(tmp_path: Path) -> tuple[Path, str, dict[str, str
     return repository, base_commit, environment
 
 
+def _create_sidecar_only_runtime_repository(
+    tmp_path: Path,
+) -> tuple[Path, str, dict[str, str]]:
+    repository, _, environment = _create_runtime_repository(tmp_path)
+    legacy_registry_path = Path(environment["FOUNDRY_OPT_REGISTRY"])
+    registry = legacy_registry_path.read_text(encoding="utf-8")
+    registry = registry.replace(
+        "schema_version: 1\n",
+        "schema_version: 2\n",
+        1,
+    ).replace(
+        "  client_id_variable: AZURE_OPTIMIZER_CLIENT_ID\n",
+        "  client_id_variable: AZURE_OPTIMIZER_CLIENT_ID\n"
+        "  oidc_subject_prefix: repo:example-org@987654321/"
+        "example-agent@123456789\n",
+        1,
+    ).replace(
+        "identity:\n  kind: unresolved_migration\n",
+        "identity:\n"
+        "  kind: entra_application\n"
+        "  client_id: 11111111-1111-1111-1111-111111111111\n",
+        1,
+    ).replace(
+        "    config_path: .foundry/foundry-opt.yaml\n",
+        "    config_path: src/.foundry/foundry-opt.yaml\n",
+        1,
+    )
+    (repository / ".foundry-opt").mkdir()
+    registry_path = repository / ".foundry-opt" / "registry.yaml"
+    registry_path.write_text(registry, encoding="utf-8")
+    legacy_registry_path.unlink()
+    (repository / "src" / ".foundry").mkdir()
+    (repository / "src" / ".foundry" / "foundry-opt.yaml").write_text(
+        "\n".join(
+            (
+                "schema_version: 2",
+                "repo_agent_id: travel-agent",
+                "source_root: src",
+                "package_root: src",
+                "editable_paths:",
+                "  - src/**",
+                "  - tests/**",
+                "shared_source_relations: []",
+                "runtime:",
+                "  kind: hosted",
+                "  runtime: python_3_13",
+                "  entrypoint:",
+                "    - python",
+                "    - main.py",
+                "  dependency_resolution: remote_build",
+                "  protocol_name: responses",
+                "  protocol_version: \"2.0.0\"",
+                "  cpu: \"0.5\"",
+                "  memory: 1Gi",
+                "  model_environment_variable: AZURE_AI_MODEL_DEPLOYMENT_NAME",
+                "foundry_project:",
+                "  project_endpoint: https://example.services.ai.azure.com/api/projects/example",
+                "  account_resource_id: /subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/example/providers/Microsoft.CognitiveServices/accounts/example",
+                "  agent_name: travel-agent",
+                "  model_deployment_aliases:",
+                "    - baseline",
+                "    - candidate",
+                "baseline_model: baseline",
+                "allowed_models:",
+                "  - baseline",
+                "  - candidate",
+                "min_candidates: 1",
+                "max_candidates: 2",
+                "primary_metric: quality",
+                "decision_policy:",
+                "  minimum_aggregate_delta: 0.05",
+                "  focused_cases_required: true",
+                "  max_regressions: 0",
+                "hard_guardrails:",
+                "  - evaluator_name: safety",
+                "    required_pass_rate: 1.0",
+                "    required: true",
+                "deployment:",
+                "  environment: foundry-production",
+                "  enabled: true",
+                "  require_aligned_binding: false",
+                "verification:",
+                "  mode: \"off\"",
+                "  repository_checks: []",
+                "  evaluation_gate_policy: allow_no_evidence",
+                "  bundle: null",
+                "  lineage: null",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    (repository / ".github" / "foundry-optimizer.yaml").unlink()
+    (repository / ".foundry" / "agent-metadata.yaml").unlink()
+    _git(repository, "add", "-A")
+    _git(repository, "commit", "-m", "use registry sidecars only")
+    environment.update(
+        {
+            "FOUNDRY_OPT_REGISTRY": str(registry_path),
+            "AZURE_SUBSCRIPTION_ID": "00000000-0000-0000-0000-000000000001",
+            "AZURE_TENANT_ID": "00000000-0000-0000-0000-000000000001",
+            "GITHUB_REPOSITORY": "example-org/example-agent",
+            "GITHUB_REPOSITORY_ID": "123456789",
+            "GITHUB_REPOSITORY_OWNER_ID": "987654321",
+            "FOUNDRY_OPT_DEFAULT_BRANCH": "main",
+        }
+    )
+    return repository, _git(repository, "rev-parse", "HEAD"), environment
+
+
+def _add_second_sidecar_agent(
+    repository: Path,
+    environment: dict[str, str],
+) -> str:
+    second_root = repository / "second"
+    (second_root / ".foundry").mkdir(parents=True)
+    (second_root / "main.py").write_text("VALUE = 'second'\n", encoding="utf-8")
+    first_sidecar = (
+        repository / "src" / ".foundry" / "foundry-opt.yaml"
+    ).read_text(encoding="utf-8")
+    second_sidecar = (
+        first_sidecar.replace(
+            "repo_agent_id: travel-agent",
+            "repo_agent_id: second-agent",
+            1,
+        )
+        .replace("source_root: src", "source_root: second", 1)
+        .replace("package_root: src", "package_root: second", 1)
+        .replace("  - src/**", "  - second/**", 1)
+        .replace("  agent_name: travel-agent", "  agent_name: second-agent", 1)
+    )
+    (second_root / ".foundry" / "foundry-opt.yaml").write_text(
+        second_sidecar,
+        encoding="utf-8",
+    )
+    registry_path = Path(environment["FOUNDRY_OPT_REGISTRY"])
+    registry = registry_path.read_text(encoding="utf-8")
+    registry += "\n".join(
+        (
+            "  - agent_id: second-agent",
+            "    root: second",
+            "    config_path: second/.foundry/foundry-opt.yaml",
+            "    enabled: true",
+            "",
+        )
+    )
+    registry_path.write_text(registry, encoding="utf-8")
+    _git(repository, "add", ".")
+    _git(repository, "commit", "-m", "add second registered agent")
+    return _git(repository, "rev-parse", "HEAD")
+
+
 def _invoke(arguments: list[str], env: dict[str, str]) -> Any:
     invocation_environment = {**os.environ, **env}
     for key in (
@@ -1526,6 +1678,266 @@ def test_validate_config_rejects_non_repository(tmp_path: Path) -> None:
     result = runner.invoke(app, ["validate-config", "--repository", str(tmp_path)])
 
     assert result.exit_code != 0
+
+
+def test_preflight_accepts_sidecar_only_repository_without_evaluation_bundle(
+    tmp_path: Path,
+) -> None:
+    repository, _, environment = _create_sidecar_only_runtime_repository(
+        tmp_path
+    )
+
+    assert not (repository / ".github" / "foundry-optimizer.yaml").exists()
+    assert not (repository / ".foundry" / "agent-metadata.yaml").exists()
+    result = _invoke(
+        ["preflight", "--repository", str(repository), "--offline"],
+        environment,
+    )
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["repo_agent_ids"] == ["travel-agent"]
+    assert payload["status"] == "ready"
+
+
+def test_v2_preflight_rejects_missing_sidecar_even_with_legacy_files(
+    tmp_path: Path,
+) -> None:
+    repository, _, environment = _create_runtime_repository(tmp_path)
+    registry_path = Path(environment["FOUNDRY_OPT_REGISTRY"])
+    registry_path.write_text(
+        registry_path.read_text(encoding="utf-8").replace(
+            "schema_version: 1",
+            "schema_version: 2",
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    result = _invoke(
+        ["preflight", "--repository", str(repository), "--offline"],
+        environment,
+    )
+
+    assert result.exit_code != 0
+    assert "requires a profile at config_path" in (
+        result.stdout + str(result.exception)
+    )
+
+
+def test_validate_config_and_preflight_cover_all_enabled_sidecars(
+    tmp_path: Path,
+) -> None:
+    repository, _, environment = _create_sidecar_only_runtime_repository(
+        tmp_path
+    )
+    _add_second_sidecar_agent(repository, environment)
+
+    validation = _invoke(
+        ["validate-config", "--repository", str(repository)],
+        environment,
+    )
+    preflight = _invoke(
+        ["preflight", "--repository", str(repository), "--offline"],
+        environment,
+    )
+
+    assert validation.exit_code == 0, validation.stdout
+    assert preflight.exit_code == 0, preflight.stdout
+    expected = ["travel-agent", "second-agent"]
+    assert json.loads(validation.stdout)["repo_agent_ids"] == expected
+    assert json.loads(preflight.stdout)["repo_agent_ids"] == expected
+
+
+def test_runtime_settings_project_sidecar_without_legacy_metadata(
+    tmp_path: Path,
+) -> None:
+    repository, base_commit, environment = (
+        _create_sidecar_only_runtime_repository(tmp_path)
+    )
+    paths = load_runtime_paths(
+        repository,
+        environment=environment,
+        job_id="optimize-7",
+    )
+
+    settings = load_runtime_settings(
+        paths,
+        environment=environment,
+        base_commit=base_commit,
+        repo_agent_id="travel-agent",
+    )
+
+    assert settings.policy.source_root == "src"
+    assert settings.policy.metadata_path == "src/.foundry/foundry-opt.yaml"
+    assert settings.metadata.agent_name == "travel-agent"
+    assert settings.metadata.development_evaluation.custom_evaluator_ids == ()
+    assert settings.metadata.validating_evaluation.custom_evaluator_ids == ()
+
+
+def test_job_start_uses_sidecar_only_repository_without_evaluation_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repository, _, environment = _create_sidecar_only_runtime_repository(
+        tmp_path
+    )
+    _checkout_branch(repository, "copilot/job-7")
+    event = _write_issue_event(
+        tmp_path,
+        body=_issue_body(
+            candidate_budget=1,
+            model_lines=("candidate",),
+            acknowledge_no_evidence=True,
+        ),
+    )
+    harness = ControllerHarness(
+        candidate_results={},
+        validating_results={},
+        cleanup_results={},
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "capture_route_fingerprint",
+        lambda **_: _route(),
+    )
+    monkeypatch.setattr(cli_module, "build_runtime_controller", harness.builder)
+
+    result = _invoke(
+        ["job", "start", "--repository", str(repository), "--event", str(event)],
+        environment,
+    )
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["job"]["verification"]["mode"] == "none"
+    assert payload["baseline"]["evaluation"] is None
+
+
+def test_job_start_selects_requested_agent_in_sidecar_only_repository(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repository, _, environment = _create_sidecar_only_runtime_repository(
+        tmp_path
+    )
+    _add_second_sidecar_agent(repository, environment)
+    _checkout_branch(repository, "copilot/job-7")
+    body = (
+        "### Repository agent ID or explicit Foundry target\n\n"
+        "second-agent\n\n"
+        + _issue_body(
+            candidate_budget=1,
+            model_lines=("candidate",),
+            acknowledge_no_evidence=True,
+        )
+    )
+    event = _write_issue_event(tmp_path, body=body)
+    harness = ControllerHarness(
+        candidate_results={},
+        validating_results={},
+        cleanup_results={},
+    )
+    route = _route()
+    monkeypatch.setattr(
+        cli_module,
+        "capture_route_fingerprint",
+        lambda **_: RouteFingerprint(
+            agent_name="second-agent",
+            latest_version=route.latest_version,
+            selector=route.selector,
+            endpoint_configuration=route.endpoint_configuration,
+            sha256=route.sha256,
+        ),
+    )
+    monkeypatch.setattr(cli_module, "build_runtime_controller", harness.builder)
+
+    result = _invoke(
+        ["job", "start", "--repository", str(repository), "--event", str(event)],
+        environment,
+    )
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["job"]["source_root"] == "second"
+    assert payload["job"]["verification"]["mode"] == "none"
+
+
+def test_job_start_rejects_explicit_target_in_registry_managed_repository(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repository, _, environment = _create_sidecar_only_runtime_repository(
+        tmp_path
+    )
+    _checkout_branch(repository, "copilot/job-7")
+    body = (
+        "### Repository agent ID or explicit Foundry target\n\n"
+        "https://example.services.ai.azure.com/api/projects/other/agents/other\n\n"
+        + _issue_body(
+            candidate_budget=1,
+            model_lines=("candidate",),
+            acknowledge_no_evidence=True,
+        )
+    )
+    event = _write_issue_event(tmp_path, body=body)
+    monkeypatch.setattr(
+        cli_module,
+        "capture_route_fingerprint",
+        lambda **_: _route(),
+    )
+
+    result = _invoke(
+        ["job", "start", "--repository", str(repository), "--event", str(event)],
+        environment,
+    )
+
+    assert result.exit_code == 2
+    assert "explicit Foundry targets are not allowed" in result.stdout
+
+
+def test_online_preflight_selects_one_sidecar_without_legacy_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repository, _, environment = _create_sidecar_only_runtime_repository(
+        tmp_path
+    )
+    _git(
+        repository,
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/example-org/example-agent.git",
+    )
+    environment.update(
+        {
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_EVENT_NAME": "dynamic",
+        }
+    )
+    monkeypatch.setattr(cli_module, "detect_github_actions_oidc", lambda: True)
+    monkeypatch.setattr(
+        cli_module,
+        "capture_route_fingerprint",
+        lambda **_: _route(),
+    )
+
+    result = _invoke(
+        [
+            "preflight",
+            "--repository",
+            str(repository),
+            "--repo-agent-id",
+            "travel-agent",
+        ],
+        environment,
+    )
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["agent_name"] == "travel-agent"
+    assert payload["foundry_route_fingerprint"] == _route().sha256
 
 
 def test_preflight_checks_foundry_route_when_online(

@@ -11,6 +11,10 @@ JSON schemas only. Do not look for or run a bundled bootstrap program.
 
 ## Non-negotiable behavior
 
+- A repository containing only agent code is a valid input. Discover one or
+  many agent roots and generate the registry, per-agent profiles, workflows,
+  issue form, instructions, report, and deployment manifest from repository
+  and owner evidence.
 - Perform discovery with read-only repository, Git, GitHub, Azure, and Foundry
   commands.
 - Render every proposed repository file in the coding session's staging area.
@@ -31,6 +35,10 @@ JSON schemas only. Do not look for or run a bundled bootstrap program.
 Do not introduce bootstrap programs, durable bootstrap metadata, opaque
 identifiers, generated evidence files, automatic reversal behavior, or
 evaluation onboarding.
+
+Do not require or generate repository-global legacy optimizer policy or agent
+metadata files. Registry v2 and each selected agent's sidecar are the complete
+repository configuration interface.
 
 ## Policy scope and deployment versions
 
@@ -83,14 +91,17 @@ capability.
      package path, `uv.lock` SHA-256, and optimizer skill path from that fetched
      tree, not from unpushed local files. A pushed runtime branch or tag is
      sufficient; a GitHub Release is optional.
-   - Execute the fetched runtime's real no-evaluation compatibility probe. Its
-     bundled `src/foundry_opt/templates/customer-repo` is the minimal supported
-     registry v2 sidecar with `verification.mode: off` and no evaluation
-     bundle:
+   - Execute the fetched runtime's real no-evaluation compatibility probe.
+     Copy its bundled `src/foundry_opt/templates/customer-repo` into a fresh
+     temporary directory, confirm the copy contains no repository-global
+     legacy policy or metadata files, and initialize that directory as its own
+     Git worktree. The fixture is the minimal supported registry v2 sidecar
+     with `verification.mode: off` and no evaluation bundle:
 
      ```text
+     git -C <fixture> init
      uv run --frozen --no-dev --project <package-root> foundry-opt preflight \
-       --repository <checkout>/src/foundry_opt/templates/customer-repo --offline
+       --repository <fixture> --offline
      ```
 
      Use the approved Python feed fallback if dependency restoration cannot

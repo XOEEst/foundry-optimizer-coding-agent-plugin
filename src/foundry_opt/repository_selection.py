@@ -131,6 +131,51 @@ def resolve_registry_selection(
     )
 
 
+def resolve_enabled_registry_selections(
+    repository_root: Path,
+    *,
+    content_reader: Callable[[str], bytes] | None = None,
+) -> tuple[RegistrySelection, ...]:
+    reader = (
+        content_reader
+        if content_reader is not None
+        else lambda relative: (repository_root / relative).read_bytes()
+    )
+    registry_bytes = reader(".foundry-opt/registry.yaml")
+    registry = RepositoryRegistry.from_document(registry_bytes.decode("utf-8"))
+    enabled = tuple(agent for agent in registry.agents if agent.enabled)
+    if not enabled:
+        raise BootstrapConfigError(
+            "registry must contain at least one enabled agent"
+        )
+    selections: list[RegistrySelection] = []
+    for agent in enabled:
+        try:
+            sidecar_bytes = reader(agent.config_path)
+        except OSError as exc:
+            raise BootstrapConfigError(
+                f"enabled registry agent {agent.agent_id!r} requires a profile "
+                "at config_path"
+            ) from exc
+        sidecar = AgentProfile.from_document(sidecar_bytes.decode("utf-8"))
+        if sidecar.repo_agent_id != agent.agent_id:
+            raise BootstrapConfigError(
+                "registry config_path sidecar repo_agent_id does not match "
+                f"registry agent_id {agent.agent_id!r}"
+            )
+        selections.append(
+            RegistrySelection(
+                repo_agent_id=agent.agent_id,
+                root=agent.root,
+                config_path=agent.config_path,
+                sidecar=sidecar,
+                registry_hash=hashlib.sha256(registry_bytes).hexdigest(),
+                sidecar_hash=hashlib.sha256(sidecar_bytes).hexdigest(),
+            )
+        )
+    return tuple(selections)
+
+
 def protected_editable_patterns(selection: RegistrySelection) -> tuple[str, ...]:
     protected = {".foundry-opt/**", ".foundry-opt/registry.yaml", selection.config_path}
     protected.add(f"{PurePosixPath(selection.config_path).parent.as_posix()}/**")

@@ -25,8 +25,9 @@ repository setup uses the separate `foundry-bootstrap` skill.
 
 1. Read the issue, registry, selected agent profile, repository instructions,
    and exact runtime provenance.
-2. Run repository preflight. Stop if registry provenance, OIDC, broker access,
-   the selected profile, or draft capability is unavailable.
+2. Run `foundry-opt preflight --repository . --repo-agent-id <issue target>`.
+   Stop if registry provenance, OIDC, broker access, the selected profile, or
+   draft capability is unavailable.
 3. Start or resume the optimize job through the repository-installed
    `foundry-opt` CLI and follow its machine-readable `next_action`.
 4. Record one fresh baseline evaluation in the original issue.

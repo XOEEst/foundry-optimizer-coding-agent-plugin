@@ -7,6 +7,11 @@ say:
 Use /foundry-bootstrap to bootstrap this repository.
 ```
 
+The target repository may contain only agent source code. Existing Foundry,
+GitHub, Azure, evaluation, or optimizer metadata is optional; bootstrap
+discovers what exists and generates registry v2 plus one profile per selected
+agent.
+
 A published archive is optional when developing from a source checkout. The
 skill folder may remain local: `/skills reload` picks up instruction and
 template edits. The skill separately reuses a compatible runtime commit from

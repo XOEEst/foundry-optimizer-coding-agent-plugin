@@ -60,6 +60,12 @@ from foundry_opt.poc.runtime import (
     build_hosted_definition,
     load_deadline_seconds,
 )
+from foundry_opt.poc.registry_runtime import (
+    build_agent_metadata_from_registry_selection,
+    build_agent_runtime_contracts,
+    build_repository_policy_from_registry_selection,
+    subscription_id_from_resource_id,
+)
 from foundry_opt.poc.source import (
     PackagedSource,
     SourcePackagingError,
@@ -83,7 +89,6 @@ PROFILE_FINGERPRINT_METADATA_KEY = "foundry_opt_profile_fingerprint"
 REGISTRY_FINGERPRINT_METADATA_KEY = "foundry_opt_registry_fingerprint"
 TARGET_FINGERPRINT_METADATA_KEY = "foundry_opt_target_fingerprint"
 REPO_AGENT_ID_METADATA_KEY = "foundry_opt_repo_agent_id"
-_UNUSED_DEPLOYMENT_VERIFICATION_TOKEN = "deployment-verification-not-required"
 _MAX_GITHUB_EVENT_BYTES = 2 * 1024 * 1024
 
 _COMMIT_PATTERN = r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
@@ -979,7 +984,9 @@ def _load_registered_settings(
         )
 
     tenant_id = _required_environment_value(env, REGISTERED_TENANT_ID_ENV)
-    subscription_id = _subscription_id(sidecar.foundry_project.account_resource_id)
+    subscription_id = subscription_id_from_resource_id(
+        sidecar.foundry_project.account_resource_id
+    )
     deployment_environment = sidecar.deployment.environment
     subject_prefix = _registered_oidc_subject_prefix(
         registry,
@@ -1661,136 +1668,46 @@ def _optional_text(value: object) -> str | None:
     return text or None
 
 
-def build_repository_policy_from_registry_selection(
-    selection: RegistrySelection,
-) -> RepositoryPolicy:
-    sidecar = selection.sidecar
-    required_guardrails = [
-        {
-            "metric": guardrail.evaluator_name,
-            "required_pass_rate": guardrail.required_pass_rate,
-        }
-        for guardrail in sidecar.hard_guardrails
-        if guardrail.required
-    ]
-    if not required_guardrails:
-        raise RuntimeIntegrationError(
-            "registered deployment requires at least one mandatory hard guardrail"
-        )
-    return RepositoryPolicy.model_validate(
-        {
-            "schema_version": 1,
-            "source_root": sidecar.package_root,
-            "editable_paths": sidecar.editable_paths,
-            "min_candidates": sidecar.min_candidates,
-            "max_candidates": sidecar.max_candidates,
-            "baseline_model": sidecar.baseline_model,
-            "allowed_models": sidecar.allowed_models,
-            "primary_metric": sidecar.primary_metric,
-            "decision_rules": {
-                "minimum_aggregate_delta": (
-                    sidecar.decision_policy.minimum_aggregate_delta
-                ),
-                "focused_cases_required": (
-                    sidecar.decision_policy.focused_cases_required
-                ),
-                "max_regressions": sidecar.decision_policy.max_regressions,
-            },
-            "hard_guardrails": required_guardrails,
-            "metadata_path": selection.config_path,
-        }
-    )
-
-
 def build_deployment_agent_metadata(
     selection: RegistrySelection,
     *,
     verification: DeploymentVerification,
 ) -> DeploymentAgentMetadata:
     sidecar = selection.sidecar
-    if verification.mode == "foundry_evaluation":
-        bundle = sidecar.require_verification_bundle(
-            detail=(
-                "deployment metadata requires an activated repository default "
-                "evaluator bundle"
-            )
-        )
-        development_definition = sidecar.development_definition
-        validating_definition = sidecar.validating_definition
-        development_dataset = sidecar.development_dataset
-        validating_dataset = sidecar.validating_dataset
-        if (
-            development_definition is None
-            or validating_definition is None
-            or development_dataset is None
-            or validating_dataset is None
-        ):
-            raise RuntimeIntegrationError(
-                "deployment metadata requires an activated repository default evaluator bundle"
-            )
-        if bundle.development_evaluator_ids:
-            development_evaluator_ids = (
-                bundle.resolved_development_evaluator_ids
-            )
-            validating_evaluator_ids = bundle.resolved_validating_evaluator_ids
-        else:
-            development_evaluator_ids = verification.evaluator_ids
-            validating_evaluator_ids = verification.evaluator_ids
-        development_evaluation_id = development_definition.definition_id
-        development_dataset_id = development_dataset.dataset_id
-        validating_evaluation_id = validating_definition.definition_id
-        validating_dataset_id = validating_dataset.dataset_id
-    else:
-        development_evaluator_ids = ()
-        validating_evaluator_ids = ()
-        development_evaluation_id = _UNUSED_DEPLOYMENT_VERIFICATION_TOKEN
-        development_dataset_id = _UNUSED_DEPLOYMENT_VERIFICATION_TOKEN
-        validating_evaluation_id = _UNUSED_DEPLOYMENT_VERIFICATION_TOKEN
-        validating_dataset_id = _UNUSED_DEPLOYMENT_VERIFICATION_TOKEN
+    bundle = sidecar.verification.bundle
+    development_evaluator_ids = (
+        verification.evaluator_ids
+        if verification.mode == "foundry_evaluation"
+        else None
+    )
+    validating_evaluator_ids = development_evaluator_ids
+    if (
+        verification.mode == "foundry_evaluation"
+        and bundle is not None
+        and bundle.validating_evaluator_ids
+    ):
+        validating_evaluator_ids = bundle.resolved_validating_evaluator_ids
+    contracts = build_agent_runtime_contracts(
+        selection,
+        include_evaluation=verification.mode == "foundry_evaluation",
+        development_evaluator_ids=development_evaluator_ids,
+        validating_evaluator_ids=validating_evaluator_ids,
+    )
     return DeploymentAgentMetadata.model_validate(
         {
             "project_endpoint": sidecar.foundry_project.project_endpoint,
             "agent_name": sidecar.foundry_project.agent_name,
-            "hosted_runtime": {
-                "kind": "hosted",
-                "runtime": sidecar.runtime.runtime,
-                "entry_point": sidecar.runtime.entrypoint,
-                "dependency_resolution": sidecar.runtime.dependency_resolution,
-                "protocol_name": sidecar.runtime.protocol_name,
-                "protocol_version": sidecar.runtime.protocol_version,
-                "cpu": sidecar.runtime.cpu or "1",
-                "memory": sidecar.runtime.memory or "2Gi",
-                "model_environment_variable": (
-                    sidecar.runtime.model_environment_variable
-                    or "AZURE_AI_MODEL_DEPLOYMENT_NAME"
-                ),
-            },
-            "model_deployments": (
-                {
-                    "alias": sidecar.baseline_model,
-                    "deployment_name": sidecar.baseline_model,
-                    "model_format": "OpenAI",
-                    "model_name": sidecar.baseline_model,
-                    "model_version": "pinned",
-                    "required_capabilities": (
-                        {"name": "responses", "enabled": True},
-                    ),
-                },
+            "hosted_runtime": contracts.hosted_runtime.model_dump(mode="json"),
+            "model_deployments": [
+                item.model_dump(mode="json")
+                for item in contracts.model_deployments
+            ],
+            "development_evaluation": (
+                contracts.development_evaluation.model_dump(mode="json")
             ),
-            "development_evaluation": {
-                "name": "development",
-                "split": "development",
-                "resolved_evaluation_id": development_evaluation_id,
-                "dataset_id": development_dataset_id,
-                "custom_evaluator_ids": development_evaluator_ids,
-            },
-            "validating_evaluation": {
-                "name": "validating",
-                "split": "validating",
-                "resolved_evaluation_id": validating_evaluation_id,
-                "dataset_id": validating_dataset_id,
-                "custom_evaluator_ids": validating_evaluator_ids,
-            },
+            "validating_evaluation": (
+                contracts.validating_evaluation.model_dump(mode="json")
+            ),
         }
     )
 
@@ -1809,70 +1726,30 @@ def _registered_agent_metadata(
     verification: DeploymentVerification,
 ) -> AgentMetadata:
     sidecar = selection.sidecar
-    deployment_metadata = build_deployment_agent_metadata(
-        selection,
-        verification=verification,
-    )
     deployment_environment = sidecar.deployment.environment
-    subject = f"{oidc_subject_prefix}:environment:{deployment_environment}"
-    return AgentMetadata.model_validate(
-        {
-            "schema_version": 1,
-            "repository_identity": repository_identity,
-            "repository_id": repository_id,
-            "default_branch": default_branch,
-            "project_endpoint": sidecar.foundry_project.project_endpoint,
-            "foundry_account_resource_id": (
-                sidecar.foundry_project.account_resource_id
-            ),
-            "agent_name": sidecar.foundry_project.agent_name,
-            "authentication_method": "oidc",
-            "static_credentials_allowed": False,
-            "hosted_runtime": deployment_metadata.hosted_runtime.model_dump(
-                mode="json"
-            ),
-            "oidc": {
-                "issuer": "https://token.actions.githubusercontent.com",
-                "audience": "api://AzureADTokenExchange",
-                "tenant_id": tenant_id,
-                "subscription_id": subscription_id,
-                "repository_id_claim": str(repository_id),
-                "workflow_variables": (
-                    {
-                        "alias": "deployment",
-                        "name": client_id_variable,
-                        "value": client_id,
-                        "scope": "environment",
-                        "environment": deployment_environment,
-                    },
-                ),
-                "principals": (
-                    {
-                        "role": "deployment",
-                        "client_id": client_id,
-                        "client_id_variable": "deployment",
-                        "environment": deployment_environment,
-                        "subjects": (
-                            {
-                                "name": "environment",
-                                "subject": subject,
-                                "environment": deployment_environment,
-                            },
-                        ),
-                    },
-                ),
-            },
-            "model_deployments": [
-                item.model_dump(mode="json")
-                for item in deployment_metadata.model_deployments
-            ],
-            "development_evaluation": deployment_metadata.development_evaluation.model_dump(
-                mode="json"
-            ),
-            "validating_evaluation": deployment_metadata.validating_evaluation.model_dump(
-                mode="json"
-            ),
-        }
+    development_evaluator_ids = None
+    validating_evaluator_ids = None
+    if verification.mode == "foundry_evaluation":
+        development_evaluator_ids = verification.evaluator_ids
+        validating_evaluator_ids = verification.evaluator_ids
+        bundle = sidecar.verification.bundle
+        if bundle is not None and bundle.validating_evaluator_ids:
+            validating_evaluator_ids = bundle.resolved_validating_evaluator_ids
+    return build_agent_metadata_from_registry_selection(
+        selection,
+        repository_identity=repository_identity,
+        repository_id=repository_id,
+        default_branch=default_branch,
+        tenant_id=tenant_id,
+        subscription_id=subscription_id,
+        client_id=client_id,
+        client_id_variable=client_id_variable,
+        oidc_subject_prefix=oidc_subject_prefix,
+        oidc_role="deployment",
+        oidc_environment=deployment_environment,
+        include_evaluation=verification.mode == "foundry_evaluation",
+        development_evaluator_ids=development_evaluator_ids,
+        validating_evaluator_ids=validating_evaluator_ids,
     )
 
 
@@ -1884,16 +1761,6 @@ def _required_environment_value(
     if not isinstance(value, str) or not value.strip():
         raise RuntimeIntegrationError(f"{name} is required")
     return value.strip()
-
-
-def _subscription_id(resource_id: str) -> str:
-    parts = [part for part in resource_id.split("/") if part]
-    for index, part in enumerate(parts[:-1]):
-        if part.casefold() == "subscriptions":
-            return parts[index + 1]
-    raise RuntimeIntegrationError(
-        "Foundry account resource id omitted the subscription id"
-    )
 
 
 def _registered_oidc_subject_prefix(
