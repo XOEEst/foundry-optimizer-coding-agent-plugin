@@ -8,9 +8,10 @@
 
 ## Onboarding target
 
-- Agent source folder: `__AGENT_ROOT__`
-- Foundry project endpoint: `__FOUNDRY_PROJECT_ENDPOINT__`
-- Registry action: `__REGISTRY_ACTION__`
+- Scan scope: `__AGENT_SCAN_SCOPE__`
+- Selected agents: `__SELECTED_AGENT_COUNT__`
+- Excluded agents: `__EXCLUDED_AGENT_COUNT__`
+- Shared Foundry project endpoint: `__FOUNDRY_PROJECT_ENDPOINT__`
 
 ## Tool versions
 
@@ -38,6 +39,7 @@
 | Repository agent ID | Root | Run scope | Registration | Deployment | Foundry target |
 | --- | --- | --- | --- | --- | --- |
 | `__REPO_AGENT_ID__` | `__AGENT_ROOT__` | selected | enabled | pending | `__FOUNDRY_PROJECT_ENDPOINT__/agents/__FOUNDRY_AGENT_NAME__` |
+| `__EXCLUDED_REPO_AGENT_ID_OR_NONE__` | `__EXCLUDED_AGENT_ROOT_OR_NONE__` | excluded | unchanged | not attempted | unchanged |
 | `__EXISTING_REPO_AGENT_ID_OR_NONE__` | `__EXISTING_AGENT_ROOT_OR_NONE__` | preserved | unchanged | unchanged | unchanged |
 
 ## Reused resources
@@ -56,7 +58,7 @@
 
 - azd environment: `__AZD_ENVIRONMENT__`
 - Foundry project ARM ID: `__FOUNDRY_PROJECT_RESOURCE_ID__`
-- command: `azd deploy`
+- commands: `azd deploy <selected-service>` for each selected enabled agent
 - deployed commit: `pending`
 - result: `pending`
 - links: `pending`

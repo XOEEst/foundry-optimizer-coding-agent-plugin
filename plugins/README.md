@@ -4,10 +4,11 @@ This repository separates top-level skill distribution from the shared
 `foundry_opt` runtime package.
 
 - `foundry-bootstrap/` is the downloadable first-time-owner skill. Owners
-  invoke `/foundry-bootstrap`, confirm one source folder and Foundry project
-  endpoint, and rerun it to onboard additional folders incrementally. The skill
-  uses general repository, GitHub, Azure, Foundry, Git, and azd tools directly
-  after one reviewed approval.
+  invoke `/foundry-bootstrap`, confirm one folder scope, select any recognized
+  descendant agents, and bind the group to one shared Foundry project endpoint.
+  They can rerun it to onboard additional groups incrementally. The skill uses
+  general repository, GitHub, Azure, Foundry, Git, and azd tools directly after
+  one reviewed approval.
 - `foundry-agent-optimizer/` is the canonical issue-time optimizer skill folder.
   Setup workflows install this skill from the exact runtime revision recorded
   in the repository registry.

@@ -91,9 +91,9 @@ def test_bootstrap_skill_is_static_and_uses_one_combined_approval() -> None:
     assert frontmatter == {
         "name": "foundry-bootstrap",
         "description": (
-            "Incrementally bootstrap one repository agent folder for Microsoft "
-            "Foundry with a user-confirmed source folder and project endpoint, "
-            "one combined approval, static templates, and standard tools."
+            "Incrementally bootstrap one or more repository agents from a "
+            "user-confirmed folder scope into one shared Microsoft Foundry "
+            "project, with one combined approval and standard tools."
         ),
     }
     assert "read-only repository, Git, GitHub, Azure, and Foundry" in normalized
@@ -113,17 +113,19 @@ def test_bootstrap_skill_is_static_and_uses_one_combined_approval() -> None:
     assert ".foundry/agent-metadata.yaml" not in normalized
 
 
-def test_bootstrap_requires_one_user_confirmed_onboarding_target_per_run() -> None:
+def test_bootstrap_confirms_scope_agent_subset_and_shared_project() -> None:
     _, body = _parse_frontmatter(BOOTSTRAP_ROOT / "SKILL.md")
     normalized = " ".join(body.split())
 
-    assert "one onboarding target per run" in normalized
-    assert "Which repository-relative agent source folder" in normalized
-    assert "Which Microsoft Foundry project endpoint" in normalized
-    assert "Do not infer or silently select either value" in normalized
+    assert "one onboarding scope per run" in normalized
+    assert "Which repository-relative folder should this run scan for agents" in normalized
+    assert "List every recognized deployable agent" in normalized
+    assert "confirm all recognized agents or list exact agents to exclude" in normalized
+    assert "one shared Microsoft Foundry project endpoint" in normalized
+    assert "Do not infer or silently select the folder, agent subset, or endpoint" in normalized
     assert "Preserve every unselected registry entry and sidecar" in normalized
     assert "azd deploy <selected-service>" in body
-    assert "rerun `/foundry-bootstrap` for another folder" in normalized
+    assert "rerun `/foundry-bootstrap` for another folder scope" in normalized
 
 
 def test_bootstrap_skill_resolves_ignored_contract_paths_before_approval() -> None:

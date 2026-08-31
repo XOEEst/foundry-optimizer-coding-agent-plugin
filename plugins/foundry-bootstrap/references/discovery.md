@@ -1,31 +1,37 @@
 # Read-only discovery
 
-Complete discovery before preparing a mutation plan, but only after the user
-confirms one agent source folder and one Foundry project endpoint.
+Complete discovery before preparing a mutation plan. Start after the user
+confirms one folder scope, then pause again for agent-subset confirmation
+before resolving one shared Foundry project endpoint.
 
 ## Confirmed target scope
 
-- Use a shallow read-only scan to offer candidate source folders.
-- Require the user to select one repository-relative directory.
-- Treat existing endpoints as suggestions and require the user to confirm one
-  exact Foundry project endpoint.
-- Do not inspect other candidate folders deeply or infer an endpoint from a
-  unique local match.
-- If the selected folder is already registered, preserve its stable ID and
-  show its current endpoint before asking for confirmation.
+- Require the user to select one repository-relative scan scope. It may be an
+  agent root, a parent containing many agents, or the repository root.
+- Within that scope, recognize deployable agents from concrete evidence such
+  as an `azure.ai.agent` service, agent manifest, or executable entry point plus
+  dependency/runtime configuration. Do not classify nested skill folders,
+  tests, clients, or infrastructure fixtures as agents without deployment
+  evidence.
+- List every recognized agent deterministically with its exact root and
+  evidence, then require the user to confirm all or exclude exact entries.
+- Treat existing endpoints as suggestions and require one shared endpoint for
+  the final selected subset.
+- If selected agents are already registered, preserve their stable IDs and
+  show their current endpoints before endpoint confirmation.
 
 ## Repository and Git
 
 - Resolve the repository root and canonical GitHub remote.
 - Record the current branch, exact `HEAD`, default branch, worktree status, and
   existing untracked files.
-- Read the existing registry, selected sidecar, `azure.yaml`, dependency files,
-  workflows, instructions, and issue form.
-- Within the confirmed folder, locate entry points and determine source root,
+- Read the existing registry, selected sidecars, `azure.yaml`, dependency
+  files, workflows, instructions, and issue form.
+- For each selected agent, locate entry points and determine source root,
   package root, runtime, dependency restoration, protocol, CPU/memory settings,
   model environment variable, and paths safe for optimizer edits.
-- Detect shared source involving the selected folder and keep all existing
-  agent IDs stable.
+- Detect shared source among selected and registered agents and keep all
+  existing agent IDs stable.
 
 Do not use file writes, Git index changes, branch changes, package installation,
 or formatting commands during this phase.
@@ -155,13 +161,13 @@ desired non-secret value is established from Azure inventory.
 ## Azure and Foundry inventory
 
 Use the current authenticated tenant and subscription. Record them explicitly.
-For the confirmed endpoint, inspect:
+For the confirmed shared endpoint, inspect:
 
 - its Foundry account and project
 - the selected project's full ARM resource ID as well as its endpoint
 - project endpoints and immutable ARM resource IDs
 - model deployments
-- hosted agents and versions that could match the selected folder
+- hosted agents and versions that could match each selected agent
 - user-assigned identities or application registrations
 - federated identity credentials
 - role assignments at their exact scopes
@@ -173,7 +179,7 @@ planning.
 
 ## Classification
 
-For each resource needed by the selected onboarding target:
+For each resource needed by the selected onboarding group:
 
 - **exact** - immutable identity, type, scope, and relevant configuration match
 - **missing** - no resource occupies the approved identity/name/scope

@@ -4,8 +4,9 @@ Migrate existing contracts in their current paths. Do not replace stable agent
 IDs, move sidecars, or discard fields merely because the templates use
 different examples.
 
-Each run migrates or creates only the user-confirmed source folder's entry and
-sidecar. Preserve all other entries and sidecars byte-for-byte.
+Each run migrates or creates only entries and sidecars for the user-confirmed
+agent subset. Preserve excluded and previously onboarded entries and sidecars
+byte-for-byte.
 
 ## Registry v1 to v2
 

@@ -42,7 +42,11 @@ TEMPLATE_VALUES = {
     "__REPO_AGENT_ID__": "example-agent",
     "__AGENT_ROOT__": "agent",
     "__AGENT_PACKAGE_ROOT__": "agent",
-    "__REGISTRY_ACTION__": "add",
+    "__AGENT_SCAN_SCOPE__": "agents",
+    "__SELECTED_AGENT_COUNT__": "1",
+    "__EXCLUDED_AGENT_COUNT__": "0",
+    "__EXCLUDED_REPO_AGENT_ID_OR_NONE__": "none",
+    "__EXCLUDED_AGENT_ROOT_OR_NONE__": "none",
     "__EXISTING_REPO_AGENT_ID_OR_NONE__": "none",
     "__EXISTING_AGENT_ROOT_OR_NONE__": "none",
     "__FOUNDRY_PROJECT_ENDPOINT__": (

@@ -1,6 +1,6 @@
 ---
 name: foundry-bootstrap
-description: Incrementally bootstrap one repository agent folder for Microsoft Foundry with a user-confirmed source folder and project endpoint, one combined approval, static templates, and standard tools.
+description: Incrementally bootstrap one or more repository agents from a user-confirmed folder scope into one shared Microsoft Foundry project, with one combined approval and standard tools.
 ---
 
 # Foundry bootstrap
@@ -11,10 +11,10 @@ JSON schemas only. Do not look for or run a bundled bootstrap program.
 
 ## Non-negotiable behavior
 
-- A repository containing only agent code is a valid input. Onboard one
-  user-confirmed agent source folder per run and generate or extend the
-  registry, per-agent profiles, workflows, issue form, instructions, report,
-  and deployment manifest from repository and owner evidence.
+- A repository containing only agent code is a valid input. Scan one
+  user-confirmed folder scope per run, let the user select any recognized
+  descendant agents, and generate or extend the registry, per-agent profiles,
+  workflows, issue form, instructions, report, and deployment manifest.
 - Perform discovery with read-only repository, Git, GitHub, Azure, and Foundry
   commands.
 - Render every proposed repository file in the coding session's staging area.
@@ -40,30 +40,44 @@ Do not require or generate repository-global legacy optimizer policy or agent
 metadata files. Registry v2 and each selected agent's sidecar are the complete
 repository configuration interface.
 
-## Mandatory onboarding target
+## Mandatory onboarding group
 
-Handle one onboarding target per run. Before runtime resolution, cloud
-inventory, classification, or proposal rendering, obtain these two
-user-confirmed values:
+Handle one onboarding scope per run. Before runtime resolution, cloud
+inventory, classification, or proposal rendering:
 
-1. Ask: **Which repository-relative agent source folder should this run
-   onboard?**
-2. Ask: **Which Microsoft Foundry project endpoint should that folder target?**
+1. Ask: **Which repository-relative folder should this run scan for agents?**
+   The answer may be one agent root, a parent containing many agents, or `.` for
+   the repository root.
+2. Perform a read-only scan only within that confirmed scope. List every
+   recognized deployable agent with a stable proposed ID, exact source root,
+   package root, language/runtime, entry point, protocol, and recognition
+   evidence.
+3. Ask the user to confirm all recognized agents or list exact agents to
+   exclude. Do not treat discovery as selection. Stop if the resulting subset
+   is empty.
+4. Ask: **Which one shared Microsoft Foundry project endpoint should the
+   selected agents target?**
 
-A shallow read-only repository scan may provide exact folder choices. Existing
-registry entries, sidecars, `azure.yaml`, azd values, and Foundry metadata may
-provide endpoint suggestions. Suggestions are not answers. Do not infer or
-silently select either value, even when only one candidate is found.
+Existing registry entries, sidecars, `azure.yaml`, azd values, and Foundry
+metadata may provide endpoint suggestions. If all selected existing agents
+already use one endpoint, present it for confirmation. Suggestions and existing
+bindings are not answers. Do not infer or silently select the folder, agent
+subset, or endpoint, even when only one candidate or endpoint is found.
 
-If the initial user prompt already states an exact repository-relative folder
-and exact project endpoint, repeat both in a concise confirmation and treat
-them as user-confirmed only after the user agrees. Ask one question at a time.
-Reject a folder outside the repository, a file instead of a directory, or an
-endpoint that does not match the Foundry project endpoint format. Never ask the
-user for an ARM resource ID.
+If the initial user prompt already states a folder scope or project endpoint,
+retain it as a proposed answer but still show the recognized agent list and ask
+the user to confirm the final scope, subset, and endpoint. Ask one question at a
+time. Reject a folder outside the repository, a file instead of a directory, or
+an endpoint that does not match the Foundry project endpoint format. Never ask
+the user for an ARM resource ID.
 
-The confirmation is session input, not durable bootstrap state. A later run
-asks again and may select another folder and another project endpoint.
+All selected agents in one run share the confirmed project endpoint. If their
+existing sidecars target different endpoints, require the user to unselect
+agents or explicitly approve retargeting them to the one confirmed endpoint.
+
+The confirmed scope, selected subset, and endpoint are session input, not
+durable bootstrap state. A later run asks again and may scan another folder,
+select another group, and use another project endpoint.
 
 ## Policy scope and deployment versions
 
@@ -175,8 +189,8 @@ Record the sources actually used in the bootstrap report.
 
 - Confirm the repository root, current branch, `HEAD`, worktree status, remotes,
   default branch, and GitHub repository identity.
-- Record the confirmed source folder and project endpoint as the sole
-  onboarding target for this run.
+- Record the confirmed scan scope, selected agent roots, and shared project
+  endpoint as the sole onboarding target for this run.
 - Resolve and verify retained-runtime provenance from `release.json` or the
   skill's source checkout before rendering repository contracts.
 - Stop before planning if unrelated local changes overlap a proposed file or
@@ -184,7 +198,7 @@ Record the sources actually used in the bootstrap report.
 - Run `git check-ignore -v --no-index` for every planned registry, report,
   sidecar, workflow, instruction, issue-form, and `azure.yaml` destination.
   Record the exact ignore rule and its source.
-- Inspect the selected folder's entry points, dependency files, protocols,
+- Inspect each selected agent's entry points, dependency files, protocols,
   model environment variables, editable paths, and existing sidecar. Inventory
   shared registry, `azure.yaml`, workflows, instructions, and issue forms only
   as needed to extend them safely.
@@ -194,10 +208,10 @@ Record the sources actually used in the bootstrap report.
   bootstrap, merge-time deployment, or repository-wide publication. Compare
   prose with active deployment workflow behavior before declaring a conflict.
 - Inventory GitHub environments and variables plus the Azure identities,
-  federated credentials, and role assignments needed by the selected folder.
+  federated credentials, and role assignments needed by the selected agents.
 - Resolve the confirmed endpoint to exactly one Foundry project, then inventory
   only that project's account, ARM resource ID, model deployments, and matching
-  deployed agent. If it does not resolve uniquely, ask the user to correct the
+  deployed agents. If it does not resolve uniquely, ask the user to correct the
   endpoint or Azure login; never substitute a different project.
 - Retain the selected project's full ARM resource ID as
   `AZURE_AI_PROJECT_ID` in the deployment plan. An endpoint alone is
@@ -213,20 +227,20 @@ Record the sources actually used in the bootstrap report.
 Follow [Discovery](references/discovery.md) and
 [Resource reuse](references/resource-reuse.md).
 
-### 2. Classify the selected agent and migrate its contract
+### 2. Classify selected agents and migrate their contracts
 
-For the confirmed source folder, propose one of:
+For each user-selected agent, propose one of:
 
 - registered but disabled
 - registered and enabled
-- not onboarded because the selected folder is unsupported or the user stops
+- not onboarded because that recognized agent is unsupported or the user stops
 
-If the folder is already registered, preserve its stable agent ID and config
+If an agent is already registered, preserve its stable agent ID and config
 path. Treat the user-confirmed endpoint as an explicit reconciliation target:
 an exact endpoint is reused; a different endpoint is shown as a retargeting
 change and never applied silently.
 
-Create or migrate only the selected folder's registry entry and sidecar.
+Create or migrate only the selected agents' registry entries and sidecars.
 Preserve every unselected registry entry and sidecar byte-for-byte, including
 its enabled state, target binding, policy, hard guardrails, evaluation bundle,
 and lineage. Do not create datasets, evaluators, evaluation definitions, or
@@ -237,9 +251,9 @@ evaluation runs. Follow [Migration](references/migration.md).
 In the session staging area:
 
 - patch `.gitignore` when a repository rule ignores a required tracked file
-- create or patch `.foundry-opt/registry.yaml` only for the selected entry
-- create or patch only
-  `<confirmed-agent-source-folder>/.foundry/foundry-opt.yaml`
+- create or patch `.foundry-opt/registry.yaml` only for selected entries
+- create or patch only each
+  `<selected-agent-source-folder>/.foundry/foundry-opt.yaml`
 - create or patch `azure.yaml`
 - create or patch `.github/workflows/foundry-opt-deploy.yml`
 - create or patch `.github/workflows/copilot-setup-steps.yml`
@@ -278,17 +292,19 @@ patch, and rerun every validation. Never substitute a worktree-only
 `git apply --check`.
 
 Patch `azure.yaml` to connect to an exact existing Foundry project or to declare
-the approved missing project and selected agent service. Reuse one existing
-project service when its endpoint exactly matches the confirmed endpoint.
-Keep every other project and agent service unchanged. Use source-code or
-container settings that match the selected folder.
+the approved missing project and selected agent services. Reuse one existing
+project service when its endpoint exactly matches the confirmed shared
+endpoint, and make each selected agent service depend on it. Keep every other
+project and agent service unchanged. Use source-code or container settings that
+match each selected agent.
 
 ### 4. Request one combined approval
 
 Show:
 
-- the user-confirmed source folder and Foundry project endpoint
-- the selected agent classification and all existing entries that remain
+- the user-confirmed scan scope, selected and excluded agents, and shared
+  Foundry project endpoint
+- each selected agent classification and all existing entries that remain
   unchanged
 - actual tool versions already present and any approved install/upgrade action
 - exact Python and NuGet sources and any persistent source-configuration change
@@ -300,8 +316,8 @@ Show:
 - preserved evaluation bundles and the statement that no evaluation assets
   will be created
 - exact branch, base commit, paths, commit message, and intended commit
-- exact `azd` environment, selected service, confirmed project endpoint, and
-  `azd deploy <selected-service>` command
+- exact `azd` environment, selected services, confirmed shared project
+  endpoint, and ordered `azd deploy <selected-service>` commands
 - exact `AZURE_AI_PROJECT_ID` full ARM resource ID and every azd environment
   value required by the selected services
 
@@ -343,19 +359,23 @@ approval.
    Require an exact match with the approved project ID. Run `azd provision`
    only for approved missing resources declared by `azure.yaml`; otherwise
    skip it.
-8. Run `azd deploy <selected-service>` from the exact local commit. Do not
-   deploy other registered services. Never treat an endpoint-only azd
-   environment as sufficient for an agent service that depends on an existing
+8. For each selected enabled agent, run
+   `azd deploy <selected-service>` from the exact local commit in the approved
+   order. Stop on the first failure and do not deploy remaining selected or
+   unselected services. Never treat an endpoint-only azd environment as
+   sufficient for an agent service that depends on an existing
    `azure.ai.project` service.
 9. Verify resulting resource identities and links without changing
    unapproved settings.
 10. Complete `.foundry-opt/bootstrap-report.md` with versions, commit, reused
-    and created resources, the selected folder and endpoint, deployment, all
-    previously onboarded entries, and remaining work.
+    and created resources, scan scope, selected and excluded agents, shared
+    endpoint, per-agent deployment results, all previously onboarded entries,
+    and remaining work.
 
 At successful handoff, tell the user to rerun `/foundry-bootstrap` for another
-folder. Every later run begins with the same two confirmations and extends the
-existing repository contract instead of replacing it.
+folder scope. Every later run repeats scope and subset confirmation, resolves
+one shared endpoint, and extends the existing repository contract instead of
+replacing it.
 
 ### 6. Stop safely on failure
 

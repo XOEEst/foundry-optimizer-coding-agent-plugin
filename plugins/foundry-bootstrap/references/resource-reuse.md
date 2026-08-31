@@ -3,9 +3,9 @@
 Remote resources are either reused exactly, created because they are missing,
 or treated as blockers.
 
-Scope each run to the user-confirmed source folder and project endpoint.
-Existing resources for other registered folders are inventory context only and
-must not be changed.
+Scope each run to the user-confirmed folder scope, selected agent subset, and
+shared project endpoint. Existing resources for excluded or previously
+registered agents are inventory context only and must not be changed.
 
 ## Exact match
 
@@ -57,4 +57,5 @@ Document the blocker for the owner.
 For an exact existing agent, `azd deploy` may publish a new immutable version.
 It must not redirect or replace a different named agent. For a missing approved
 agent, `azd deploy` creates the first version from the exact local commit. Run
-`azd deploy <selected-service>` and leave every other service untouched.
+`azd deploy <selected-service>` once per selected enabled agent in the approved
+order and leave every other service untouched.
