@@ -6,18 +6,29 @@ Invoke the skill from the repository root:
 Use /foundry-bootstrap to bootstrap this repository.
 ```
 
-The coding agent first inspects the repository and relevant GitHub, Azure, and
-Foundry resources without changing them. It then prepares proposed files in its
+Each run onboards one agent folder. Before broad discovery, the coding agent
+asks the owner to confirm:
+
+1. one exact repository-relative agent source folder
+2. one exact Microsoft Foundry project endpoint for that folder
+
+Repository and cloud evidence may be shown as suggestions, but the coding agent
+does not select either value. If both are supplied in the initial prompt, the
+owner confirms the pair before discovery continues.
+
+The coding agent then inspects only that onboarding target plus shared
+repository and identity configuration. It prepares proposed files in its
 session staging area and shows one review containing:
 
-1. discovered agents and their proposed enabled or disabled registration
-2. existing contracts that will be migrated in place
-3. exact repository diffs
-4. exact patch SHA-256 and successful `git apply --check --index` result
-5. cloud resources that exactly match and will be reused
-6. missing cloud resources that will be created
-7. conflicts that prevent safe progress
-8. the exact local commit and `azd deploy` plan
+1. the confirmed folder and endpoint
+2. selected-agent registration and deployment state
+3. existing registry entries and services that remain unchanged
+4. exact repository diffs
+5. exact patch SHA-256 and successful `git apply --check --index` result
+6. cloud resources that exactly match and will be reused
+7. missing cloud resources that will be created
+8. conflicts that prevent safe progress
+9. the exact local commit and selected-service `azd deploy` plan
 
 The owner gives one combined approval. If the plan changes, the coding agent
 shows a fresh exact diff and asks again.
@@ -27,11 +38,12 @@ shows a fresh exact diff and asks again.
 - `.foundry-opt/registry.yaml` is version 2 and contains exact `foundry-opt`
   provenance from the published skill or its remotely fetchable source
   checkout.
-- Each selected agent has a version 2 sidecar.
+- The selected agent has a version 2 sidecar; existing sidecars remain
+  unchanged.
 - Existing evaluation bundles and lineage remain unchanged; bootstrap creates no
   evaluation assets.
-- `azure.yaml` describes or connects to the reviewed Foundry project and agent
-  services.
+- `azure.yaml` connects the selected agent to the confirmed Foundry project
+  while preserving other project and agent services.
 - GitHub workflows use OIDC and the reviewed identity without static Azure
   credentials.
 - The optimizer skill and runtime are installed from exact retained provenance.
@@ -39,6 +51,9 @@ shows a fresh exact diff and asks again.
 - No branch or tag is pushed.
 - `.foundry-opt/bootstrap-report.md` records what happened and the actual tool
   versions.
+
+Rerun `/foundry-bootstrap` to onboard another folder, including a folder that
+targets a different Foundry project.
 
 If a step fails, the coding agent stops and reports completed, failed, and
 pending work without deleting successful changes.

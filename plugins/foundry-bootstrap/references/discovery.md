@@ -1,18 +1,31 @@
 # Read-only discovery
 
-Complete discovery before preparing a mutation plan.
+Complete discovery before preparing a mutation plan, but only after the user
+confirms one agent source folder and one Foundry project endpoint.
+
+## Confirmed target scope
+
+- Use a shallow read-only scan to offer candidate source folders.
+- Require the user to select one repository-relative directory.
+- Treat existing endpoints as suggestions and require the user to confirm one
+  exact Foundry project endpoint.
+- Do not inspect other candidate folders deeply or infer an endpoint from a
+  unique local match.
+- If the selected folder is already registered, preserve its stable ID and
+  show its current endpoint before asking for confirmation.
 
 ## Repository and Git
 
 - Resolve the repository root and canonical GitHub remote.
 - Record the current branch, exact `HEAD`, default branch, worktree status, and
   existing untracked files.
-- Read existing registry, sidecars, `azure.yaml`, dependency files, workflows,
-  instructions, issue forms, and agent metadata.
-- Locate agent entry points and determine source root, package root, runtime,
-  dependency restoration, protocol, CPU/memory settings, model environment
-  variable, and paths safe for optimizer edits.
-- Detect shared source between agents and keep stable existing agent IDs.
+- Read the existing registry, selected sidecar, `azure.yaml`, dependency files,
+  workflows, instructions, and issue form.
+- Within the confirmed folder, locate entry points and determine source root,
+  package root, runtime, dependency restoration, protocol, CPU/memory settings,
+  model environment variable, and paths safe for optimizer edits.
+- Detect shared source involving the selected folder and keep all existing
+  agent IDs stable.
 
 Do not use file writes, Git index changes, branch changes, package installation,
 or formatting commands during this phase.
@@ -142,13 +155,13 @@ desired non-secret value is established from Azure inventory.
 ## Azure and Foundry inventory
 
 Use the current authenticated tenant and subscription. Record them explicitly.
-Inspect:
+For the confirmed endpoint, inspect:
 
-- Foundry accounts and projects
-- each project's full ARM resource ID as well as its endpoint
+- its Foundry account and project
+- the selected project's full ARM resource ID as well as its endpoint
 - project endpoints and immutable ARM resource IDs
 - model deployments
-- hosted agents and versions
+- hosted agents and versions that could match the selected folder
 - user-assigned identities or application registrations
 - federated identity credentials
 - role assignments at their exact scopes
@@ -160,7 +173,7 @@ planning.
 
 ## Classification
 
-For each resource needed by the desired repository:
+For each resource needed by the selected onboarding target:
 
 - **exact** - immutable identity, type, scope, and relevant configuration match
 - **missing** - no resource occupies the approved identity/name/scope

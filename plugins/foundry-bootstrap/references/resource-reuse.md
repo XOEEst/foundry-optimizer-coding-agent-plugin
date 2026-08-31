@@ -3,6 +3,10 @@
 Remote resources are either reused exactly, created because they are missing,
 or treated as blockers.
 
+Scope each run to the user-confirmed source folder and project endpoint.
+Existing resources for other registered folders are inventory context only and
+must not be changed.
+
 ## Exact match
 
 Names alone are insufficient. Confirm the resource type, immutable identifier,
@@ -11,8 +15,8 @@ configuration.
 
 Examples:
 
-- A Foundry project matches only when its endpoint and backing account ARM ID
-  match the sidecar.
+- A Foundry project matches only when its endpoint is the user-confirmed
+  endpoint and its backing account ARM ID matches the selected sidecar.
 - A deployed agent matches only when it is in the reviewed project and has the
   reviewed agent name.
 - A managed identity matches only when its resource ID, tenant, and client ID
@@ -52,4 +56,5 @@ Document the blocker for the owner.
 
 For an exact existing agent, `azd deploy` may publish a new immutable version.
 It must not redirect or replace a different named agent. For a missing approved
-agent, `azd deploy` creates the first version from the exact local commit.
+agent, `azd deploy` creates the first version from the exact local commit. Run
+`azd deploy <selected-service>` and leave every other service untouched.

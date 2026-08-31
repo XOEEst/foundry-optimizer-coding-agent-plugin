@@ -9,9 +9,13 @@ Foundry Optimizer has three lifecycles:
 ## Bootstrap
 
 The owner invokes [`/foundry-bootstrap`](../../plugins/foundry-bootstrap/).
-The skill performs read-only discovery, shows one combined plan, receives one
-approval, applies repository and GitHub/Azure setup, writes the bootstrap
-report, creates a local commit, and deploys with azd.
+Each run begins with owner confirmation of one agent source folder and one
+Foundry project endpoint. The skill performs target-scoped read-only discovery,
+shows one combined plan, receives one approval, extends repository and
+GitHub/Azure setup without changing other agents, writes the bootstrap report,
+creates a local commit, and deploys only the selected service with azd.
+
+Owners rerun the same skill to incrementally onboard another folder or project.
 
 Bootstrap has no shared Python runtime, command tree, operation state, receipt,
 or rollback.

@@ -15,6 +15,10 @@ test-only provider stack. Owners could not reliably complete the flow.
 
 - `/foundry-bootstrap` performs bootstrap directly with general repository,
   Git, GitHub, Azure, Foundry, and azd tools.
+- Each invocation onboards one owner-confirmed source folder to one
+  owner-confirmed Foundry project endpoint. Repeated invocations preserve and
+  extend existing registry entries, sidecars, project services, and identity
+  configuration.
 - The owner reviews one combined plan and gives one approval.
 - The skill stages exact proposed files in the session workspace before
   approval.

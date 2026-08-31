@@ -9,8 +9,24 @@ Use /foundry-bootstrap to bootstrap this repository.
 
 The target repository may contain only agent source code. Existing Foundry,
 GitHub, Azure, evaluation, or optimizer metadata is optional; bootstrap
-discovers what exists and generates registry v2 plus one profile per selected
-agent.
+discovers what exists and generates registry v2 plus one profile for the
+selected agent.
+
+## Confirm one onboarding target
+
+Each run begins by asking the owner to confirm:
+
+1. one repository-relative agent source folder
+2. one Microsoft Foundry project endpoint for that folder
+
+Repository evidence may provide choices, but bootstrap never guesses either
+value. If both are included in the initial prompt, bootstrap repeats the pair
+for confirmation before discovery continues.
+
+One run adds or reconciles only that folder. Existing registry entries,
+sidecars, project bindings, and agent services remain unchanged. Rerun
+`/foundry-bootstrap` to onboard another folder, including one targeting a
+different Foundry project.
 
 A published archive is optional when developing from a source checkout. The
 skill folder may remain local: `/skills reload` picks up instruction and
@@ -22,7 +38,8 @@ its configured upstream, so only changes to shared runtime code require a push.
 The skill performs read-only inspection:
 
 - discovers agent roots and existing registry/profile/azure.yaml settings;
-- resolves Foundry projects and existing deployed agents;
+- inspects the confirmed folder and resolves only its confirmed Foundry project
+  and matching deployed agent;
 - inspects GitHub environments/variables and Azure identity/OIDC/RBAC;
 - checks existing Python and NuGet package sources and whether approved proxy
   feeds are required;
@@ -51,7 +68,7 @@ single approval; bootstrap never switches feeds silently.
 
 One approval covers:
 
-- repository files;
+- repository files for the selected folder plus required shared-file updates;
 - GitHub/Azure setup;
 - `.foundry-opt/bootstrap-report.md`;
 - local branch and commit creation;
@@ -72,7 +89,7 @@ The skill:
 7. capability-probes azd and the `azure.ai.agents` extension;
 8. binds reused projects with `AZURE_AI_PROJECT_ID` in the selected azd
    environment;
-9. runs `azd deploy <service>`;
+9. runs `azd deploy <selected-service>`;
 10. returns deployment versions and resource links.
 
 The skill does not push or merge.

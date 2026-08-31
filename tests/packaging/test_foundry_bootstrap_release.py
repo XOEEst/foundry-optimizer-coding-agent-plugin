@@ -42,6 +42,9 @@ TEMPLATE_VALUES = {
     "__REPO_AGENT_ID__": "example-agent",
     "__AGENT_ROOT__": "agent",
     "__AGENT_PACKAGE_ROOT__": "agent",
+    "__REGISTRY_ACTION__": "add",
+    "__EXISTING_REPO_AGENT_ID_OR_NONE__": "none",
+    "__EXISTING_AGENT_ROOT_OR_NONE__": "none",
     "__FOUNDRY_PROJECT_ENDPOINT__": (
         "https://example.services.ai.azure.com/api/projects/example"
     ),

@@ -51,11 +51,12 @@ Then open the agent repository in Copilot CLI and say:
 Use the /foundry-bootstrap skill to bootstrap this repository.
 ```
 
-The skill discovers agent folders, records which agents should be registered
-and enabled, resolves each enabled agent's Foundry project endpoint and agent
-name, and prepares one combined review covering repository changes, GitHub
-OIDC, Azure access, the local commit, and deployment. After approval, it creates
-the reviewed local commit and deploys that exact commit without pushing it.
+The skill first asks the owner to confirm one agent source folder and one
+Foundry project endpoint. It then prepares one combined review covering that
+agent's repository changes, GitHub OIDC, Azure access, local commit, and
+deployment. After approval, it creates the reviewed local commit and deploys
+only that selected service without pushing it. Rerun the skill to onboard
+another folder or project incrementally.
 
 Evaluation is optional. Owners can start with no evidence, repository checks,
 or a later issue that supplies a dataset and evaluators.
@@ -64,9 +65,9 @@ or a later issue that supplies a dataset and evaluators.
 
 The single combined approval covers:
 
-- Which discovered agents should be ignored, registered disabled, or
-  registered enabled?
-- Which Foundry project endpoint and agent name should each enabled agent use?
+- Which exact agent source folder and Foundry project endpoint should this run
+  onboard?
+- Should the selected agent be registered disabled or enabled?
 - Which exact repository files and cloud resources will be reused or created?
 - Which local commit and deployment command will be executed?
 

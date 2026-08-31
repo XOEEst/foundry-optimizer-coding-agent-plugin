@@ -6,6 +6,12 @@
 - Local bootstrap commit: `pending`
 - Generated at: `__GENERATED_AT_UTC__`
 
+## Onboarding target
+
+- Agent source folder: `__AGENT_ROOT__`
+- Foundry project endpoint: `__FOUNDRY_PROJECT_ENDPOINT__`
+- Registry action: `__REGISTRY_ACTION__`
+
 ## Tool versions
 
 - Git: `__GIT_VERSION__`
@@ -27,11 +33,12 @@
 - `uv.lock` SHA-256: `__FOUNDRY_OPT_UV_LOCK_SHA256__`
 - Optimizer skill path: `__FOUNDRY_OPT_OPTIMIZER_SKILL_PATH__`
 
-## Agent decisions
+## Agent registry
 
-| Repository agent ID | Root | Registration | Deployment | Foundry target |
-| --- | --- | --- | --- | --- |
-| `__REPO_AGENT_ID__` | `__AGENT_ROOT__` | enabled | pending | `__FOUNDRY_PROJECT_ENDPOINT__/agents/__FOUNDRY_AGENT_NAME__` |
+| Repository agent ID | Root | Run scope | Registration | Deployment | Foundry target |
+| --- | --- | --- | --- | --- | --- |
+| `__REPO_AGENT_ID__` | `__AGENT_ROOT__` | selected | enabled | pending | `__FOUNDRY_PROJECT_ENDPOINT__/agents/__FOUNDRY_AGENT_NAME__` |
+| `__EXISTING_REPO_AGENT_ID_OR_NONE__` | `__EXISTING_AGENT_ROOT_OR_NONE__` | preserved | unchanged | unchanged | unchanged |
 
 ## Reused resources
 

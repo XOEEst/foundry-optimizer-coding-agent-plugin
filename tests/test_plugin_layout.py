@@ -91,9 +91,9 @@ def test_bootstrap_skill_is_static_and_uses_one_combined_approval() -> None:
     assert frontmatter == {
         "name": "foundry-bootstrap",
         "description": (
-            "Bootstrap repository agents for Microsoft Foundry with read-only "
-            "discovery, one combined approval, static templates, and standard "
-            "Git, GitHub, Azure, and azd tools."
+            "Incrementally bootstrap one repository agent folder for Microsoft "
+            "Foundry with a user-confirmed source folder and project endpoint, "
+            "one combined approval, static templates, and standard tools."
         ),
     }
     assert "read-only repository, Git, GitHub, Azure, and Foundry" in normalized
@@ -111,6 +111,19 @@ def test_bootstrap_skill_is_static_and_uses_one_combined_approval() -> None:
     assert "A repository containing only agent code is a valid input" in normalized
     assert ".github/foundry-optimizer.yaml" not in normalized
     assert ".foundry/agent-metadata.yaml" not in normalized
+
+
+def test_bootstrap_requires_one_user_confirmed_onboarding_target_per_run() -> None:
+    _, body = _parse_frontmatter(BOOTSTRAP_ROOT / "SKILL.md")
+    normalized = " ".join(body.split())
+
+    assert "one onboarding target per run" in normalized
+    assert "Which repository-relative agent source folder" in normalized
+    assert "Which Microsoft Foundry project endpoint" in normalized
+    assert "Do not infer or silently select either value" in normalized
+    assert "Preserve every unselected registry entry and sidecar" in normalized
+    assert "azd deploy <selected-service>" in body
+    assert "rerun `/foundry-bootstrap` for another folder" in normalized
 
 
 def test_bootstrap_skill_resolves_ignored_contract_paths_before_approval() -> None:
