@@ -59,6 +59,13 @@ GitHub OIDC, Azure access, local commit, and deployments. After approval, it
 creates the reviewed local commit and deploys only the selected services
 without pushing it. Rerun the skill to onboard another group or project.
 
+Large inventories are grouped and written to session-only Markdown and CSV
+files with numbered rows, supporting selections such as `all`,
+`exclude 4,8-12`, or `only 2-20,31`. Bootstrap also checks each selected
+agent's optimizer readiness against the current
+[Microsoft guide](https://learn.microsoft.com/en-us/azure/foundry/agents/how-to/make-agent-optimizer-ready)
+and includes required readiness changes in the reviewed plan.
+
 Evaluation is optional. Owners can start with no evidence, repository checks,
 or a later issue that supplies a dataset and evaluators.
 

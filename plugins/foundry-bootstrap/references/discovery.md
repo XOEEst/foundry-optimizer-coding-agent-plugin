@@ -14,11 +14,24 @@ before resolving one shared Foundry project endpoint.
   tests, clients, or infrastructure fixtures as agents without deployment
   evidence.
 - List every recognized agent deterministically with its exact root and
-  evidence, then require the user to confirm all or exclude exact entries.
+  evidence, a session row number, and optimizer-readiness status.
+- Group the chat summary by immediate child folder, framework, and
+  language/runtime. Put the complete rows in session-only Markdown and CSV
+  inventory artifacts.
+- Accept `all`, `exclude` number/ranges, or `only` number/ranges, validate the
+  expression against the unchanged inventory, and require confirmation of the
+  resulting subset.
 - Treat existing endpoints as suggestions and require one shared endpoint for
   the final selected subset.
 - If selected agents are already registered, preserve their stable IDs and
   show their current endpoints before endpoint confirmation.
+
+Assess readiness against
+https://learn.microsoft.com/en-us/azure/foundry/agents/how-to/make-agent-optimizer-ready.
+Fetch the current guide during the run; do not copy its contents into the
+skill. Record only `ready`, `not ready`, or `unknown`, concise source evidence,
+and the guide link. Deeply inspect and plan remediation only for selected
+not-ready agents.
 
 ## Repository and Git
 

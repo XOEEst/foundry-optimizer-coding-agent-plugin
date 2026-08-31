@@ -47,6 +47,11 @@ TEMPLATE_VALUES = {
     "__EXCLUDED_AGENT_COUNT__": "0",
     "__EXCLUDED_REPO_AGENT_ID_OR_NONE__": "none",
     "__EXCLUDED_AGENT_ROOT_OR_NONE__": "none",
+    "__SESSION_INVENTORY_MARKDOWN_PATH__": "session/inventory.md",
+    "__SESSION_INVENTORY_CSV_PATH__": "session/inventory.csv",
+    "__AGENT_SELECTION_EXPRESSION__": "all",
+    "__OPTIMIZER_READINESS__": "ready",
+    "__OPTIMIZER_REMEDIATION_OR_NONE__": "none",
     "__EXISTING_REPO_AGENT_ID_OR_NONE__": "none",
     "__EXISTING_AGENT_ROOT_OR_NONE__": "none",
     "__FOUNDRY_PROJECT_ENDPOINT__": (

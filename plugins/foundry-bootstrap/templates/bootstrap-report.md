@@ -12,6 +12,17 @@
 - Selected agents: `__SELECTED_AGENT_COUNT__`
 - Excluded agents: `__EXCLUDED_AGENT_COUNT__`
 - Shared Foundry project endpoint: `__FOUNDRY_PROJECT_ENDPOINT__`
+- Inventory Markdown: `__SESSION_INVENTORY_MARKDOWN_PATH__` (session-only)
+- Inventory CSV: `__SESSION_INVENTORY_CSV_PATH__` (session-only)
+- Selection expression: `__AGENT_SELECTION_EXPRESSION__`
+
+## Optimizer readiness
+
+- Guide: https://learn.microsoft.com/en-us/azure/foundry/agents/how-to/make-agent-optimizer-ready
+
+| Repository agent ID | Status | Planned or completed remediation |
+| --- | --- | --- |
+| `__REPO_AGENT_ID__` | `__OPTIMIZER_READINESS__` | `__OPTIMIZER_REMEDIATION_OR_NONE__` |
 
 ## Tool versions
 

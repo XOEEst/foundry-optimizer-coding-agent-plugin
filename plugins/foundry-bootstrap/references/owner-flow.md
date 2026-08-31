@@ -10,8 +10,10 @@ Each run scans one folder scope and can onboard one or many descendant agents
 into one shared Foundry project. Before cloud discovery, the coding agent:
 
 1. asks the owner to confirm one repository-relative scan scope
-2. lists every recognized deployable agent under that scope
-3. asks the owner to confirm all agents or explicitly exclude some
+2. shows a grouped summary and writes the complete numbered inventory to
+   session-only Markdown and CSV artifacts
+3. asks the owner for `all`, an `exclude` number/range expression, or an `only`
+   number/range expression, then confirms the resulting subset
 4. asks the owner to confirm one Microsoft Foundry project endpoint shared by
    the selected agents
 
@@ -25,7 +27,8 @@ repository and identity configuration. It prepares proposed files in its
 session staging area and shows one review containing:
 
 1. the confirmed scope, selected and excluded agents, and shared endpoint
-2. selected-agent registration and deployment states
+2. selected-agent registration, optimizer readiness, remediation, and
+   deployment states
 3. existing registry entries and services that remain unchanged
 4. exact repository diffs
 5. exact patch SHA-256 and successful `git apply --check --index` result
@@ -33,6 +36,10 @@ session staging area and shows one review containing:
 7. missing cloud resources that will be created
 8. conflicts that prevent safe progress
 9. the exact local commit and ordered selected-service `azd deploy` plan
+
+The inventory and approval link to the current optimizer-readiness guide:
+https://learn.microsoft.com/en-us/azure/foundry/agents/how-to/make-agent-optimizer-ready
+The skill does not copy that guide into its own instructions.
 
 The owner gives one combined approval. If the plan changes, the coding agent
 shows a fresh exact diff and asks again.

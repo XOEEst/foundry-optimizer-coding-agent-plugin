@@ -25,6 +25,17 @@ repository root. Bootstrap lists every recognized deployable agent before the
 owner confirms the subset. Repository evidence may suggest an endpoint, but
 bootstrap never guesses the scope, subset, or endpoint.
 
+For large inventories, bootstrap shows a grouped summary and writes complete
+session-only Markdown and CSV inventories. Agents have short row numbers, so
+owners can reply with `all`, `exclude 4,8-12`, or `only 2-20,31` instead of
+copying long IDs.
+
+Each inventory row includes optimizer readiness. Bootstrap consults the current
+[Microsoft optimizer-readiness guide](https://learn.microsoft.com/en-us/azure/foundry/agents/how-to/make-agent-optimizer-ready)
+during the run. Selected agents that are not ready receive exact staged
+readiness changes and validation in the combined plan; the skill does not embed
+the guide's contents.
+
 One run adds or reconciles only the selected group. Existing excluded registry
 entries, sidecars, project bindings, and agent services remain unchanged.
 Rerun `/foundry-bootstrap` to scan another folder or onboard another group,
@@ -42,6 +53,7 @@ The skill performs read-only inspection:
 - discovers agent roots and existing registry/profile/azure.yaml settings;
 - inspects the confirmed scope, selected agents, and their one shared Foundry
   project;
+- assesses optimizer readiness and stages required changes for selected agents;
 - inspects GitHub environments/variables and Azure identity/OIDC/RBAC;
 - checks existing Python and NuGet package sources and whether approved proxy
   feeds are required;

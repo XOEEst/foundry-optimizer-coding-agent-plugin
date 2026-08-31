@@ -8,6 +8,10 @@ shared project endpoint. Append or reconcile only those agents' registry
 entries, sidecars, shared project binding, and agent services. Preserve every
 other registered agent and service unchanged.
 
+The Markdown/CSV discovery inventory is session-only and is not a customer
+repository template. Optimizer-readiness code changes for selected agents are
+ordinary reviewed patch content.
+
 | Template | Customer repository destination |
 | --- | --- |
 | `registry.yaml` | `.foundry-opt/registry.yaml` |

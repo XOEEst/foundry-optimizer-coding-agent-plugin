@@ -128,6 +128,24 @@ def test_bootstrap_confirms_scope_agent_subset_and_shared_project() -> None:
     assert "rerun `/foundry-bootstrap` for another folder scope" in normalized
 
 
+def test_bootstrap_uses_readable_large_inventory_and_readiness_planning() -> None:
+    _, body = _parse_frontmatter(BOOTSTRAP_ROOT / "SKILL.md")
+    normalized = " ".join(body.split())
+
+    assert "foundry-bootstrap-agent-inventory.md" in body
+    assert "foundry-bootstrap-agent-inventory.csv" in body
+    assert "immediate child folder, framework, and language/runtime" in normalized
+    assert "`all`, `exclude 4,8-12`, or `only 2-20,31`" in normalized
+    assert "session-only artifacts" in normalized
+    assert (
+        "https://learn.microsoft.com/en-us/azure/foundry/agents/how-to/"
+        "make-agent-optimizer-ready"
+    ) in body
+    assert "Do not embed or paraphrase the guide" in normalized
+    assert "stage exact optimizer-readiness changes" in normalized
+    assert "ready`, `not ready`, or `unknown`" in normalized
+
+
 def test_bootstrap_skill_resolves_ignored_contract_paths_before_approval() -> None:
     _, body = _parse_frontmatter(BOOTSTRAP_ROOT / "SKILL.md")
     discovery = _read(BOOTSTRAP_ROOT / "references" / "discovery.md")

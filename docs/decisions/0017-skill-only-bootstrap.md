@@ -20,6 +20,10 @@ test-only provider stack. Owners could not reliably complete the flow.
   owner-confirmed Foundry project endpoint. Repeated invocations preserve and
   extend existing registry entries, sidecars, project services, and identity
   configuration.
+- Large discovery results use grouped summaries, complete session-only
+  Markdown/CSV inventories, and number/range selection. Selected agents are
+  assessed against the current Microsoft optimizer-readiness guide, with exact
+  required remediation included in the combined plan.
 - The owner reviews one combined plan and gives one approval.
 - The skill stages exact proposed files in the session workspace before
   approval.

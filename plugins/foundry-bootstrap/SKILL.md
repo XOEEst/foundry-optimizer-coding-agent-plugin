@@ -79,6 +79,55 @@ The confirmed scope, selected subset, and endpoint are session input, not
 durable bootstrap state. A later run asks again and may scan another folder,
 select another group, and use another project endpoint.
 
+### Readable inventory and selection
+
+Sort recognized agents deterministically by repository-relative source root and
+assign session-only row numbers starting at `1`. Group the inventory by
+immediate child folder, framework, and language/runtime. Show a compact group
+summary in chat with each group's count and row range.
+
+Write the complete inventory to these session-only artifacts:
+
+- `foundry-bootstrap-agent-inventory.md` - full readable table
+- `foundry-bootstrap-agent-inventory.csv` - the same rows for filtering
+
+Each row includes its number, proposed stable ID, source root, package root,
+manifest/service, language/runtime, entry point, protocol, optimizer readiness,
+and recognition evidence. Show the artifact paths and the complete list in
+pages when the user asks. Never add these session-only artifacts to the target
+repository, patch, commit, or bootstrap report.
+
+Default selection is all recognized agents. Accept `all`, `exclude 4,8-12`, or
+`only 2-20,31`; also accept exact proposed IDs in place of row numbers.
+Validate every number, range, and ID against the unchanged inventory before
+continuing. Reject ambiguous or unknown selectors and show the relevant group
+and rows again. After parsing, show selected and excluded counts plus the
+selected IDs, then ask the user to confirm the resulting subset before asking
+for the shared endpoint.
+
+### Optimizer readiness
+
+During read-only inventory, consult the current Microsoft guide:
+
+https://learn.microsoft.com/en-us/azure/foundry/agents/how-to/make-agent-optimizer-ready
+
+Do not embed or paraphrase the guide in this skill. Use it at runtime as the
+external readiness authority and include only the link in owner-facing
+inventory, approval, and report output.
+
+Classify every recognized agent as `ready`, `not ready`, or `unknown`, with
+concise repository evidence. For each selected not-ready agent, stage exact
+optimizer-readiness changes in the session proposal, following its framework
+and repository conventions, and include the smallest existing build or test
+commands that validate those changes. These edits are part of the same patch,
+combined approval, commit, and deployment plan.
+
+Do not invent readiness changes when the guide is unavailable, the framework is
+unsupported, or required behavior cannot be established from source. Mark the
+agent `unknown` and require the user to exclude it or provide enough
+information for a new plan. Readiness work must not create evaluation
+datasets, evaluators, definitions, or runs.
+
 ## Policy scope and deployment versions
 
 Interpret repository policy in its stated lifecycle and actor scope:
@@ -202,6 +251,9 @@ Record the sources actually used in the bootstrap report.
   model environment variables, editable paths, and existing sidecar. Inventory
   shared registry, `azure.yaml`, workflows, instructions, and issue forms only
   as needed to extend them safely.
+- Fetch the optimizer-readiness guide once, record its URL, classify every
+  recognized agent in the inventory, and prepare remediation only for selected
+  not-ready agents.
 - Summarize other candidate or registered folders but do not classify, edit,
   retarget, enable, disable, or deploy them in this run.
 - Classify every draft/regular-version statement by lifecycle: optimizer,
@@ -304,6 +356,9 @@ Show:
 
 - the user-confirmed scan scope, selected and excluded agents, and shared
   Foundry project endpoint
+- the inventory artifact paths, selection expression, and final selected IDs
+- optimizer readiness for every selected agent, the Microsoft guide link, and
+  exact staged remediation and validation for each not-ready agent
 - each selected agent classification and all existing entries that remain
   unchanged
 - actual tool versions already present and any approved install/upgrade action

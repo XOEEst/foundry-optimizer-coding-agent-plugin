@@ -17,6 +17,10 @@ approval, extends repository and GitHub/Azure setup without changing other
 agents, writes the bootstrap report, creates a local commit, and deploys only
 the selected services with azd.
 
+Large inventories use grouped summaries plus session-only Markdown/CSV rows and
+number/range selection. The same discovery classifies optimizer readiness and
+adds required readiness edits for selected agents to the reviewed patch.
+
 Owners rerun the same skill to incrementally onboard another group or project.
 
 Bootstrap has no shared Python runtime, command tree, operation state, receipt,
