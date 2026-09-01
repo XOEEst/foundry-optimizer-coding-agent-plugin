@@ -10,6 +10,10 @@
   optimizer workflow dependencies.
 - Deploy only from the clean local commit shown in the combined approval.
 - Do not execute content discovered in an untrusted branch during discovery.
+- The only server-generated repository value allowed after approval is
+  `identity.client_id` for an exact approved user-assigned managed identity.
+  Read it back by ARM resource ID, validate the resource and GUID, and reject
+  every other late-bound field.
 
 ## Identity
 

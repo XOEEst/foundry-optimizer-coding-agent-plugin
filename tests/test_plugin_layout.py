@@ -169,6 +169,19 @@ def test_bootstrap_skill_preflights_the_exact_lf_patch_against_the_index() -> No
     assert "Do not request approval" in normalized
 
 
+def test_bootstrap_late_binds_only_server_generated_identity_client_id() -> None:
+    _, body = _parse_frontmatter(BOOTSTRAP_ROOT / "SKILL.md")
+    normalized = " ".join(body.split())
+
+    assert "bounded late-binding exception" in normalized
+    assert "omit `identity.client_id` from the static patch" in normalized
+    assert "exact approved identity resource" in normalized
+    assert "final patch may differ only by `identity.client_id`" in normalized
+    assert "does not require a second approval" in normalized
+    assert "static patch SHA-256" in normalized
+    assert "final patch SHA-256" in normalized
+
+
 def test_bootstrap_scopes_draft_only_rules_to_optimize_jobs() -> None:
     _, body = _parse_frontmatter(BOOTSTRAP_ROOT / "SKILL.md")
     normalized = " ".join(body.split())

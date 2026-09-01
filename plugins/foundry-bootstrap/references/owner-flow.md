@@ -37,6 +37,12 @@ session staging area and shows one review containing:
 8. conflicts that prevent safe progress
 9. the exact local commit and ordered selected-service `azd deploy` plan
 
+When the plan creates a user-assigned managed identity, the review shows the
+static patch without `identity.client_id`, the exact approved identity ARM
+resource ID, and the sole late-binding rule. After creation, only the returned
+client ID may be added to the registry and approved GitHub variable without
+another approval; the final patch hash is recorded before apply.
+
 The inventory and approval link to the current optimizer-readiness guide:
 https://learn.microsoft.com/en-us/azure/foundry/agents/how-to/make-agent-optimizer-ready
 The skill does not copy that guide into its own instructions.

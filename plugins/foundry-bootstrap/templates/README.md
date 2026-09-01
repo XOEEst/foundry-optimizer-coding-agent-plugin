@@ -29,6 +29,11 @@ sidecar and `azure.ai.agent` service for each selected agent. Reuse one existing
 shared endpoint. Remove template comments that do not describe the rendered
 repository.
 
+For a newly approved user-assigned managed identity, remove the
+`identity.client_id` line from the static registry proposal instead of leaving
+its token unresolved. After Azure creates and the skill verifies that exact
+identity, add the concrete returned client ID to the final registry patch.
+
 Registry and sidecar output must pass the bundled schemas. `azure.yaml` must
 pass the installed `azure.ai.agents` extension's validation/capability checks.
 No rendered file may contain an unresolved token or a credential.

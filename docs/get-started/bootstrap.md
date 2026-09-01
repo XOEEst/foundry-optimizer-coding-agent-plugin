@@ -90,6 +90,12 @@ One approval covers:
 
 There is no rollback. The skill states this before requesting approval.
 
+If bootstrap must create a user-assigned managed identity, Azure generates its
+client ID during creation. The approval names the exact identity ARM resource
+and permits only that returned client ID to be inserted into
+`registry.identity.client_id` and the approved GitHub variable. Bootstrap
+validates and records the final patch hash without requesting another approval.
+
 ## After approval
 
 The skill:

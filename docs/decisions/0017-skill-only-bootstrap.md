@@ -24,6 +24,9 @@ test-only provider stack. Owners could not reliably complete the flow.
   Markdown/CSV inventories, and number/range selection. Selected agents are
   assessed against the current Microsoft optimizer-readiness guide, with exact
   required remediation included in the combined plan.
+- New user-assigned identities use one bounded late-binding rule: approval
+  fixes the exact ARM resource ID, and only Azure's verified returned client ID
+  may be inserted into the final registry patch and approved GitHub variable.
 - The owner reviews one combined plan and gives one approval.
 - The skill stages exact proposed files in the session workspace before
   approval.

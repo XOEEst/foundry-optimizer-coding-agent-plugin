@@ -24,3 +24,8 @@ If patch preflight or apply fails, record the patch SHA-256, base commit, exact
 `git apply` command, and concise stderr. Do not retry with a regenerated patch
 under the existing approval. A corrected LF patch requires fresh validation
 and a new combined approval.
+
+If an approved identity was created but client-ID materialization or final
+patch validation fails, leave the identity unchanged. Record its ARM resource
+ID, client ID, principal ID, static patch hash, failed final patch hash or
+validation, and pending repository/GitHub work.

@@ -45,6 +45,15 @@
 - `uv.lock` SHA-256: `__FOUNDRY_OPT_UV_LOCK_SHA256__`
 - Optimizer skill path: `__FOUNDRY_OPT_OPTIMIZER_SKILL_PATH__`
 
+## Repository patch
+
+- Static patch SHA-256: `__STATIC_PATCH_SHA256__`
+- Identity client-ID late binding: `__IDENTITY_LATE_BINDING_OR_NONE__`
+- Final patch SHA-256: `__FINAL_PATCH_SHA256__`
+- Created identity ARM ID: `__CREATED_IDENTITY_RESOURCE_ID_OR_NONE__`
+- Created identity client ID: `__CREATED_IDENTITY_CLIENT_ID_OR_NONE__`
+- Created identity principal ID: `__CREATED_IDENTITY_PRINCIPAL_ID_OR_NONE__`
+
 ## Agent registry
 
 | Repository agent ID | Root | Run scope | Registration | Deployment | Foundry target |

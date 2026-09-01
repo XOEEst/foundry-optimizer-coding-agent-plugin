@@ -329,7 +329,7 @@ line endings. Build tracked-file context from Git index blobs rather than
 platform-normalized worktree bytes. Respect an explicit `.gitattributes`
 binary or `-text` rule instead of converting that path.
 
-Create one immutable unified patch artifact for all reviewed tracked changes.
+Create one immutable static patch artifact for all reviewed tracked changes.
 Use `a/` and `b/` repository-relative paths, LF patch control lines, and no
 absolute staging paths. Before approval, from the clean target repository run:
 
@@ -342,6 +342,41 @@ approval unless that exact command succeeds against the recorded base `HEAD`
 and index. If it fails, correct the staged representation, regenerate the
 patch, and rerun every validation. Never substitute a worktree-only
 `git apply --check`.
+
+#### Bounded late-binding exception
+
+When no reusable identity exists and the approved plan creates a
+user-assigned managed identity, its ARM resource ID is deterministic but Azure
+generates its client ID only during creation. This is the only bounded
+late-binding exception to the exact static patch rule.
+
+Before approval:
+
+- include the exact identity type, name, subscription, resource group,
+  location, and full ARM resource ID in the remote plan
+- include that exact resource ID and identity kind in the registry
+- omit `identity.client_id` from the static patch; do not use a placeholder
+- show the static patch SHA-256
+- state that the final patch may differ only by `identity.client_id`, whose
+  value must come from the exact approved identity resource
+
+The combined approval explicitly approves this deterministic substitution and
+does not require a second approval. It does not authorize late binding of any
+other repository value.
+
+After approval, create only that missing identity first. Read it back by its
+exact ARM resource ID and require matching subscription, resource group, name,
+location, tenant, and type plus nonempty GUID-form client and principal IDs.
+Insert the returned client ID into:
+
+- `.foundry-opt/registry.yaml` at `identity.client_id`
+- the materialized value for the exact approved GitHub client-ID variable
+
+Generate the final patch from the unchanged static proposal plus that single
+registry field. Verify that no other path or value changed, validate all
+schemas, rerun the secret/token scan and index-aware `git apply --check`, and
+record the final patch SHA-256. Stop on any mismatch; leave the created identity
+in place and report the partial state.
 
 Patch `azure.yaml` to connect to an exact existing Foundry project or to declare
 the approved missing project and selected agent services. Reuse one existing
@@ -364,7 +399,9 @@ Show:
 - actual tool versions already present and any approved install/upgrade action
 - exact Python and NuGet sources and any persistent source-configuration change
 - exact staged file diffs
-- SHA-256 of the exact patch bytes and the successful index-aware preflight
+- static patch SHA-256 and the successful index-aware preflight
+- any approved managed-identity client-ID late-binding rule, including its
+  exact resource ID and sole allowed registry field
 - exact GitHub, Azure, and Foundry resources to reuse
 - exact missing resources to create, including names, types, scopes, regions,
   OIDC subjects, roles, and deterministic resource IDs where available
@@ -383,25 +420,33 @@ approval.
 
 1. Install or upgrade `azd` or `azure.ai.agents` only if the approved capability
    plan requires it, then record the resulting versions.
-2. Confirm the base `HEAD`, clean worktree, patch SHA-256, and Git index still
-   match the approved review. Rerun
-   `git apply --check --index --whitespace=error-all <patch>`, then apply those
-   same bytes with:
+2. Confirm the base `HEAD`, clean worktree, static patch SHA-256, and Git index
+   still match the approved review. Rerun
+   `git apply --check --index --whitespace=error-all <static-patch>`.
+3. Re-query the approved identity. Reuse an exact match. If it is still missing
+   and the approved plan includes managed-identity late binding, create only
+   that identity, read it back by exact ARM resource ID, and materialize the
+   approved client ID field and GitHub variable value.
+4. Produce the final patch. Require it to equal the static patch unless the
+   approved late-binding rule applies, in which case the final patch may differ
+   only by `identity.client_id`. Record the final patch SHA-256, rerun all
+   validation, then apply it with:
 
    ```text
-   git apply --index --whitespace=error-all <patch>
+   git apply --index --whitespace=error-all <final-patch>
    ```
 
-   Do not regenerate or reserialize the approved patch. Rerun repository
+   Do not make any other generated-value substitution. Rerun repository
    validation against the staged result.
-3. Re-query every remote resource immediately before mutation. Reuse an exact
-   match, create a still-missing resource, and stop on drift or conflict.
-4. Configure GitHub environments and non-secret variables, Azure identity,
-   federated credentials, and least-privilege role assignments from the
-   approved plan. Do not store credentials in the repository.
-5. Create the approved local commit containing only approved paths.
-6. Verify `HEAD` is that commit and the deployment worktree is clean.
-7. Select the approved azd environment. For every existing Foundry project,
+5. Re-query every remaining remote resource immediately before mutation. Reuse
+   an exact match, create a still-missing resource, and stop on drift or
+   conflict.
+6. Configure GitHub environments and non-secret variables, federated
+   credentials, and least-privilege role assignments from the approved plan.
+   Do not store credentials in the repository.
+7. Create the approved local commit containing only approved paths.
+8. Verify `HEAD` is that commit and the deployment worktree is clean.
+9. Select the approved azd environment. For every existing Foundry project,
    set `AZURE_AI_PROJECT_ID` to its verified full ARM resource ID and set the
    approved endpoint, subscription, location, resource group, and referenced
    model values required by `azure.yaml`. Verify the binding before running
@@ -414,15 +459,15 @@ approval.
    Require an exact match with the approved project ID. Run `azd provision`
    only for approved missing resources declared by `azure.yaml`; otherwise
    skip it.
-8. For each selected enabled agent, run
+10. For each selected enabled agent, run
    `azd deploy <selected-service>` from the exact local commit in the approved
    order. Stop on the first failure and do not deploy remaining selected or
    unselected services. Never treat an endpoint-only azd environment as
    sufficient for an agent service that depends on an existing
    `azure.ai.project` service.
-9. Verify resulting resource identities and links without changing
+11. Verify resulting resource identities and links without changing
    unapproved settings.
-10. Complete `.foundry-opt/bootstrap-report.md` with versions, commit, reused
+12. Complete `.foundry-opt/bootstrap-report.md` with versions, commit, reused
     and created resources, scan scope, selected and excluded agents, shared
     endpoint, per-agent deployment results, all previously onboarded entries,
     and remaining work.

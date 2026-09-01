@@ -34,9 +34,12 @@ The combined approval must identify every missing resource by deterministic
 name and scope and state which command or API will create it. Immediately
 before creation, repeat the read and confirm it is still missing.
 
-Generated values such as a new identity's client ID may be copied only to the
-approved GitHub variable after the create response is checked against the
-approved resource ID.
+For a newly approved user-assigned managed identity, omit
+`identity.client_id` from the static repository patch. After creation, read the
+identity back by its exact approved ARM resource ID. Its generated client ID may
+be added only to the declared registry field and used for the approved GitHub
+variable after all immutable resource properties match. No other repository
+field may be late-bound.
 
 ## Conflicts and insufficient access
 
