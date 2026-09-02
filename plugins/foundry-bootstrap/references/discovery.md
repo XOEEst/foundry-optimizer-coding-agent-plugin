@@ -164,12 +164,19 @@ Use `gh` read operations to inspect:
 - repository owner/name and immutable IDs
 - default branch and branch protection or rulesets
 - existing `copilot` and deployment environments
+- each environment's deployment branch-policy mode and separate custom
+  branch/tag entry list
 - environment and repository variables
 - existing deployment and Copilot setup workflows
 
 Variable values that GitHub does not return must be treated as unknown, not as
 an exact match. Ask for approval to set a missing/unknown variable only when its
 desired non-secret value is established from Azure inventory.
+
+No repository branch protection is a valid exact state. For environments,
+distinguish `deployment_branch_policy` from `protection_rules` and from
+`GET .../deployment-branch-policies`. Enabling custom mode itself produces a
+`branch_policy` protection rule even before any allowed entry exists.
 
 ## Azure and Foundry inventory
 

@@ -66,6 +66,13 @@
 
 - `__REUSED_RESOURCE_OR_NONE__`
 
+## GitHub deployment branch policy
+
+- Repository branch protection: `__REPOSITORY_BRANCH_PROTECTION_OR_NONE__`
+- Copilot environment mode: `__COPILOT_ENVIRONMENT_BRANCH_MODE__`
+- Deployment environment mode: `__DEPLOYMENT_ENVIRONMENT_BRANCH_MODE__`
+- Deployment environment allowed entries: `__DEPLOYMENT_BRANCH_ENTRIES_OR_NONE__`
+
 ## Created resources
 
 - `__CREATED_RESOURCE_OR_NONE__`

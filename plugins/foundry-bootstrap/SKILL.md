@@ -149,6 +149,36 @@ If repository evidence is genuinely contradictory, report the exact files and
 statements as a policy conflict; do not invent a missing draft-deployment
 capability.
 
+## GitHub branch-policy semantics
+
+Repository branch protection and rulesets are optional. Their absence must not
+block bootstrap. The generated deployment workflow already restricts its
+trigger to the default branch and verifies the current default-branch tip
+before publication.
+
+GitHub deployment-environment branch policies are a separate feature. New
+GitHub environments default to no deployment branch restriction unless the
+user explicitly requests or approves one. Preserve an existing exact
+environment policy; do not derive one merely because the repository has a
+default branch.
+
+When a custom environment policy is approved:
+
+1. create or update the environment with
+   `custom_branch_policies: true`
+2. expect GitHub to return one `branch_policy` protection rule representing
+   that enabled mode
+3. create each approved branch or tag entry through the
+   `deployment-branch-policies` endpoint
+4. verify the mode and allowed-entry list separately
+
+Do not expect `protection_rules` to remain empty after enabling custom mode.
+The `branch_policy` protection rule is expected whenever that mode is enabled.
+An empty custom-policy mode is partial, not a conflict: a fresh approved plan
+may add the intended entries or disable custom mode. Never confuse repository
+branch protection, environment policy mode, and environment allowed-branch
+entries.
+
 ## Inputs
 
 1. Resolve exact retained-runtime provenance:
@@ -261,6 +291,8 @@ Record the sources actually used in the bootstrap report.
   prose with active deployment workflow behavior before declaring a conflict.
 - Inventory GitHub environments and variables plus the Azure identities,
   federated credentials, and role assignments needed by the selected agents.
+- Record repository branch protection separately from each environment's
+  deployment policy mode and allowed branch/tag entries.
 - Resolve the confirmed endpoint to exactly one Foundry project, then inventory
   only that project's account, ARM resource ID, model deployments, and matching
   deployed agents. If it does not resolve uniquely, ask the user to correct the
@@ -403,6 +435,8 @@ Show:
 - any approved managed-identity client-ID late-binding rule, including its
   exact resource ID and sole allowed registry field
 - exact GitHub, Azure, and Foundry resources to reuse
+- for each GitHub environment, one explicit deployment branch mode:
+  unrestricted, protected branches, or a custom allowed-entry list
 - exact missing resources to create, including names, types, scopes, regions,
   OIDC subjects, roles, and deterministic resource IDs where available
 - preserved evaluation bundles and the statement that no evaluation assets
@@ -443,7 +477,9 @@ approval.
    conflict.
 6. Configure GitHub environments and non-secret variables, federated
    credentials, and least-privilege role assignments from the approved plan.
-   Do not store credentials in the repository.
+   For custom environment branch policies, enable the mode, create every
+   approved entry, and then verify both surfaces. Do not store credentials in
+   the repository.
 7. Create the approved local commit containing only approved paths.
 8. Verify `HEAD` is that commit and the deployment worktree is clean.
 9. Select the approved azd environment. For every existing Foundry project,

@@ -202,6 +202,18 @@ def test_bootstrap_binds_existing_project_id_before_azd_deploy() -> None:
     assert "before running `azd deploy`" in normalized
 
 
+def test_bootstrap_allows_repositories_without_branch_protection() -> None:
+    _, body = _parse_frontmatter(BOOTSTRAP_ROOT / "SKILL.md")
+    normalized = " ".join(body.split())
+
+    assert "Repository branch protection and rulesets are optional" in normalized
+    assert "must not block bootstrap" in normalized
+    assert "New GitHub environments default to no deployment branch restriction" in normalized
+    assert "`branch_policy` protection rule is expected" in normalized
+    assert "deployment-branch-policies" in body
+    assert "empty custom-policy mode is partial" in normalized
+
+
 def test_local_skill_checkout_reuses_remote_runtime_provenance() -> None:
     _, body = _parse_frontmatter(BOOTSTRAP_ROOT / "SKILL.md")
     normalized = " ".join(body.split())

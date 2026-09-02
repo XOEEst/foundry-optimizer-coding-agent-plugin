@@ -67,6 +67,11 @@ The skill performs read-only inspection:
 
 Conflicting existing remote resources must be resolved before approval.
 
+Repository branch protection is optional and its absence does not block
+bootstrap. Deployment-environment branch restrictions are reviewed separately;
+new environments are unrestricted unless the owner explicitly approves a
+custom or protected-branch policy.
+
 Draft-only optimizer rules are scoped to candidate evaluation and do not block
 bootstrap from publishing a regular immutable version. Bootstrap compares those
 rules with active merge/deployment workflows before deciding that repository

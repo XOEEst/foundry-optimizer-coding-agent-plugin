@@ -26,7 +26,8 @@ Examples:
 - A role assignment matches only when principal, role definition, and scope
   match.
 - A GitHub environment matches only in the intended repository with the exact
-  environment name and compatible protection settings.
+  environment name and approved deployment branch mode. Repository branch
+  protection is independent and may be absent.
 
 ## Missing resources
 
@@ -54,6 +55,10 @@ Stop when:
 
 Do not delete, rename, replace, repurpose, or edit the conflicting resource.
 Document the blocker for the owner.
+
+An environment with custom policy mode enabled and no allowed entries is
+partial state rather than a conflicting resource. A new approved plan may add
+the intended entries or disable custom mode.
 
 ## Deployment
 
