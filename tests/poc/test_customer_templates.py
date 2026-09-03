@@ -18,6 +18,10 @@ WORKFLOW_ROOT = CUSTOMER_TEMPLATE_ROOT / ".github" / "workflows"
 OPTIONAL_CUSTOM_AGENT = (
     REPOSITORY_ROOT / "examples" / "custom-agents" / "foundry-optimizer.agent.md"
 )
+OPTIMIZER_SKILL_ROOT = REPOSITORY_ROOT / "plugins" / "foundry-agent-optimizer"
+CUSTOMER_OPTIMIZER_SKILL_ROOT = (
+    CUSTOMER_TEMPLATE_ROOT / ".github" / "skills" / "foundry-agent-optimizer"
+)
 EXPECTED_WORKFLOWS = {"agent-ci.yml", "copilot-setup-steps.yml", "foundry-opt-validation.yml", "foundry-opt-deploy.yml"}
 RUNTIME_SHA = "30500751c96cdff4880f69b6b5eb3cb011e6af70"
 FORBIDDEN_STRINGS = ("FOUNDRY_OPT_SHARED_REPO_SSH_KEY", "git@github.com", "known_hosts", "StrictHostKeyChecking")
@@ -97,9 +101,29 @@ def test_setup_uses_venv_python_and_offline_unsets_broker() -> None:
     assert '"uv==0.11.6"' in text
     assert 'FOUNDRY_OPT_SKILL_SOURCE=$shared_root/plugins/foundry-agent-optimizer' in text
     assert 'src/foundry_opt/templates/skills/foundry-agent-optimizer' not in text
+    assert ".github/skills/foundry-agent-optimizer" in text
+    assert 'diff -qr "$FOUNDRY_OPT_SKILL_SOURCE" "$project_skill_root"' in text
+    assert "$HOME/.copilot/skills" not in text
+    assert 'GITHUB_EVENT_NAME" == "dynamic"' in text
+    assert "foundry-opt broker launch" in text
     assert 'unset FOUNDRY_OPT_GITHUB_BINDING' in text
     assert 'unset FOUNDRY_OPT_BROKER_SOCKET' in text
     assert '--head-ref' in text and '--ref-name' in text
+
+
+def test_customer_optimizer_project_skill_matches_canonical_skill() -> None:
+    expected = {
+        path.relative_to(OPTIMIZER_SKILL_ROOT).as_posix(): path.read_bytes()
+        for path in OPTIMIZER_SKILL_ROOT.rglob("*")
+        if path.is_file()
+    }
+    actual = {
+        path.relative_to(CUSTOMER_OPTIMIZER_SKILL_ROOT).as_posix(): path.read_bytes()
+        for path in CUSTOMER_OPTIMIZER_SKILL_ROOT.rglob("*")
+        if path.is_file()
+    }
+
+    assert actual == expected
 
 
 def test_setup_and_validation_allow_missing_inactive_sidecars() -> None:

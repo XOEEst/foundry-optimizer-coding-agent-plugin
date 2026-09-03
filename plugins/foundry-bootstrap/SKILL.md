@@ -19,6 +19,10 @@ JSON schemas only. Do not look for or run a bundled bootstrap program.
   commands.
 - Render every proposed repository file in the coding session's staging area.
   Do not modify the repository or a remote service during discovery.
+- Commit the exact optimizer project skill under
+  `.github/skills/foundry-agent-optimizer` so Copilot cloud agent discovers it
+  before processing an issue. Do not rely on setup-time installation under the
+  runner home directory.
 - Present one combined approval request containing the exact repository diffs,
   exact remote resources to reuse or create, local commit plan, and deployment
   plan.
@@ -341,6 +345,8 @@ In the session staging area:
 - create or patch `azure.yaml`
 - create or patch `.github/workflows/foundry-opt-deploy.yml`
 - create or patch `.github/workflows/copilot-setup-steps.yml`
+- copy the exact optimizer skill from the verified runtime checkout to
+  `.github/skills/foundry-agent-optimizer`, preserving every file and byte
 - create or patch `.github/instructions/foundry-opt.instructions.md`
 - create or patch
   `.github/ISSUE_TEMPLATE/foundry-optimize-agent.yml`
@@ -350,6 +356,9 @@ In the session staging area:
 
 Preserve unrelated content in existing files. Never silently replace an
 existing workflow, environment, identity, Foundry target, or agent definition.
+Treat `.github/skills/foundry-agent-optimizer` as an exact runtime-derived
+directory: compare it recursively with the verified source and replace only
+that skill directory when updating its pinned runtime.
 Validate YAML, validate registry and sidecars with the bundled schemas, and
 search the staged tree for unresolved `__TOKEN__` values and secrets.
 Re-run `git check-ignore -v --no-index` against every planned tracked path after
@@ -430,6 +439,7 @@ Show:
   unchanged
 - actual tool versions already present and any approved install/upgrade action
 - exact Python and NuGet sources and any persistent source-configuration change
+- exact optimizer project-skill source, destination, and recursive diff
 - exact staged file diffs
 - static patch SHA-256 and the successful index-aware preflight
 - any approved managed-identity client-ID late-binding rule, including its

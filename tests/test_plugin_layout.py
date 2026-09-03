@@ -79,7 +79,7 @@ def test_readme_installs_only_bootstrap_for_repository_owners() -> None:
     assert 'copilot skill add ".\\plugins\\foundry-bootstrap"' in readme
     assert "/skills reload" in readme
     assert "/skills info foundry-bootstrap" in readme
-    assert "automatically installs `foundry-agent-optimizer`" in readme
+    assert "commits `foundry-agent-optimizer` as an exact project skill" in readme
     assert 'copilot skill add ".\\plugins"' not in readme
     assert "dist\\foundry-bootstrap-skill" not in readme
 
@@ -144,6 +144,40 @@ def test_bootstrap_uses_readable_large_inventory_and_readiness_planning() -> Non
     assert "Do not embed or paraphrase the guide" in normalized
     assert "stage exact optimizer-readiness changes" in normalized
     assert "ready`, `not ready`, or `unknown`" in normalized
+
+
+def test_bootstrap_commits_optimizer_as_a_project_skill() -> None:
+    _, body = _parse_frontmatter(BOOTSTRAP_ROOT / "SKILL.md")
+    normalized = " ".join(body.split())
+
+    assert ".github/skills/foundry-agent-optimizer" in body
+    assert "copy the exact optimizer skill from the verified runtime checkout" in normalized
+    assert "Do not rely on setup-time installation under the runner home directory" in normalized
+
+
+def test_copilot_setup_launches_broker_and_verifies_project_skill() -> None:
+    setup = _read(BOOTSTRAP_ROOT / "templates" / "copilot-setup-steps.yml")
+
+    assert ".github/skills/foundry-agent-optimizer" in setup
+    assert 'diff -qr "$shared_root/$optimizer_skill_path" "$project_skill_root"' in setup
+    assert "$HOME/.copilot/skills" not in setup
+    assert "FOUNDRY_OPT_BROKER_SOCKET" in setup
+    assert "FOUNDRY_OPT_STATE_ROOT" in setup
+    assert 'GITHUB_EVENT_NAME" == "dynamic"' in setup
+    assert "foundry-opt broker launch" in setup
+    assert 'test -S "$FOUNDRY_OPT_BROKER_SOCKET"' in setup
+
+
+def test_optimizer_instructions_fail_closed_before_direct_edits() -> None:
+    instructions = _read(
+        BOOTSTRAP_ROOT / "templates" / "foundry-opt.instructions.md"
+    )
+    normalized = " ".join(instructions.split())
+
+    assert "Invoke `/foundry-agent-optimizer` before editing" in normalized
+    assert "If the skill is unavailable, stop without editing" in normalized
+    assert "`foundry-opt job start` must succeed before any source edit" in normalized
+    assert "Edit only the workspace returned by `foundry-opt job handoff`" in normalized
 
 
 def test_bootstrap_skill_resolves_ignored_contract_paths_before_approval() -> None:

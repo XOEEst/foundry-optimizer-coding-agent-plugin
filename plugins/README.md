@@ -10,8 +10,9 @@ This repository separates top-level skill distribution from the shared
   general repository, GitHub, Azure, Foundry, Git, and azd tools directly after
   one reviewed approval.
 - `foundry-agent-optimizer/` is the canonical issue-time optimizer skill folder.
-  Setup workflows install this skill from the exact runtime revision recorded
-  in the repository registry.
+  Bootstrap copies it into the customer repository as
+  `.github/skills/foundry-agent-optimizer`; setup workflows verify those exact
+  bytes against the runtime revision recorded in the registry.
 
 The bootstrap skill is static and does not invoke a bootstrap runtime, state
 machine, receipt, or rollback service. The optimizer skill remains a client of

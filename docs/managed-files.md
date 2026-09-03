@@ -11,6 +11,7 @@ sibling mechanism.
 - `.foundry-opt/bootstrap-report.md`
 - `azure.yaml`
 - `.github/workflows/copilot-setup-steps.yml`
+- `.github/skills/foundry-agent-optimizer/**`
 - `.github/workflows/foundry-opt-deploy.yml`
 - `.github/instructions/foundry-opt.instructions.md`
 - `.github/ISSUE_TEMPLATE/foundry-optimize-agent.yml`
@@ -19,6 +20,10 @@ The validation workflow is optional.
 
 Existing unrelated files and unrelated dirty paths are preserved and are not
 staged into the bootstrap commit.
+
+The optimizer project skill is copied byte-for-byte from the exact runtime
+revision. The setup workflow verifies that committed directory and launches the
+broker/state paths required by Copilot cloud optimize jobs.
 
 ## Removed legacy artifacts
 

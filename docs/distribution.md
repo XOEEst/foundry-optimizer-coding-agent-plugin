@@ -33,6 +33,11 @@ Registry v2 records:
 Optimizer and registered deployment workflows fetch and verify that exact
 runtime.
 
+Bootstrap also copies the optimizer skill directory from that runtime into the
+customer repository at `.github/skills/foundry-agent-optimizer`. Copilot cloud
+agent discovers the committed project skill before processing an issue; setup
+verifies it rather than installing a new home-directory skill after startup.
+
 Source-checkout bootstrap verifies compatibility by running the fetched
 runtime's offline preflight against its bundled registry-v2 profile with
 verification disabled. Legacy compatibility code does not make a runtime

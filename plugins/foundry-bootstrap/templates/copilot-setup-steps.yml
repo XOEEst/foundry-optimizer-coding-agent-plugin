@@ -5,6 +5,7 @@ on:
   push:
     paths:
       - .github/workflows/copilot-setup-steps.yml
+      - .github/skills/foundry-agent-optimizer/**
       - .foundry-opt/registry.yaml
       - "**/.foundry/foundry-opt.yaml"
 
@@ -68,13 +69,61 @@ jobs:
           echo "FOUNDRY_OPT_PACKAGE_ROOT=$package_root" >>"$GITHUB_ENV"
           echo "$package_root/.venv/bin" >>"$GITHUB_PATH"
 
-          skill_root="$HOME/.copilot/skills/foundry-agent-optimizer"
-          rm -rf "$skill_root"
-          mkdir -p "$(dirname "$skill_root")"
-          cp -a "$shared_root/$optimizer_skill_path" "$skill_root"
+          project_skill_root="$GITHUB_WORKSPACE/.github/skills/foundry-agent-optimizer"
+          test -f "$project_skill_root/SKILL.md"
+          diff -qr "$shared_root/$optimizer_skill_path" "$project_skill_root"
 
       - name: Validate repository contracts
         shell: bash
         run: |
           set -euo pipefail
           foundry-opt preflight --repository . --offline
+
+      - name: Record trusted optimizer state paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          trusted_root="$RUNNER_TEMP/foundry-opt-trusted"
+          rm -rf "$trusted_root"
+          mkdir -p "$trusted_root/broker" "$trusted_root/jobs"
+          chmod 700 "$trusted_root" "$trusted_root/broker" "$trusted_root/jobs"
+          echo "FOUNDRY_OPT_TRUSTED_ROOT=$trusted_root" >>"$GITHUB_ENV"
+          echo "FOUNDRY_OPT_GITHUB_BINDING=$trusted_root/broker/binding.json" >>"$GITHUB_ENV"
+          echo "FOUNDRY_OPT_BROKER_SOCKET=$trusted_root/broker/github.sock" >>"$GITHUB_ENV"
+          echo "FOUNDRY_OPT_STATE_ROOT=$trusted_root/jobs" >>"$GITHUB_ENV"
+          echo "FOUNDRY_OPT_REGISTRY=$GITHUB_WORKSPACE/.foundry-opt/registry.yaml" >>"$GITHUB_ENV"
+          echo "FOUNDRY_OPT_RUNTIME_SHA=__FOUNDRY_OPT_COMMIT__" >>"$GITHUB_ENV"
+
+      - name: Detect Copilot cloud-agent context
+        id: job-context
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "dynamic" ]]; then
+            echo "trusted=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "trusted=false" >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: Launch the issue broker
+        if: ${{ steps.job-context.outputs.trusted == 'true' }}
+        env:
+          GITHUB_SETUP_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "$GITHUB_SETUP_TOKEN" | \
+            foundry-opt broker launch \
+              --event "$GITHUB_EVENT_PATH" \
+              --binding "$FOUNDRY_OPT_GITHUB_BINDING" \
+              --socket "$FOUNDRY_OPT_BROKER_SOCKET" \
+              --head-ref "${GITHUB_HEAD_REF:-}" \
+              --ref-name "${GITHUB_REF_NAME:-}" \
+              --token-stdin
+          deadline=$((SECONDS + 15))
+          until [[ -S "$FOUNDRY_OPT_BROKER_SOCKET" ]]; do
+            (( SECONDS < deadline ))
+            sleep 1
+          done
+          test -S "$FOUNDRY_OPT_BROKER_SOCKET"
+          unset GITHUB_SETUP_TOKEN

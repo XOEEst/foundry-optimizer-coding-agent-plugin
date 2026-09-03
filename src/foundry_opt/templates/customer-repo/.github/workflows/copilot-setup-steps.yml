@@ -5,6 +5,7 @@ on:
   push:
     paths:
       - .github/workflows/copilot-setup-steps.yml
+      - .github/skills/foundry-agent-optimizer/**
       - .foundry-opt/registry.yaml
       - '**/.foundry/foundry-opt.yaml'
 
@@ -81,10 +82,9 @@ jobs:
           echo "FOUNDRY_OPT_EXECUTABLE=$FOUNDRY_OPT_EXECUTABLE" >>"$GITHUB_ENV"
           echo "$launcher_root" >>"$GITHUB_PATH"
           echo "$FOUNDRY_OPT_PACKAGE_ROOT/.venv/bin" >>"$GITHUB_PATH"
-          skill_root="$HOME/.copilot/skills/foundry-agent-optimizer"
-          rm -rf "$skill_root"
-          mkdir -p "$(dirname "$skill_root")"
-          cp -a "$FOUNDRY_OPT_SKILL_SOURCE" "$skill_root"
+          project_skill_root="$GITHUB_WORKSPACE/.github/skills/foundry-agent-optimizer"
+          test -f "$project_skill_root/SKILL.md"
+          diff -qr "$FOUNDRY_OPT_SKILL_SOURCE" "$project_skill_root"
 
       - name: Record trusted state paths
         shell: bash
@@ -131,9 +131,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "$GITHUB_EVENT_NAME" == "pull_request" || "$GITHUB_EVENT_NAME" == "pull_request_target" ]]; then
-            echo 'trusted=true' >>"$GITHUB_OUTPUT"
-          elif [[ "$GITHUB_EVENT_NAME" == "issues" || "$GITHUB_EVENT_NAME" == "issue_comment" ]]; then
+          if [[ "$GITHUB_EVENT_NAME" == "dynamic" ]]; then
             echo 'trusted=true' >>"$GITHUB_OUTPUT"
           else
             echo 'trusted=false' >>"$GITHUB_OUTPUT"

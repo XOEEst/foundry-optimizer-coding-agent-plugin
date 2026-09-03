@@ -23,6 +23,11 @@ ordinary reviewed patch content.
 | `foundry-optimize-agent.yml` | `.github/ISSUE_TEMPLATE/foundry-optimize-agent.yml` |
 | `bootstrap-report.md` | `.foundry-opt/bootstrap-report.md` |
 
+Copy the optimizer directory named by `release.json.optimizer_skill_path` from
+the verified runtime checkout to
+`.github/skills/foundry-agent-optimizer`. It is runtime-derived content rather
+than an editable bootstrap template.
+
 Replace every `__TOKEN__` from discovered and approved values. Duplicate the
 sidecar and `azure.ai.agent` service for each selected agent. Reuse one existing
 `azure.ai.project` service when its endpoint exactly matches the confirmed

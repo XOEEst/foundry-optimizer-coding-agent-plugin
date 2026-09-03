@@ -35,6 +35,11 @@ It selects the issue's registry agent and projects that agent's sidecar into
 runtime contracts in memory. No repository-global legacy policy or metadata
 file is required.
 
+The skill is committed as a repository project skill before a cloud session
+starts. Copilot setup verifies its exact pinned bytes and launches the broker
+and trusted state paths; it does not install the skill into the runner home
+directory at setup time.
+
 ## Deployment
 
 Initial local deployment uses azd from the reviewed bootstrap commit.

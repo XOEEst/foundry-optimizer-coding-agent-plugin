@@ -40,10 +40,11 @@ enough. Re-add the directory only when the repository checkout path changes.
 Start a new conversation if the skill was already invoked before reloading.
 
 Bootstrap still prepares the complete optimization experience. The generated
-Copilot setup workflow automatically installs `foundry-agent-optimizer` from
-the exact runtime revision, and bootstrap creates the optimizer issue form,
-Copilot environment, OIDC identity, and required workflow configuration.
-Repository owners do not install the optimizer skill manually.
+repository commits `foundry-agent-optimizer` as an exact project skill under
+`.github/skills`, while the Copilot setup workflow verifies it against the
+pinned runtime and launches the issue broker. Bootstrap also creates the
+optimizer issue form, Copilot environment, OIDC identity, and required workflow
+configuration. Repository owners do not install the optimizer skill manually.
 
 Then open the agent repository in Copilot CLI and say:
 

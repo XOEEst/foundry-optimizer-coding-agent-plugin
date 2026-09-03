@@ -20,6 +20,14 @@ within policy.
 
 ## Optimizer behavior
 
+- Invoke `/foundry-agent-optimizer` before editing any selected agent source.
+  If the skill is unavailable, stop without editing and report that the
+  project skill was not discovered.
+- `foundry-opt job start` must succeed before any source edit. A failed
+  preflight, missing broker socket, or missing state root is a setup failure,
+  not permission to continue manually.
+- Edit only the workspace returned by `foundry-opt job handoff`. Never edit the
+  checked-out baseline directly as a fallback.
 - Freeze the issue objective, constraints, and evaluator set before generating
   candidates.
 - Run one fresh baseline first, derive a written hypothesis from issue and

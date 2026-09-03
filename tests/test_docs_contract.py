@@ -24,6 +24,7 @@ def test_managed_files_document_lists_the_skill_only_core() -> None:
         ".foundry-opt/bootstrap-report.md",
         "azure.yaml",
         ".github/workflows/copilot-setup-steps.yml",
+        ".github/skills/foundry-agent-optimizer",
         ".github/workflows/foundry-opt-deploy.yml",
     ):
         assert path in documentation
