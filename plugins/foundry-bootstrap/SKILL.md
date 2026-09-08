@@ -243,6 +243,104 @@ entries.
 `release.json` intentionally does not select an Azure Developer CLI version or
 an `azure.ai.agents` extension version.
 
+## GitHub Agents variables
+
+Copilot cloud agent receives configuration from the dedicated **Agents**
+secrets and variables store, not from GitHub Actions variables in the
+`copilot` environment. The settings page is
+**Settings > Secrets and variables > Agents > Variables**.
+Follow [GitHub's configuration guide](https://docs.github.com/en/copilot/how-tos/copilot-on-github/customize-copilot/customize-cloud-agent/configure-secrets-and-variables).
+
+Include these non-secret repository-level Agents variables in bootstrap:
+
+| Variable | Approved source |
+| --- | --- |
+| `AZURE_TENANT_ID` | Verified tenant of the optimizer identity |
+| `AZURE_SUBSCRIPTION_ID` | Verified subscription of the selected Foundry project |
+| `AZURE_OPTIMIZER_CLIENT_ID` | Verified optimizer identity client ID; use the exact name in `github.client_id_variable` if customized |
+
+Inventory Agents variables separately from Actions repository/environment
+variables. Do not assume automatic migration from the `copilot` environment.
+Keep existing Actions variables for ordinary setup and deployment workflows;
+do not move or delete them, or substitute the deployment identity for the
+optimizer identity. Include any additional required cloud-session configuration,
+such as an approved package-feed URL, in the same store-specific review.
+
+Use the Agents REST API through `gh api`, as described in
+[Discovery](references/discovery.md). A successful `gh variable list --env
+copilot` proves only Actions configuration, not Agents configuration.
+Show each destination store, repository/environment scope, variable name, and
+non-secret value or approved client-ID binding in the combined approval.
+Create missing Agents variables only after approval, reuse exact matches, and
+stop on conflicting or unreadable values rather than overwriting them.
+
+Read back each required Agents variable at its recorded scope after
+configuration and compare its effective value with the approved value. Reuse
+verified inherited matches without changing organization-wide settings. If the
+API is unavailable or permissions prevent verification, report that blocker and
+the settings-page path; do not treat Actions values as a fallback or declare the
+cloud environment ready.
+
+In `copilot-setup-steps.yml`, job-level `env` and `environment` are not supported
+cloud-agent customization fields. Keep `environment` only when needed for the
+workflow's ordinary Actions runs; do not rely on it to inject cloud-session
+variables. Agents variables are exposed directly to the cloud process.
+Offline preflight or a successful ordinary Actions setup run does not prove
+that the cloud session received them. After changing Agents variables, use a
+fresh Copilot session; keep existing OIDC credentials and broker setup intact.
+
+## Copilot cloud-agent internet access
+
+Treat outbound network access as a separate bootstrap prerequisite from Agents
+variables, OIDC, and successful setup. Before approval, inventory the effective
+organization and repository firewall settings under **Settings > Copilot >
+Internet access**, in the **Copilot cloud agent** section, not code review.
+Follow [GitHub's firewall guide](https://docs.github.com/en/copilot/how-tos/copilot-on-github/customize-copilot/customize-the-firewall).
+
+Derive the required destinations from the confirmed Azure and agent bindings:
+
+- the verified Azure authority hostname (`login.microsoftonline.com` for Azure
+  public cloud)
+- the hostname parsed from the confirmed Foundry project endpoint, without its
+  scheme or `/api/projects/...` path; never copy a sample account hostname
+- additional package, storage, or service destinations only when evidence shows
+  that the selected agent's cloud-session commands require them
+
+Compare each destination with the effective recommended, organization, and
+repository allowlists. Reuse existing coverage and propose only missing,
+narrowly scoped rules, with their purpose and scope in the combined approval.
+Preserve unrelated rules and rules for previously onboarded projects on re-entry.
+Keep the firewall enabled; do not add broad wildcard rules, disable network
+controls, or move runtime Azure calls into setup steps to bypass the firewall.
+If the firewall is already disabled, report the existing deviation rather than
+silently changing it or treating unrestricted access as an allowlist match.
+
+Use a documented management API only if one is available for the current GitHub
+installation; otherwise use **Custom allowlist > Add rule > Save changes** on
+that settings page. If tools cannot access the page, ask the owner for current
+policy evidence and, after approval, owner-assisted application of the exact
+rules. Do not invent an API or use Actions/Agents variables as a replacement
+for Internet access settings. Unreadable effective policy blocks
+approval. If organization policy forbids repository custom rules, identify the
+required organization-administrator action; do not change organization policy
+implicitly.
+
+After approval, re-read the policy, add only approved missing rules, and verify
+the saved effective coverage. If an authorized administrator must perform the
+change, report it as pending and stop rather than declaring setup complete.
+On re-entry, reuse completed rules and resume the remaining approved work.
+
+Keep saved firewall configuration separate from cloud-runtime connectivity
+evidence. Local deployment, offline preflight, and even online requests in
+setup steps do not prove access from agent-issued commands: the cloud firewall
+does not cover setup processes in the same way. At handoff, direct the owner to
+start a fresh Copilot session and run online
+`foundry-opt preflight --repository . --repo-agent-id <selected-id>` before
+optimization. Record this as `not attempted` until actual session evidence is
+available; do not start optimization jobs or evaluation runs merely to test
+network access. Report DNS/firewall blocks separately from Azure authentication
+or RBAC failures.
+
 ## Approved package-feed fallback
 
 Direct public package feeds can be unreachable in restricted environments.
@@ -295,6 +393,10 @@ Record the sources actually used in the bootstrap report.
   prose with active deployment workflow behavior before declaring a conflict.
 - Inventory GitHub environments and variables plus the Azure identities,
   federated credentials, and role assignments needed by the selected agents.
+- Independently inventory the dedicated Agents variable store and compare the
+  required optimizer values with the selected identity and project.
+- Inventory effective cloud-agent Internet access policy and derive the
+  required allowlist coverage from the confirmed project and Azure authority.
 - Record repository branch protection separately from each environment's
   deployment policy mode and allowed branch/tag entries.
 - Resolve the confirmed endpoint to exactly one Foundry project, then inventory
@@ -411,7 +513,9 @@ location, tenant, and type plus nonempty GUID-form client and principal IDs.
 Insert the returned client ID into:
 
 - `.foundry-opt/registry.yaml` at `identity.client_id`
-- the materialized value for the exact approved GitHub client-ID variable
+- the materialized values for the exact approved GitHub client-ID variable
+  destinations in Agents and Actions; the approval must name each store and
+  scope explicitly
 
 Generate the final patch from the unchanged static proposal plus that single
 registry field. Verify that no other path or value changed, validate all
@@ -445,6 +549,10 @@ Show:
 - any approved managed-identity client-ID late-binding rule, including its
   exact resource ID and sole allowed registry field
 - exact GitHub, Azure, and Foundry resources to reuse
+- required Agents variables and separate Actions variables, with exact
+  destinations, names, values, and any approved identity client-ID binding
+- effective cloud-agent firewall policy, existing coverage, exact missing
+  allowlist rules and their purpose/scope, and any administrator action needed
 - for each GitHub environment, one explicit deployment branch mode:
   unrestricted, protected branches, or a custom allowed-entry list
 - exact missing resources to create, including names, types, scopes, regions,
@@ -487,6 +595,12 @@ approval.
    conflict.
 6. Configure GitHub environments and non-secret variables, federated
    credentials, and least-privilege role assignments from the approved plan.
+   Configure the required repository-level Agents variables separately from
+   Actions variables, and read back each store-specific value before marking
+   cloud-agent configuration complete.
+   Apply approved cloud-agent allowlist additions without replacing existing
+   rules, and verify saved effective coverage. Stop and report pending work
+   when a required administrator action remains incomplete.
    For custom environment branch policies, enable the mode, create every
    approved entry, and then verify both surfaces. Do not store credentials in
    the repository.
@@ -516,6 +630,7 @@ approval.
 12. Complete `.foundry-opt/bootstrap-report.md` with versions, commit, reused
     and created resources, scan scope, selected and excluded agents, shared
     endpoint, per-agent deployment results, all previously onboarded entries,
+    effective firewall coverage, separate cloud-session preflight evidence,
     and remaining work.
 
 At successful handoff, tell the user to rerun `/foundry-bootstrap` for another

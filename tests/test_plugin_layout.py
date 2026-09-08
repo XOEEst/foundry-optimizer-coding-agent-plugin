@@ -168,6 +168,75 @@ def test_copilot_setup_launches_broker_and_verifies_project_skill() -> None:
     assert 'test -S "$FOUNDRY_OPT_BROKER_SOCKET"' in setup
 
 
+def test_bootstrap_configures_agents_variables_separately_from_actions() -> None:
+    _, body = _parse_frontmatter(BOOTSTRAP_ROOT / "SKILL.md")
+    discovery = _read(BOOTSTRAP_ROOT / "references" / "discovery.md")
+    normalized = " ".join(body.split())
+
+    assert "## GitHub Agents variables" in body
+    for name in (
+        "AZURE_TENANT_ID",
+        "AZURE_SUBSCRIPTION_ID",
+        "AZURE_OPTIMIZER_CLIENT_ID",
+        "github.client_id_variable",
+    ):
+        assert name in body
+    assert "Settings > Secrets and variables > Agents > Variables" in normalized
+    assert "job-level `env` and `environment`" in normalized
+    assert "Keep existing Actions variables" in normalized
+    assert "Do not assume automatic migration" in normalized
+    assert "GET repos/{owner}/{repo}/agents/variables" in discovery
+    assert "GET repos/{owner}/{repo}/agents/organization-variables" in discovery
+    assert "POST repos/{owner}/{repo}/agents/variables" in discovery
+    assert "Read back each required Agents variable" in normalized
+
+
+def test_bootstrap_late_binding_and_report_cover_both_variable_stores() -> None:
+    _, body = _parse_frontmatter(BOOTSTRAP_ROOT / "SKILL.md")
+    late_binding = body.split("#### Bounded late-binding exception", 1)[1]
+    late_binding = late_binding.split("### 4.", 1)[0]
+    report = _read(BOOTSTRAP_ROOT / "templates" / "bootstrap-report.md")
+
+    assert "Agents and Actions" in late_binding
+    assert "## GitHub variables" in report
+    assert "Store and scope" in report
+    assert "Agents / repository" in report
+    assert "Actions / environment" in report
+
+
+def test_bootstrap_plans_scoped_cloud_firewall_rules_before_approval() -> None:
+    _, body = _parse_frontmatter(BOOTSTRAP_ROOT / "SKILL.md")
+    section = body.split("## Copilot cloud-agent internet access", 1)[1]
+    section = " ".join(section.split("## Approved package-feed fallback", 1)[0].split())
+    approval = body.split("### 4. Request one combined approval", 1)[1]
+    approval = " ".join(approval.split("### 5.", 1)[0].split())
+
+    assert "Before approval" in section
+    assert "Settings > Copilot > Internet access" in section
+    assert "login.microsoftonline.com" in section
+    assert "hostname parsed from the confirmed Foundry project endpoint" in section
+    assert "Preserve unrelated rules" in section
+    assert "Keep the firewall enabled" in section
+    assert "Unreadable effective policy blocks approval" in section
+    assert "organization-administrator action" in section
+    assert "exact missing allowlist rules" in approval
+
+
+def test_bootstrap_separates_firewall_configuration_from_runtime_evidence() -> None:
+    _, body = _parse_frontmatter(BOOTSTRAP_ROOT / "SKILL.md")
+    normalized = " ".join(body.split())
+    apply = body.split("### 5. Apply only the approved plan", 1)[1]
+    report = _read(BOOTSTRAP_ROOT / "templates" / "bootstrap-report.md")
+
+    assert "Apply approved cloud-agent allowlist additions" in apply
+    assert "verify saved effective coverage" in apply
+    assert "report it as pending and stop" in normalized
+    assert "do not prove access from agent-issued commands" in normalized
+    assert "do not start optimization jobs or evaluation runs" in normalized
+    assert "## Cloud-agent internet access" in report
+    assert "Fresh cloud-session online preflight: `not attempted`" in report
+
+
 def test_optimizer_instructions_fail_closed_before_direct_edits() -> None:
     instructions = _read(
         BOOTSTRAP_ROOT / "templates" / "foundry-opt.instructions.md"

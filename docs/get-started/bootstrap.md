@@ -54,7 +54,8 @@ The skill performs read-only inspection:
 - inspects the confirmed scope, selected agents, and their one shared Foundry
   project;
 - assesses optimizer readiness and stages required changes for selected agents;
-- inspects GitHub environments/variables and Azure identity/OIDC/RBAC;
+- inspects GitHub Agents variables separately from Actions
+  repository/environment variables, plus Azure identity/OIDC/RBAC;
 - checks existing Python and NuGet package sources and whether approved proxy
   feeds are required;
 - checks Git ignore rules for every required tracked bootstrap file and stages
@@ -83,6 +84,36 @@ If direct public package feeds are unavailable, bootstrap can use
 selected sources and any persistent configuration changes are included in the
 single approval; bootstrap never switches feeds silently.
 
+## Cloud-agent variables
+
+Copilot cloud sessions use **Settings > Secrets and variables > Agents >
+Variables**, not the Actions `copilot` environment. Bootstrap configures and
+reads back `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, and the optimizer client-ID
+variable (normally `AZURE_OPTIMIZER_CLIENT_ID`) in the dedicated Agents store.
+It preserves Actions variables needed by normal setup and deployment workflows.
+
+Do not rely on job-level `env` or `environment` in `copilot-setup-steps.yml` to
+inject cloud-session variables. A successful ordinary setup run or offline
+preflight does not prove cloud-session readiness. If required Agents variables
+cannot be verified, bootstrap reports the configuration as incomplete. Start a
+fresh Copilot session after updating them.
+
+See [GitHub's Agents configuration guide](https://docs.github.com/en/copilot/how-tos/copilot-on-github/customize-copilot/customize-cloud-agent/configure-secrets-and-variables).
+
+## Cloud-agent internet access
+
+Bootstrap also reviews **Settings > Copilot > Internet access > Copilot cloud
+agent**. Its approval includes missing allowlist coverage for the Azure authority
+(`login.microsoftonline.com` in Azure public cloud) and the hostname of the
+confirmed Foundry project endpoint. It preserves existing rules and keeps the
+firewall enabled; organization-locked changes require an authorized administrator.
+
+Saved rules and successful setup steps do not prove connectivity from
+agent-issued commands. The report tracks configuration separately from online
+preflight in a fresh Copilot session, without starting evaluation runs. An
+uncompleted administrator action is reported as a blocker, not successful setup.
+See [GitHub's firewall guide](https://docs.github.com/en/copilot/how-tos/copilot-on-github/customize-copilot/customize-the-firewall).
+
 ## Approval
 
 One approval covers:
@@ -98,8 +129,9 @@ There is no rollback. The skill states this before requesting approval.
 If bootstrap must create a user-assigned managed identity, Azure generates its
 client ID during creation. The approval names the exact identity ARM resource
 and permits only that returned client ID to be inserted into
-`registry.identity.client_id` and the approved GitHub variable. Bootstrap
-validates and records the final patch hash without requesting another approval.
+`registry.identity.client_id` and the approved Agents/Actions variable
+destinations. Bootstrap validates and records the final patch hash without
+requesting another approval.
 
 ## After approval
 

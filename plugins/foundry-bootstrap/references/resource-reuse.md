@@ -28,6 +28,9 @@ Examples:
 - A GitHub environment matches only in the intended repository with the exact
   environment name and approved deployment branch mode. Repository branch
   protection is independent and may be absent.
+- A GitHub variable matches only in the approved store (Agents or Actions),
+  repository/environment scope, name, and value. Matching Actions values do
+  not satisfy a missing Agents variable.
 
 ## Missing resources
 
@@ -39,8 +42,9 @@ For a newly approved user-assigned managed identity, omit
 `identity.client_id` from the static repository patch. After creation, read the
 identity back by its exact approved ARM resource ID. Its generated client ID may
 be added only to the declared registry field and used for the approved GitHub
-variable after all immutable resource properties match. No other repository
-field may be late-bound.
+variable destinations in Agents and Actions after all immutable resource
+properties match. Each destination store and scope must be named in the
+approval. No other repository field may be late-bound.
 
 ## Conflicts and insufficient access
 

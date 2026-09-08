@@ -73,6 +73,34 @@
 - Deployment environment mode: `__DEPLOYMENT_ENVIRONMENT_BRANCH_MODE__`
 - Deployment environment allowed entries: `__DEPLOYMENT_BRANCH_ENTRIES_OR_NONE__`
 
+## GitHub variables
+
+Record actual names, non-secret values, and per-store read-back results for all
+required variables. Replace the example Actions scope with the approved
+repository or environment scope, and include inherited Agents values with their
+verified effective scope when reused. Do not record secrets.
+
+| Store and scope | Variables | Read-back result |
+| --- | --- | --- |
+| Agents / repository | Tenant ID, subscription ID, configured optimizer client-ID variable | pending |
+| Actions / environment | Existing setup and deployment variables, preserved or created as approved | pending |
+
+## Cloud-agent internet access
+
+Record effective organization/repository policy, exact required destinations,
+their purpose, existing coverage, approved additions, and saved-rule evidence.
+Use the confirmed project's hostname, not a sample endpoint. Preserve existing
+rules and list any pending administrator action.
+
+- Effective firewall mode and organization restrictions: `pending`
+- Required destinations and effective allowlist coverage: `pending`
+- Approved additions and saved-rule evidence: `pending`
+- Pending administrator action: `pending`
+- Fresh cloud-session online preflight: `not attempted`
+
+Saved rules and successful setup steps are not evidence of cloud-session Azure
+access. Record the session link and actual result only after online preflight.
+
 ## Created resources
 
 - `__CREATED_RESOURCE_OR_NONE__`

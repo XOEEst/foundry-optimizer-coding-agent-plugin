@@ -46,6 +46,11 @@ pinned runtime and launches the issue broker. Bootstrap also creates the
 optimizer issue form, Copilot environment, OIDC identity, and required workflow
 configuration. Repository owners do not install the optimizer skill manually.
 
+Bootstrap configures the dedicated GitHub **Agents** variables for cloud
+sessions separately from **Actions** variables for ordinary workflows. It
+verifies the tenant, subscription, and optimizer client ID in the Agents store;
+Actions variables alone do not configure Copilot cloud sessions.
+
 Then open the agent repository in Copilot CLI and say:
 
 ```text

@@ -166,17 +166,70 @@ Use `gh` read operations to inspect:
 - existing `copilot` and deployment environments
 - each environment's deployment branch-policy mode and separate custom
   branch/tag entry list
-- environment and repository variables
+- Actions environment and repository variables
+- dedicated Agents repository variables and organization variables available to
+  this repository
 - existing deployment and Copilot setup workflows
 
 Variable values that GitHub does not return must be treated as unknown, not as
-an exact match. Ask for approval to set a missing/unknown variable only when its
-desired non-secret value is established from Azure inventory.
+an exact match or a missing variable. Resolve unknown state before approval.
+Propose creation only for confirmed missing variables whose desired non-secret
+values are established from Azure inventory.
+
+### Agents versus Actions variables
+
+Use [the Agents variables REST API](https://docs.github.com/en/rest/agents/variables)
+with `gh api` and the supported `X-GitHub-Api-Version: 2026-03-10` header:
+
+```text
+GET repos/{owner}/{repo}/agents/variables
+GET repos/{owner}/{repo}/agents/organization-variables
+GET repos/{owner}/{repo}/agents/variables/{name}
+POST repos/{owner}/{repo}/agents/variables
+```
+
+Paginate list results. POST creates a missing repository variable with `name`
+and `value` fields and is allowed only after the combined approval. Read back
+each created variable with GET; do not mistake an Actions variable with the
+same name for an Agents variable.
+
+Inventory `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, and the client-ID variable
+named in `registry.github.client_id_variable` (normally
+`AZURE_OPTIMIZER_CLIENT_ID`). Resolve their values from the approved optimizer
+identity and Foundry project, never from an unrelated deployment identity.
+Repository Agents values override organization Agents values. Reuse a matching
+inherited value only when its effective value and repository access are
+verified; do not change organization-wide configuration for this bootstrap.
+Record any same-name secret shadowing as unknown rather than exposing a secret
+or claiming the effective value matches.
+
+An empty successful list is missing configuration. Authentication, permission,
+and API-availability errors are unknown state, not evidence that a store is
+empty. Stop and point to **Settings > Secrets and variables > Agents >
+Variables** if the required values cannot be established. Preserve existing
+Actions variables used by normal workflows. Do not rely on setup job-level
+`env` or `environment` to supply cloud-agent variables.
 
 No repository branch protection is a valid exact state. For environments,
 distinguish `deployment_branch_policy` from `protection_rules` and from
 `GET .../deployment-branch-policies`. Enabling custom mode itself produces a
 `branch_policy` protection rule even before any allowed entry exists.
+
+### Cloud-agent firewall inventory
+
+Inspect **Settings > Copilot > Internet access > Copilot cloud agent** separately
+from Agents variables and Actions environments. Record the firewall mode,
+recommended allowlist, organization rules, repository rules, and whether the
+organization permits repository custom rules. Use the documented settings UI
+when no supported read API is available; unknown policy is not an empty list.
+
+For each required hostname derived by the skill's Internet access rules, record
+its purpose, effective coverage and scope, and the exact missing rule to propose.
+Include the Azure authority and the confirmed Foundry endpoint hostname.
+Preserve rules for other onboarded projects. An organization restriction must
+name the administrator action needed, not trigger a firewall bypass.
+Read-back of saved rules establishes configuration only; cloud-session online
+preflight evidence must be recorded separately.
 
 ## Azure and Foundry inventory
 

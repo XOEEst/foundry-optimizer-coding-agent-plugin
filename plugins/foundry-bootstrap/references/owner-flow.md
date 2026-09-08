@@ -40,8 +40,14 @@ session staging area and shows one review containing:
 When the plan creates a user-assigned managed identity, the review shows the
 static patch without `identity.client_id`, the exact approved identity ARM
 resource ID, and the sole late-binding rule. After creation, only the returned
-client ID may be added to the registry and approved GitHub variable without
-another approval; the final patch hash is recorded before apply.
+client ID may be added to the registry and approved Agents/Actions variable
+destinations without another approval; the final patch hash is recorded before
+apply.
+
+The review distinguishes repository-level Agents variables for Copilot cloud
+sessions from Actions variables used by normal workflows. Bootstrap verifies
+the tenant, subscription, and optimizer client ID in the Agents store before
+marking cloud-agent configuration complete, while preserving Actions values.
 
 The inventory and approval link to the current optimizer-readiness guide:
 https://learn.microsoft.com/en-us/azure/foundry/agents/how-to/make-agent-optimizer-ready
