@@ -57,6 +57,7 @@ def test_package_is_a_minimal_skill() -> None:
         },
     }
     assert {path.name for path in PACKAGE_ROOT.iterdir()} == {
+        "README.md",
         "SKILL.md",
         "package.yaml",
         "guides",
