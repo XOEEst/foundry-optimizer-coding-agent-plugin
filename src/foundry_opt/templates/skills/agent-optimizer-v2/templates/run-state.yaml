@@ -1,0 +1,63 @@
+run_id: ""
+status: created
+
+storage:
+  public_run_directory: ""
+  restricted_state_directory: ""
+  primary_checkout: ""
+
+target:
+  agent: {}
+  baseline: {}
+  allowed_mutations: []
+  frozen_properties: []
+  train_dataset: {}
+  confirmation_dataset: null
+  validation_dataset: {}
+  evaluator: {}
+  objective: {}
+  budget: {}
+
+provider_binding:
+  # Recorded at run time. Names how each atomic operation in guides/operations.md
+  # is implemented for THIS target. The provider layer owns these choices; the
+  # Skill does not hardcode them.
+  binding_ref: ""           # id or path of the provider binding used (outside the Skill)
+  isolation_mechanism: ""   # e.g. git_worktree, foundry_draft_version, prompt_snapshot
+  operations:
+    inspect_baseline: ""
+    open_candidate: ""
+    apply_mutation: ""
+    freeze_candidate: ""
+    invoke_candidate: ""
+    evaluate: ""
+    cleanup_candidate: ""
+    apply_winner: ""
+
+data:
+  train_fingerprint: ""
+  search_row_ids: []
+  search_fingerprint: ""
+  confirmation_row_ids: []
+  confirmation_fingerprint: ""
+  validation_fingerprint: ""
+  expected_counts:
+    search: 0
+    confirmation: 0
+    validation: 0
+  zero_overlap: false
+  all_train_rows_used: false
+  contamination_incidents: []
+
+baseline:
+  search_score: null
+  confirmation_score: null
+  validation_score: null
+
+idea_cycles: []
+candidates: []
+worktrees: []
+provisional_winner: null
+validation: null
+incidents: []
+cleanup: []

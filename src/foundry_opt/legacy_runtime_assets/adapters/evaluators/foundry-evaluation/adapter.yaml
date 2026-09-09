@@ -1,0 +1,13 @@
+schema_version: 1
+kind: evaluation_adapter
+id: foundry-evaluation
+version: 1.0.0
+status: implemented
+implementation:
+  id: foundry-opt.foundry-evaluation
+  version: 1.0.0
+capabilities:
+  search_evaluation: true
+  aggregate_confirmation: true
+  sealed_validation: true
+  complete_denominator: true

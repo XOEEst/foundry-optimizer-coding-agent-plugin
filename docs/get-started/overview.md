@@ -20,6 +20,14 @@ them. Bootstrap does not require or automatically select a custom agent.
 An optional specialist profile is available under `examples/custom-agents/`
 for teams that deliberately want another agent choice.
 
+The installed skill also contains a local coding-agent profile for repositories
+that can bind an aligned regular Foundry baseline to local source. The local
+coding agent runs the Tenzing candidate loop, while `foundry-opt` primitives
+create draft-only candidates, verify exact source, run development/validating
+evaluations, detect route drift, and clean drafts. The full local binding/auth
+adapter is still required before this profile is supported end to end; regular
+numeric candidate versions are not an acceptable fallback.
+
 If you are new here, read these in order:
 
 1. [Bootstrap](bootstrap.md)

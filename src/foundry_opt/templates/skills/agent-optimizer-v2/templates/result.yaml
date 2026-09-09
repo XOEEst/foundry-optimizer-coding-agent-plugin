@@ -1,0 +1,19 @@
+run_id: ""
+outcome: no_winner
+verification_status: complete
+baseline:
+  search_score: null
+  confirmation_score: null
+  validation_score: null
+winner: null
+candidates_evaluated: 0
+idea_cycles_completed: 0
+applied: false
+data_integrity:
+  all_train_rows_used: false
+  zero_overlap: false
+  confirmation_clean: false
+  validation_clean: false
+artifacts:
+  run_state: ""
+  experiment_tracking: ""

@@ -18,7 +18,12 @@ from foundry_opt.poc.foundry import (
     DraftUnavailableError,
     EvaluationContract,
     FoundryPocClient,
+    HOSTED_DEFINITION_METADATA_KEY,
     HostedDefinition,
+    ImageHostedDraftReference,
+    PromptDefinition,
+    PromptDraftReference,
+    PROMPT_DEFINITION_METADATA_KEY,
     RegularVersionReference,
     RouteDriftError,
     RouteFingerprint,
@@ -60,6 +65,25 @@ def _latest_route_payload(version: str = "7") -> dict[str, object]:
         "state": "enabled",
         "versions": {"latest": {"version": version}},
         "agent_endpoint": None,
+    }
+
+
+def _service_managed_selector_payload(version: str = "7") -> dict[str, object]:
+    return {
+        "name": "travel-agent",
+        "state": "enabled",
+        "versions": {"latest": {"version": version}},
+        "agent_endpoint": {
+            "version_selector": {
+                "version_selection_rules": [
+                    {
+                        "type": "FixedRatio",
+                        "agent_version": "@latest",
+                        "traffic_percentage": 100,
+                    }
+                ]
+            }
+        },
     }
 
 
@@ -137,6 +161,194 @@ def test_create_source_code_draft_posts_preview_multipart_and_rejects_numeric_ve
     assert caught.value.owned_version.version == "7"
     assert caught.value.owned_version.code_sha256 == expected_sha
     assert [request.method for request in requests] == ["GET", "POST"]
+
+
+def test_prompt_draft_create_verify_and_delete_uses_exact_definition() -> None:
+    definition = PromptDefinition(
+        model="gpt-4o-mini",
+        instructions="Follow every requested output constraint.",
+        payload={"temperature": 0},
+    )
+    requests: list[httpx.Request] = []
+    deleted = False
+    draft_metadata: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal deleted
+        requests.append(request)
+        if request.method == "GET" and request.url.path.endswith(
+            "/agents/travel-agent"
+        ):
+            return httpx.Response(200, json=_latest_route_payload())
+        if request.method == "POST" and request.url.path.endswith("/versions"):
+            assert request.headers["foundry-features"] == DRAFT_FEATURE
+            body = json.loads(request.read())
+            assert body["draft"] is True
+            assert body["definition"] == json.loads(
+                json.dumps(definition.as_payload())
+            )
+            assert body["metadata"][PROMPT_DEFINITION_METADATA_KEY] == definition.sha256
+            draft_metadata.update(body["metadata"])
+            return httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                json={
+                    "id": "travel-agent:draft-abc",
+                    "version": "draft-abc",
+                    "status": "creating",
+                },
+            )
+        if request.method == "GET" and request.url.path.endswith(
+            "/versions/draft-abc"
+        ):
+            if deleted:
+                return httpx.Response(
+                    404,
+                    headers={"content-type": "application/json"},
+                    json={"error": {"message": "not found"}},
+                )
+            return httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                json={
+                    "id": "travel-agent:draft-abc",
+                    "version": "draft-abc",
+                    "status": "active",
+                    "definition": definition.as_payload(),
+                    "metadata": draft_metadata,
+                },
+            )
+        if request.method == "DELETE" and request.url.path.endswith(
+            "/versions/draft-abc"
+        ):
+            deleted = True
+            return httpx.Response(
+                204,
+                headers={"content-type": "application/json"},
+            )
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    client = FoundryPocClient(
+        "https://foundry.example/project",
+        _TokenProvider(),
+        transport=httpx.MockTransport(handler),
+    )
+    reference = client.create_prompt_draft(
+        "travel-agent",
+        definition,
+        deadline_monotonic=_deadline(30.0),
+        ownership_token="owned-token",
+    )
+    verified = client.verify_prompt_draft(
+        reference,
+        deadline_monotonic=_deadline(30.0),
+    )
+    client.delete_owned_prompt_version(
+        verified,
+        deadline_monotonic=_deadline(30.0),
+    )
+
+    assert isinstance(verified, PromptDraftReference)
+    assert verified.status == "active"
+    assert deleted is True
+    assert [request.method for request in requests] == [
+        "GET",
+        "POST",
+        "GET",
+        "GET",
+        "GET",
+        "DELETE",
+        "GET",
+        "GET",
+    ]
+
+
+def test_image_hosted_draft_create_verify_and_delete_uses_exact_definition() -> None:
+    definition = HostedDefinition(
+        payload={
+            "image": "example.azurecr.io/agent:1",
+            "cpu": "1",
+            "memory": "2Gi",
+            "container_protocol_versions": [
+                {"protocol": "responses", "version": "1.0.0"}
+            ],
+            "environment_variables": {"MODEL": "gpt-4o-mini"},
+        }
+    )
+    deleted = False
+    draft_metadata: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal deleted
+        if request.method == "GET" and request.url.path.endswith(
+            "/agents/travel-agent"
+        ):
+            return httpx.Response(200, json=_latest_route_payload())
+        if request.method == "POST" and request.url.path.endswith("/versions"):
+            body = json.loads(request.read())
+            assert body["draft"] is True
+            assert body["definition"] == json.loads(
+                json.dumps(definition.as_payload())
+            )
+            assert (
+                body["metadata"][HOSTED_DEFINITION_METADATA_KEY]
+                == definition.sha256
+            )
+            draft_metadata.update(body["metadata"])
+            return httpx.Response(
+                200,
+                json={
+                    "id": "travel-agent:draft-hosted",
+                    "version": "draft-hosted",
+                    "status": "creating",
+                },
+            )
+        if request.method == "GET" and request.url.path.endswith(
+            "/versions/draft-hosted"
+        ):
+            if deleted:
+                return httpx.Response(404, json={"error": {"message": "not found"}})
+            return httpx.Response(
+                200,
+                json={
+                    "id": "travel-agent:draft-hosted",
+                    "version": "draft-hosted",
+                    "status": "active",
+                    "definition": definition.as_payload(),
+                    "metadata": draft_metadata,
+                },
+            )
+        if request.method == "DELETE" and request.url.path.endswith(
+            "/versions/draft-hosted"
+        ):
+            deleted = True
+            return httpx.Response(200, json={"deleted": True})
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    client = FoundryPocClient(
+        "https://foundry.example/project",
+        _TokenProvider(),
+        transport=httpx.MockTransport(handler),
+        sleep=lambda _: None,
+    )
+    reference = client.create_image_hosted_draft(
+        "travel-agent",
+        definition,
+        deadline_monotonic=_deadline(30.0),
+        ownership_token="owned-hosted-token",
+    )
+    assert isinstance(reference, ImageHostedDraftReference)
+    assert reference.version == "draft-hosted"
+    verified = client.verify_image_hosted_draft(
+        reference,
+        deadline_monotonic=_deadline(30.0),
+    )
+    assert verified.status == "active"
+    client.delete_owned_image_hosted_version(
+        verified,
+        deadline_monotonic=_deadline(30.0),
+    )
+    assert deleted is True
 
 
 def test_create_regular_version_posts_numeric_source_version_without_route_mutation() -> None:
@@ -325,6 +537,38 @@ def test_regular_version_requires_service_managed_latest_route() -> None:
             description="Deploy merge a",
             deadline_monotonic=_deadline(30.0),
         )
+
+
+def test_at_latest_fixed_ratio_is_service_managed_latest_route() -> None:
+    client = FoundryPocClient(
+        "https://foundry.example/project",
+        _TokenProvider(),
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json=_service_managed_selector_payload(),
+            )
+        ),
+    )
+
+    route = client.require_service_managed_latest(
+        "travel-agent",
+        deadline_monotonic=_deadline(30.0),
+    )
+
+    assert route.selector is None
+    assert route.latest_version == "7"
+    assert route.endpoint_configuration == {
+        "version_selector": {
+            "version_selection_rules": (
+                {
+                    "type": "FixedRatio",
+                    "agent_version": "@latest",
+                    "traffic_percentage": 100,
+                },
+            )
+        }
+    }
 
 
 def test_wait_download_and_latest_verify_regular_version() -> None:

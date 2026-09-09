@@ -1,0 +1,18 @@
+schema_version: 1
+id: agent-optimizer-v2
+version: 0.11.0
+status: ready
+entrypoint: SKILL.md
+target_template: templates/target.yaml
+loop_guide: guides/loop.md
+operations_guide: guides/operations.md
+plan_guide: guides/plan.md
+data_guide: guides/data.md
+tracking_guide: guides/tracking.md
+scorecard_guide: guides/scorecard.md
+tenzing:
+  source_manifest: references/tenzing/SOURCE_MANIFEST.yaml
+  source: references/tenzing/climb.md
+run_templates:
+  state: templates/run-state.yaml
+  result: templates/result.yaml

@@ -1,0 +1,23 @@
+schema_version: 1
+id: tenzing-upstream
+repository: https://github.com/coreai-microsoft/tenzing
+commit: 7300a83fc7378f0f1a401dbdf8ed28358ccf1732
+license: MIT
+normalization: utf8_lf_final_newline
+normative_entrypoint: references/tenzing/climb.md
+files:
+  - upstream_path: climb.md
+    local_path: references/tenzing/climb.md
+    role: normative
+    git_blob_sha1: 44a35cc8aff0b14b2b2b6b4e06708b234094e956
+    normalized_sha256: 8651530161f62650b3f587584301f41deae087f87b66ce83e893ae99f26a6aac
+  - upstream_path: LICENSE
+    local_path: references/tenzing/LICENSE
+    role: license
+    git_blob_sha1: 4310a1566217689794083447fbad2bfd783d1977
+    normalized_sha256: f777fa00f69db5573977833b2f8eef7aa979759a8e56e1e7395efd957cff4194
+read_policy:
+  required_before_optimization:
+    - references/tenzing/climb.md
+  provenance_only:
+    - references/tenzing/LICENSE

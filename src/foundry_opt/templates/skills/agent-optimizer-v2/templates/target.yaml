@@ -1,0 +1,36 @@
+agent:
+  # Local path, hosted-agent identity, endpoint, or another discoverable handle.
+  location: ""
+  # Free-form label the provider layer interprets to pick isolation + operations.
+  # Examples: local_git, foundry_hosted, foundry_prompt. Use "auto" to discover.
+  kind: auto
+
+mutation:
+  # Examples: instruction, tool_description, tool_schema, tools, code.
+  # "tools" allows adding, removing, or swapping the agent's available tools.
+  allowed: []
+
+evaluation:
+  # Use "auto" when the Skill should discover these from the target.
+  train_dataset: auto
+  # Optional. When omitted/auto, the Skill partitions train_dataset.
+  confirmation_dataset: auto
+  # Must be a separate source; it is never derived from train_dataset.
+  validation_dataset: auto
+  evaluator: auto
+  primary_metric: auto
+  direction: maximize
+  guardrails: []
+
+split:
+  strategy: deterministic
+  seed: "0"
+  # Counts or ratios may be supplied. The Skill must use every training row.
+  search: auto
+  confirmation: auto
+
+budget:
+  candidates: 6
+  plateau_rounds: auto
+
+apply_winner: false

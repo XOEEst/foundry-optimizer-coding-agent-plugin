@@ -1,0 +1,14 @@
+schema_version: 1
+kind: workspace_adapter
+id: git-worktree
+version: 1.0.0
+status: implemented
+implementation:
+  id: foundry-opt.git-worktree
+  version: 1.0.0
+capabilities:
+  isolated_workspace: true
+  parent_commit_lineage: true
+  bounded_mutation: true
+  exact_readback: true
+  cleanup: true

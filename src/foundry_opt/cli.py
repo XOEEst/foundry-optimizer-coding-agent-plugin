@@ -119,6 +119,8 @@ from foundry_opt.poc.verification import (
     VerificationResolution,
     resolve_verification,
 )
+from foundry_opt.local_prompt import LocalPromptError, register_local_prompt_commands
+from foundry_opt.optimizer_runtime import register_optimizer_runtime_commands
 
 
 app = typer.Typer(no_args_is_help=True, pretty_exceptions_enable=False)
@@ -128,13 +130,19 @@ issue_app = typer.Typer(no_args_is_help=True)
 job_app = typer.Typer(no_args_is_help=True)
 acceptance_app = typer.Typer(no_args_is_help=True)
 deploy_app = typer.Typer(no_args_is_help=True)
+local_app = typer.Typer(no_args_is_help=True)
+runtime_app = typer.Typer(no_args_is_help=True)
 app.add_typer(bootstrap_app, name="bootstrap")
 app.add_typer(broker_app, name="broker")
 app.add_typer(issue_app, name="issue")
 app.add_typer(job_app, name="job")
 app.add_typer(acceptance_app, name="acceptance")
 app.add_typer(deploy_app, name="deploy")
+app.add_typer(local_app, name="local")
+app.add_typer(runtime_app, name="runtime")
 register_bootstrap_commands(bootstrap_app)
+register_local_prompt_commands(local_app)
+register_optimizer_runtime_commands(runtime_app)
 
 _PIN_PATH = Path(".github/foundry-opt.lock.yml")
 _POLICY_PATH = Path(".github/foundry-optimizer.yaml")
@@ -174,6 +182,7 @@ _JOB_COMMAND_ERRORS = (
     DeploymentError,
     DraftUnavailableError,
     IssueDocumentError,
+    LocalPromptError,
     POCConfigurationError,
     RouteDriftError,
     RouteModeError,

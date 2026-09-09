@@ -10,6 +10,12 @@ If your team explicitly installs the optional custom-agent example, you may
 select that profile from the assignment dropdown instead. It is not selected
 automatically.
 
+The installed skill uses a Tenzing-derived evidence loop: establish a fresh
+baseline, diagnose one failure pattern, propose one falsifiable candidate,
+evaluate it in an isolated worktree, record one lesson, and use that evidence
+to choose the next bounded candidate. The CLI remains authoritative for policy,
+evaluation, winner selection, and the final pull-request action.
+
 ## What an optimization issue should answer
 
 - What agent should change?
@@ -64,6 +70,30 @@ Keep the label matched to the evidence:
 In short: use `winner` or `no_winner` for evaluation-backed decisions;
 use `recommended` or `proposed_unverified` when you are being explicit
 that the result is not a measured Foundry win.
+
+## How quantitative scores are calculated
+
+For each task, normalize and combine the frozen evaluator scores using the
+approved equal or weighted evaluator contract. Candidate `avgScore` is the mean
+of those task scores across the complete dataset split.
+
+Training `avgScore` determines whether a candidate is eligible for a
+confirmation run. Confirmation uses a separate disjoint split and promotes a
+candidate only when it also strictly improves over the current best
+confirmation score. Only confirmed improvements reset the plateau.
+
+Final validation remains sealed during search. Only the provisional winner
+runs it by default, and its validating `avgScore` is the final headline
+optimization score.
+
+Passed/failed counts and pass rate remain useful diagnostics, but they do not
+replace `avgScore` unless repository policy explicitly defines pass rate as the
+primary objective. Missing or unscored tasks must not be silently dropped from
+the denominator.
+
+If the repository provides only train and validation datasets, bootstrap or
+the run plan should deterministically split train into search and confirmation
+and reserve validation for the final winner.
 
 ## Deployment without evaluation
 

@@ -1,0 +1,71 @@
+schema_version: 1
+kind: provider_binding
+id: foundry-prompt
+provider: foundry
+target_kind: foundry_prompt
+isolation_mechanism: git_worktree+foundry_prompt_draft_version
+description: >-
+  Binds the neutral atomic operations in the agent-optimizer-v2 Skill
+  (guides/operations.md) to the reference foundry_opt runtime for prompt agents.
+  This artifact is provider-specific and lives outside the Skill; the Skill
+  never imports it.
+
+runtime:
+  backend: foundry_opt.optimizer_runtime:FoundryOptRuntime
+  open_run: foundry_opt.optimizer_runtime:FoundryOptRuntime.open_run
+  session: foundry_opt.optimizer_runtime:FoundryOptRuntimeSession
+
+target_adapter: foundry_opt.optimizer_adapters:FoundryPromptTargetAdapter
+evaluation_adapter: foundry_opt.optimizer_adapters:FoundryEvaluationAdapter
+
+operations:
+  inspect_baseline:
+    entrypoints:
+      - foundry_opt.optimizer_runtime:FoundryOptRuntimeSession.inspect_target
+  open_candidate:
+    note: >-
+      Reserves isolation only: prepare_candidate opens a worktree from the
+      execution parent. The Foundry prompt draft version is not created yet.
+    entrypoints:
+      - foundry_opt.optimizer_runtime:FoundryOptRuntimeSession.prepare_candidate
+  apply_mutation:
+    note: >-
+      The bounded prompt change is edited directly into the worktree from
+      open_candidate; there is no separate provider call for the edit itself.
+      finalize_candidate (under freeze_candidate) commits it and rejects any
+      change outside the allowed surfaces.
+    entrypoints: []
+  freeze_candidate:
+    note: >-
+      finalize_candidate commits the worktree; materialize_candidate_target
+      deploys that exact content as the Foundry prompt draft version (this is
+      where the candidate becomes an invocable draft); verify_candidate_target
+      confirms the draft by exact read-back. The draft is created under the
+      baseline agent (same agent identity and route) as a new version of it —
+      never a separate or new agent. Route and model drift are rejected.
+    entrypoints:
+      - foundry_opt.optimizer_runtime:FoundryOptRuntimeSession.finalize_candidate
+      - foundry_opt.optimizer_runtime:FoundryOptRuntimeSession.materialize_candidate_target
+      - foundry_opt.optimizer_runtime:FoundryOptRuntimeSession.verify_candidate_target
+  invoke_candidate:
+    entrypoints:
+      - foundry_opt.optimizer_runtime:FoundryOptRuntimeSession.evaluate
+  evaluate:
+    note: >-
+      A single evaluate call invokes the subject over the frozen split and
+      scores every expected row against the frozen evaluator contract.
+    entrypoints:
+      - foundry_opt.optimizer_runtime:FoundryOptRuntimeSession.evaluate
+  cleanup_candidate:
+    entrypoints:
+      - foundry_opt.optimizer_runtime:FoundryOptRuntimeSession.cleanup_candidate_target
+      - foundry_opt.optimizer_runtime:FoundryOptRuntimeSession.cleanup_candidate
+  apply_winner:
+    requires_explicit_approval: true
+    entrypoints:
+      - foundry_opt.poc.deploy:publish_deployment
+
+legacy_descriptors:
+  target: ../../../legacy_runtime_assets/adapters/targets/foundry-prompt/adapter.yaml
+  evaluation: ../../../legacy_runtime_assets/adapters/evaluators/foundry-evaluation/adapter.yaml
+  workspace: ../../../legacy_runtime_assets/adapters/workspaces/git-worktree/adapter.yaml

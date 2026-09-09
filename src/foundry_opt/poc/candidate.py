@@ -143,6 +143,7 @@ class CandidateWorkspace:
         editable_patterns: tuple[str, ...] | list[str],
         protected_patterns: tuple[str, ...] | list[str] = (),
         source_root: str = ".",
+        artifact_directory: str = "artifacts",
         git_executable: str = "git",
     ) -> None:
         self._repository = Path(repository)
@@ -168,7 +169,9 @@ class CandidateWorkspace:
         self._trusted_root = Path(trusted_root)
         self._verify_trusted_root()
         self._worktrees_root = self._trusted_root / "worktrees"
-        self._artifacts_root = self._trusted_root / "artifacts"
+        self._artifacts_root = self._trusted_root / _validate_identifier(
+            artifact_directory
+        )
         self._worktrees_root.mkdir(parents=True, exist_ok=True)
         self._artifacts_root.mkdir(parents=True, exist_ok=True)
         self._verify_commit_exists(self._base_commit)
@@ -784,4 +787,3 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
 
 def _noop_deadline() -> None:
     return None
-

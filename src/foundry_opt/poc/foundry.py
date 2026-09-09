@@ -24,6 +24,8 @@ DRAFT_FEATURE = "DraftAgents=V1Preview"
 USER_AGENT = "foundry-opt-poc/0.1"
 OWNERSHIP_METADATA_KEY = "foundry_opt_run_id"
 SOURCE_ZIP_METADATA_KEY = "foundry_opt_source_zip_sha256"
+PROMPT_DEFINITION_METADATA_KEY = "foundry_opt_prompt_definition_sha256"
+HOSTED_DEFINITION_METADATA_KEY = "foundry_opt_hosted_definition_sha256"
 ROUTE_FINGERPRINT_METADATA_KEY = "foundry_opt_route_sha256"
 RELEASE_OPERATION_METADATA_KEY = "foundry_opt_release_operation"
 
@@ -84,7 +86,12 @@ class DeadlineError(TimeoutError, FoundryError):
 
 
 class DraftUnavailableError(FoundryError):
-    def __init__(self, message: str, *, owned_version: DraftReference) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        owned_version: DraftReference | PromptDraftReference,
+    ) -> None:
         super().__init__(message)
         self.owned_version = owned_version
         self.draft = owned_version
@@ -107,7 +114,12 @@ class RouteDriftError(FoundryError):
 
 
 class CleanupError(FoundryError):
-    def __init__(self, message: str, *, reference: DraftReference) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        reference: DraftReference | PromptDraftReference,
+    ) -> None:
         super().__init__(message)
         self.reference = reference
 
@@ -141,6 +153,10 @@ class HostedDefinition:
         payload["kind"] = "hosted"
         return payload
 
+    @property
+    def sha256(self) -> str:
+        return hashlib.sha256(_canonical_json_bytes(self.as_payload())).hexdigest()
+
     @classmethod
     def coerce(cls, value: HostedDefinition | Mapping[str, object]) -> HostedDefinition:
         if isinstance(value, cls):
@@ -152,6 +168,62 @@ class HostedDefinition:
         if kind != "hosted":
             raise ValueError("hosted definition kind must be 'hosted'")
         return cls(payload=payload)
+
+
+@dataclass(frozen=True, slots=True)
+class PromptDefinition:
+    model: str
+    instructions: str
+    payload: Mapping[str, JsonValue] = field(default_factory=dict)
+    kind: str = "prompt"
+
+    def __post_init__(self) -> None:
+        if self.kind != "prompt":
+            raise ValueError("PromptDefinition.kind must be 'prompt'")
+        _validate_nonempty(self.model, "model")
+        if not isinstance(self.instructions, str):
+            raise TypeError("PromptDefinition.instructions must be a string")
+        if not isinstance(self.payload, Mapping):
+            raise TypeError("PromptDefinition.payload must be a mapping")
+        plain = _plain_json_object(self.payload)
+        reserved = {"kind", "model", "instructions"}
+        overlap = sorted(reserved.intersection(plain))
+        if overlap:
+            raise ValueError(
+                "PromptDefinition.payload cannot override reserved fields: "
+                + ", ".join(overlap)
+            )
+        object.__setattr__(self, "payload", plain)
+
+    def as_payload(self) -> dict[str, JsonValue]:
+        return {
+            "kind": "prompt",
+            "model": self.model,
+            "instructions": self.instructions,
+            **self.payload,
+        }
+
+    @property
+    def sha256(self) -> str:
+        return hashlib.sha256(_canonical_json_bytes(self.as_payload())).hexdigest()
+
+    @classmethod
+    def coerce(cls, value: PromptDefinition | Mapping[str, object]) -> PromptDefinition:
+        if isinstance(value, cls):
+            return value
+        if not isinstance(value, Mapping):
+            raise TypeError("prompt definition must be a mapping")
+        payload = dict(value)
+        kind = payload.pop("kind", None)
+        if kind != "prompt":
+            raise ValueError("prompt definition kind must be 'prompt'")
+        model = payload.pop("model", None)
+        instructions = payload.pop("instructions", "")
+        return cls(
+            model=_validate_nonempty(model, "prompt definition model"),
+            instructions=instructions,
+            payload=payload,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,6 +287,90 @@ class DraftReference:
             f"version={self.version!r}, "
             f"ownership_token_sha256={self.ownership_token_sha256!r}, "
             f"code_sha256={self.code_sha256!r})"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PromptDraftReference:
+    agent_name: str
+    version: str
+    ownership_token: str
+    definition_sha256: str
+    route: RouteFingerprint
+    definition: PromptDefinition
+    service_id: str | None = None
+    status: str | None = None
+
+    def __post_init__(self) -> None:
+        _validate_agent_name(self.agent_name)
+        _validate_nonempty(self.version, "version")
+        _validate_ownership_token(self.ownership_token)
+        _validate_sha256(self.definition_sha256, "definition_sha256")
+        if self.definition.sha256 != self.definition_sha256:
+            raise ValueError("definition_sha256 must match the prompt definition")
+        if self.agent_name != self.route.agent_name:
+            raise ValueError("route fingerprint agent_name must match draft agent_name")
+
+    @property
+    def is_draft(self) -> bool:
+        return self.version.startswith("draft-")
+
+    @property
+    def route_sha256(self) -> str:
+        return self.route.sha256
+
+    @property
+    def ownership_token_sha256(self) -> str:
+        return hashlib.sha256(self.ownership_token.encode("utf-8")).hexdigest()
+
+    def __repr__(self) -> str:
+        return (
+            f"{type(self).__name__}("
+            f"agent_name={self.agent_name!r}, "
+            f"version={self.version!r}, "
+            f"ownership_token_sha256={self.ownership_token_sha256!r}, "
+            f"definition_sha256={self.definition_sha256!r})"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ImageHostedDraftReference:
+    agent_name: str
+    version: str
+    ownership_token: str
+    definition_sha256: str
+    route: RouteFingerprint
+    definition: HostedDefinition
+    service_id: str | None = None
+    status: str | None = None
+
+    def __post_init__(self) -> None:
+        _validate_agent_name(self.agent_name)
+        _validate_nonempty(self.version, "version")
+        _validate_nonempty(self.ownership_token, "ownership_token")
+        _validate_sha256(self.definition_sha256, "definition_sha256")
+        if self.agent_name != self.route.agent_name:
+            raise ValueError("route fingerprint agent_name must match draft agent_name")
+
+    @property
+    def is_draft(self) -> bool:
+        return self.version.startswith("draft-")
+
+    @property
+    def route_sha256(self) -> str:
+        return self.route.sha256
+
+    @property
+    def ownership_token_sha256(self) -> str:
+        return hashlib.sha256(self.ownership_token.encode("utf-8")).hexdigest()
+
+    def __repr__(self) -> str:
+        return (
+            f"{type(self).__name__}("
+            f"agent_name={self.agent_name!r}, "
+            f"version={self.version!r}, "
+            f"ownership_token_sha256={self.ownership_token_sha256!r}, "
+            f"definition_sha256={self.definition_sha256!r})"
         )
 
 
@@ -369,6 +525,36 @@ class EvaluationBackend(Protocol):
         monotonic: Callable[[], float],
         sleep: Callable[[float], None],
     ) -> EvaluationEvidence: ...
+
+
+def _is_service_managed_latest_selector(value: object) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    rules = value.get(
+        "version_selection_rules",
+        value.get("versionSelectionRules"),
+    )
+    if not isinstance(rules, (list, tuple)) or len(rules) != 1:
+        return False
+    rule = rules[0]
+    if not isinstance(rule, Mapping):
+        return False
+    rule_type = rule.get("type")
+    version = rule.get(
+        "agent_version",
+        rule.get("agentVersion", rule.get("version")),
+    )
+    percentage = rule.get(
+        "traffic_percentage",
+        rule.get("trafficPercentage"),
+    )
+    if not isinstance(rule_type, str) or rule_type.casefold() != "fixedratio":
+        return False
+    if version != "@latest":
+        return False
+    if isinstance(percentage, bool) or not isinstance(percentage, (int, float)):
+        return False
+    return float(percentage) == 100.0
 
 
 class AzureProjectsEvaluationBackend:
@@ -560,6 +746,8 @@ class FoundryPocClient:
         selector: JsonValue | None = None
         if isinstance(endpoint_json, dict):
             selector = endpoint_json.get("version_selector", endpoint_json.get("versionSelector"))
+            if _is_service_managed_latest_selector(selector):
+                selector = None
         route_payload: dict[str, JsonValue] = {
             "agent_endpoint": endpoint_json,
             "state": _plain_json_value(payload.get("state")),
@@ -682,6 +870,435 @@ class FoundryPocClient:
         return reference
 
     create_draft = create_source_code_draft
+
+    def get_prompt_version(
+        self,
+        agent_name: str,
+        version: str,
+        *,
+        deadline_monotonic: float,
+    ) -> tuple[PromptDefinition, str | None, Mapping[str, str]]:
+        response = self._request(
+            "GET",
+            f"/agents/{_safe_segment(agent_name, 'agent_name')}/versions/"
+            f"{_safe_segment(version, 'agent_version')}",
+            params={"api-version": API_VERSION},
+            headers={"Foundry-Features": DRAFT_FEATURE},
+            deadline_monotonic=deadline_monotonic,
+        )
+        payload = self._json_object(response)
+        returned_version = _required_text(payload, "version", subject="version")
+        if returned_version != version:
+            raise ContractError("Foundry returned a different version than requested")
+        raw_definition = payload.get("definition")
+        if not isinstance(raw_definition, Mapping):
+            raise ContractError("Foundry prompt version omitted its definition")
+        definition = PromptDefinition.coerce(raw_definition)
+        return definition, _optional_text(payload, "status"), _metadata_object(
+            payload.get("metadata")
+        )
+
+    def create_prompt_draft(
+        self,
+        agent_name: str,
+        prompt_definition: PromptDefinition | Mapping[str, object],
+        *,
+        deadline_monotonic: float,
+        ownership_token: str | None = None,
+    ) -> PromptDraftReference:
+        definition = PromptDefinition.coerce(prompt_definition)
+        route = self.route_fingerprint(agent_name, deadline_monotonic=deadline_monotonic)
+        owner = _validate_ownership_token(
+            ownership_token or self._ownership_token_factory()
+        )
+        response = self._request(
+            "POST",
+            f"/agents/{_safe_segment(agent_name, 'agent_name')}/versions",
+            params={"api-version": API_VERSION},
+            headers={"Foundry-Features": DRAFT_FEATURE},
+            json_body={
+                "draft": True,
+                "definition": definition.as_payload(),
+                "metadata": {
+                    OWNERSHIP_METADATA_KEY: owner,
+                    PROMPT_DEFINITION_METADATA_KEY: definition.sha256,
+                    ROUTE_FINGERPRINT_METADATA_KEY: route.sha256,
+                },
+            },
+            deadline_monotonic=deadline_monotonic,
+        )
+        payload = self._json_object(response)
+        reference = PromptDraftReference(
+            agent_name=agent_name,
+            version=_required_text(payload, "version", subject="draft.version"),
+            ownership_token=owner,
+            definition_sha256=definition.sha256,
+            route=route,
+            definition=definition,
+            service_id=_optional_text(payload, "id"),
+            status=_optional_text(payload, "status"),
+        )
+        if not reference.is_draft:
+            raise DraftUnavailableError(
+                "Foundry returned a regular numeric version instead of a draft",
+                owned_version=reference,
+            )
+        return reference
+
+    def get_image_hosted_version(
+        self,
+        agent_name: str,
+        version: str,
+        *,
+        deadline_monotonic: float,
+    ) -> tuple[HostedDefinition, str | None, Mapping[str, str]]:
+        response = self._request(
+            "GET",
+            f"/agents/{_safe_segment(agent_name, 'agent_name')}/versions/"
+            f"{_safe_segment(version, 'agent_version')}",
+            params={"api-version": API_VERSION},
+            headers={"Foundry-Features": DRAFT_FEATURE},
+            deadline_monotonic=deadline_monotonic,
+        )
+        payload = self._json_object(response)
+        returned_version = _required_text(payload, "version", subject="version")
+        if returned_version != version:
+            raise ContractError("Foundry returned a different version than requested")
+        raw_definition = payload.get("definition")
+        if not isinstance(raw_definition, Mapping):
+            raise ContractError("Foundry hosted version omitted its definition")
+        definition = HostedDefinition.coerce(raw_definition)
+        return definition, _optional_text(payload, "status"), _metadata_object(
+            payload.get("metadata")
+        )
+
+    def create_image_hosted_draft(
+        self,
+        agent_name: str,
+        hosted_definition: HostedDefinition | Mapping[str, object],
+        *,
+        deadline_monotonic: float,
+        ownership_token: str | None = None,
+    ) -> ImageHostedDraftReference:
+        definition = HostedDefinition.coerce(hosted_definition)
+        route = self.route_fingerprint(agent_name, deadline_monotonic=deadline_monotonic)
+        owner = _validate_ownership_token(
+            ownership_token or self._ownership_token_factory()
+        )
+        response = self._request(
+            "POST",
+            f"/agents/{_safe_segment(agent_name, 'agent_name')}/versions",
+            params={"api-version": API_VERSION},
+            headers={"Foundry-Features": DRAFT_FEATURE},
+            json_body={
+                "draft": True,
+                "definition": definition.as_payload(),
+                "metadata": {
+                    OWNERSHIP_METADATA_KEY: owner,
+                    HOSTED_DEFINITION_METADATA_KEY: definition.sha256,
+                    ROUTE_FINGERPRINT_METADATA_KEY: route.sha256,
+                },
+            },
+            deadline_monotonic=deadline_monotonic,
+        )
+        payload = self._json_object(response)
+        reference = ImageHostedDraftReference(
+            agent_name=agent_name,
+            version=_required_text(payload, "version", subject="draft.version"),
+            ownership_token=owner,
+            definition_sha256=definition.sha256,
+            route=route,
+            definition=definition,
+            service_id=_optional_text(payload, "id"),
+            status=_optional_text(payload, "status"),
+        )
+        if not reference.is_draft:
+            raise DraftUnavailableError(
+                "Foundry returned a regular numeric version instead of a draft",
+                owned_version=reference,
+            )
+        return reference
+
+    def wait_for_image_hosted_version_active(
+        self,
+        reference: ImageHostedDraftReference,
+        *,
+        deadline_monotonic: float,
+        poll_interval_seconds: float = 5.0,
+    ) -> ImageHostedDraftReference:
+        if poll_interval_seconds < 0:
+            raise ValueError("poll_interval_seconds must be nonnegative")
+        while True:
+            definition, status, metadata = self.get_image_hosted_version(
+                reference.agent_name,
+                reference.version,
+                deadline_monotonic=deadline_monotonic,
+            )
+            self._assert_image_hosted_draft_matches(
+                reference,
+                definition=definition,
+                metadata=metadata,
+                require_ownership_proof=True,
+            )
+            normalized_status = (status or "").lower()
+            if normalized_status == "active":
+                return replace(reference, definition=definition, status=status)
+            if normalized_status in {
+                "failed",
+                "deleted",
+                "deleting",
+                "canceled",
+                "cancelled",
+            }:
+                raise ServiceError(
+                    f"Foundry version entered terminal status {normalized_status!r}"
+                )
+            remaining = deadline_monotonic - self._monotonic()
+            if remaining <= 0:
+                raise DeadlineError(
+                    f"timed out waiting for Foundry version {reference.version!r}"
+                )
+            self._sleep(min(float(poll_interval_seconds), remaining))
+
+    def verify_image_hosted_draft(
+        self,
+        reference: ImageHostedDraftReference,
+        *,
+        deadline_monotonic: float,
+    ) -> ImageHostedDraftReference:
+        active = self.wait_for_image_hosted_version_active(
+            reference,
+            deadline_monotonic=deadline_monotonic,
+        )
+        self.assert_route_unchanged(
+            reference.route,
+            deadline_monotonic=deadline_monotonic,
+        )
+        return active
+
+    def delete_owned_image_hosted_version(
+        self,
+        reference: ImageHostedDraftReference,
+        *,
+        deadline_monotonic: float,
+    ) -> None:
+        try:
+            definition, _, metadata = self.get_image_hosted_version(
+                reference.agent_name,
+                reference.version,
+                deadline_monotonic=deadline_monotonic,
+            )
+        except ServiceError as exc:
+            if exc.status_code == 404:
+                return
+            raise
+        try:
+            self._assert_image_hosted_draft_matches(
+                reference,
+                definition=definition,
+                metadata=metadata,
+                require_ownership_proof=True,
+            )
+        except ContractError as exc:
+            raise CleanupError(
+                "Foundry hosted version ownership could not be proven for cleanup",
+                reference=reference,
+            ) from exc
+        path = (
+            f"/agents/{_safe_segment(reference.agent_name, 'agent_name')}/versions/"
+            f"{_safe_segment(reference.version, 'agent_version')}"
+        )
+        self._request(
+            "DELETE",
+            path,
+            params={"api-version": API_VERSION, "force": "true"},
+            headers={"Foundry-Features": DRAFT_FEATURE},
+            deadline_monotonic=deadline_monotonic,
+        )
+        try:
+            self.get_image_hosted_version(
+                reference.agent_name,
+                reference.version,
+                deadline_monotonic=deadline_monotonic,
+            )
+        except ServiceError as exc:
+            if exc.status_code == 404:
+                self.assert_route_unchanged(
+                    reference.route,
+                    deadline_monotonic=deadline_monotonic,
+                )
+                return
+            raise
+        raise CleanupError(
+            "Foundry hosted version still existed after delete",
+            reference=reference,
+        )
+
+    @staticmethod
+    def _assert_image_hosted_draft_matches(
+        reference: ImageHostedDraftReference,
+        *,
+        definition: HostedDefinition,
+        metadata: Mapping[str, str],
+        require_ownership_proof: bool,
+    ) -> None:
+        if definition.sha256 != reference.definition_sha256:
+            raise ContractError(
+                "Foundry hosted draft definition did not match the expected SHA-256"
+            )
+        expected = {
+            OWNERSHIP_METADATA_KEY: reference.ownership_token,
+            HOSTED_DEFINITION_METADATA_KEY: reference.definition_sha256,
+            ROUTE_FINGERPRINT_METADATA_KEY: reference.route_sha256,
+        }
+        for key, value in expected.items():
+            actual = metadata.get(key)
+            if actual is None and not require_ownership_proof:
+                continue
+            if actual != value:
+                raise ContractError(
+                    f"Foundry hosted draft metadata did not match field {key}"
+                )
+
+    def wait_for_prompt_version_active(
+        self,
+        reference: PromptDraftReference,
+        *,
+        deadline_monotonic: float,
+        poll_interval_seconds: float = 5.0,
+    ) -> PromptDraftReference:
+        if poll_interval_seconds < 0:
+            raise ValueError("poll_interval_seconds must be nonnegative")
+        while True:
+            definition, status, metadata = self.get_prompt_version(
+                reference.agent_name,
+                reference.version,
+                deadline_monotonic=deadline_monotonic,
+            )
+            self._assert_prompt_draft_matches(
+                reference,
+                definition=definition,
+                metadata=metadata,
+                require_ownership_proof=True,
+            )
+            if (status or "").lower() == "active":
+                return replace(reference, definition=definition, status=status)
+            if (status or "").lower() in {
+                "failed",
+                "deleted",
+                "deleting",
+                "canceled",
+                "cancelled",
+            }:
+                raise ServiceError(
+                    f"Foundry version entered terminal status {(status or '').lower()!r}"
+                )
+            remaining = deadline_monotonic - self._monotonic()
+            if remaining <= 0:
+                raise DeadlineError(
+                    f"timed out waiting for Foundry version {reference.version!r}"
+                )
+            self._sleep(min(float(poll_interval_seconds), remaining))
+
+    def verify_prompt_draft(
+        self,
+        reference: PromptDraftReference,
+        *,
+        deadline_monotonic: float,
+    ) -> PromptDraftReference:
+        active = self.wait_for_prompt_version_active(
+            reference,
+            deadline_monotonic=deadline_monotonic,
+        )
+        self.assert_route_unchanged(
+            reference.route,
+            deadline_monotonic=deadline_monotonic,
+        )
+        return active
+
+    def delete_owned_prompt_version(
+        self,
+        reference: PromptDraftReference,
+        *,
+        deadline_monotonic: float,
+    ) -> None:
+        try:
+            definition, _, metadata = self.get_prompt_version(
+                reference.agent_name,
+                reference.version,
+                deadline_monotonic=deadline_monotonic,
+            )
+        except ServiceError as exc:
+            if exc.status_code == 404:
+                return
+            raise
+        try:
+            self._assert_prompt_draft_matches(
+                reference,
+                definition=definition,
+                metadata=metadata,
+                require_ownership_proof=True,
+            )
+        except ContractError as exc:
+            raise CleanupError(
+                "Foundry prompt version ownership could not be proven for cleanup",
+                reference=reference,
+            ) from exc
+        path = (
+            f"/agents/{_safe_segment(reference.agent_name, 'agent_name')}/versions/"
+            f"{_safe_segment(reference.version, 'agent_version')}"
+        )
+        self._request(
+            "DELETE",
+            path,
+            params={"api-version": API_VERSION, "force": "true"},
+            headers={"Foundry-Features": DRAFT_FEATURE},
+            deadline_monotonic=deadline_monotonic,
+        )
+        try:
+            self.get_prompt_version(
+                reference.agent_name,
+                reference.version,
+                deadline_monotonic=deadline_monotonic,
+            )
+        except ServiceError as exc:
+            if exc.status_code == 404:
+                self.assert_route_unchanged(
+                    reference.route,
+                    deadline_monotonic=deadline_monotonic,
+                )
+                return
+            raise
+        raise CleanupError(
+            "Foundry prompt version still existed after delete",
+            reference=reference,
+        )
+
+    @staticmethod
+    def _assert_prompt_draft_matches(
+        reference: PromptDraftReference,
+        *,
+        definition: PromptDefinition,
+        metadata: Mapping[str, str],
+        require_ownership_proof: bool,
+    ) -> None:
+        if definition.sha256 != reference.definition_sha256:
+            raise ContractError(
+                "Foundry prompt draft definition did not match the expected SHA-256"
+            )
+        expected = {
+            OWNERSHIP_METADATA_KEY: reference.ownership_token,
+            PROMPT_DEFINITION_METADATA_KEY: reference.definition_sha256,
+            ROUTE_FINGERPRINT_METADATA_KEY: reference.route_sha256,
+        }
+        for key, value in expected.items():
+            actual = metadata.get(key)
+            if actual is None and not require_ownership_proof:
+                continue
+            if actual != value:
+                raise ContractError(
+                    f"Foundry prompt draft metadata did not match field {key}"
+                )
 
     def create_regular_version(
         self,
@@ -1233,8 +1850,11 @@ class FoundryPocClient:
         params: Mapping[str, object] | None = None,
         headers: Mapping[str, str] | None = None,
         files: Mapping[str, object] | None = None,
+        json_body: Mapping[str, object] | None = None,
         deadline_monotonic: float,
     ) -> httpx.Response:
+        if files is not None and json_body is not None:
+            raise ValueError("provide either files or json_body, not both")
         timeout = _remaining_seconds(self._monotonic, deadline_monotonic)
         token = _normalize_access_token(self._token_provider.get_token(self._token_scope))
         request_headers = {
@@ -1253,6 +1873,7 @@ class FoundryPocClient:
             params=params,
             headers=preview_headers,
             files=files,
+            json=json_body,
         )
         redacted = _redact_request(preview_request)
         try:
@@ -1262,6 +1883,7 @@ class FoundryPocClient:
                 params=params,
                 headers=request_headers,
                 files=files,
+                json=json_body,
                 timeout=timeout,
             )
         except httpx.TimeoutException as exc:

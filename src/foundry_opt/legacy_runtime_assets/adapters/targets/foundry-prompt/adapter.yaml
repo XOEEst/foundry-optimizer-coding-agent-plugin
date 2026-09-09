@@ -1,0 +1,14 @@
+schema_version: 1
+kind: target_adapter
+id: foundry-prompt
+version: 1.0.0
+status: implemented
+implementation:
+  id: foundry-opt.foundry-prompt-definition
+  version: 1.0.0
+capabilities:
+  inspect_baseline: true
+  materialize_candidate: true
+  invoke_candidate: true
+  cleanup_candidate: true
+  apply_winner: true

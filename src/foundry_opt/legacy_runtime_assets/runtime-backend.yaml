@@ -1,0 +1,22 @@
+schema_version: 1
+kind: runtime_backend
+id: foundry-opt
+version: 1.0.0
+status: implemented
+interface:
+  id: agent-optimizer-runtime
+  version: 1.0.0
+implementation:
+  id: foundry_opt.optimizer_runtime
+  version: 1.0.0
+  entrypoint: foundry_opt.optimizer_runtime:FoundryOptRuntime
+  normalized_sha256: 234bde8d8654c7072a789b21b51f96d2a940451c3fb77b66941ec7314ce2ee67
+capabilities:
+  frozen_contract_verification: true
+  external_trusted_state: true
+  agent_scoped_storage: true
+  public_report_path_derivation: true
+  adapter_identity_verification: true
+  candidate_worktree_lifecycle: true
+  target_adapter_dispatch: true
+  evaluation_adapter_dispatch: true
