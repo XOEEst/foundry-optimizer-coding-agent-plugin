@@ -36,7 +36,8 @@
 - Match immutable IDs and full configuration, not display names.
 - Never alter an existing resource merely to make it match the plan.
 - Never deploy through an endpoint or identity whose ownership is uncertain.
-- Limit cloud-agent firewall changes to approved missing allowlist rules.
+- Limit cloud-agent firewall changes to exact approved additive repository rules,
+  even when inherited coverage is unknown.
   Preserve existing rules and organization controls; never disable the
   firewall or move runtime requests to setup processes to bypass restrictions.
 

@@ -292,9 +292,13 @@ fresh Copilot session; keep existing OIDC credentials and broker setup intact.
 ## Copilot cloud-agent internet access
 
 Treat outbound network access as a separate bootstrap prerequisite from Agents
-variables, OIDC, and successful setup. Before approval, inventory the effective
-organization and repository firewall settings under **Settings > Copilot >
-Internet access**, in the **Copilot cloud agent** section, not code review.
+variables, OIDC, and successful setup. Before approval, automatically query
+`GET /repos/{owner}/{repo}/copilot/cloud-agent/configuration` through `gh api`,
+using the command and API version in [Discovery](references/discovery.md).
+Do this before requesting screenshots or manual settings evidence. Retain the
+returned firewall flags and custom rules as repository configuration evidence.
+The settings UI is **Settings > Copilot > Internet access**, in the **Copilot
+cloud agent** section, not code review.
 Follow [GitHub's firewall guide](https://docs.github.com/en/copilot/how-tos/copilot-on-github/customize-copilot/customize-the-firewall).
 
 Derive the required destinations from the confirmed Azure and agent bindings:
@@ -306,28 +310,47 @@ Derive the required destinations from the confirmed Azure and agent bindings:
 - additional package, storage, or service destinations only when evidence shows
   that the selected agent's cloud-session commands require them
 
-Compare each destination with the effective recommended, organization, and
-repository allowlists. Reuse existing coverage and propose only missing,
-narrowly scoped rules, with their purpose and scope in the combined approval.
+Reuse coverage established by known matching rules or the enabled recommended
+allowlist's documented entries. Otherwise propose an explicit, narrowly scoped
+repository rule for each required destination. Show the observed repository
+custom allowlist plus the exact deduplicated additions in the combined approval.
+An explicit rule may duplicate unknown inherited coverage; it is still bounded
+by the approved destinations. Do not claim a host is blocked merely because it
+is absent from the returned custom list.
 Preserve unrelated rules and rules for previously onboarded projects on re-entry.
 Keep the firewall enabled; do not add broad wildcard rules, disable network
 controls, or move runtime Azure calls into setup steps to bypass the firewall.
 If the firewall is already disabled, report the existing deviation rather than
 silently changing it or treating unrestricted access as an allowlist match.
 
-Use a documented management API only if one is available for the current GitHub
-installation; otherwise use **Custom allowlist > Add rule > Save changes** on
-that settings page. If tools cannot access the page, ask the owner for current
-policy evidence and, after approval, owner-assisted application of the exact
-rules. Do not invent an API or use Actions/Agents variables as a replacement
-for Internet access settings. Unreadable effective policy blocks
-approval. If organization policy forbids repository custom rules, identify the
-required organization-administrator action; do not change organization policy
-implicitly.
+Do not ask the owner to repeat settings already returned by the API. It does
+not separately expose inherited organization rules or permission to add
+repository rules. Record unavailable inheritance and edit permission as
+`unknown`, not `none` or `allowed`. Do not ask the owner to investigate inherited
+rules or confirm edit permission during discovery. Unknown inheritance or edit
+permission does not block approval of exact additive repository rules when the
+repository configuration is readable. This narrow exception does not permit
+overwriting unreadable repository settings or ignoring known organization
+restrictions. A failed API read still requires a conclusive repository
+configuration read before approving its changes, not an organization-policy
+questionnaire.
 
-After approval, re-read the policy, add only approved missing rules, and verify
-the saved effective coverage. If an authorized administrator must perform the
-change, report it as pending and stop rather than declaring setup complete.
+For approved writes, use a documented write API only if available; the GET
+endpoint does not establish write support. Otherwise use **Custom allowlist >
+Add rule > Save changes**, with owner assistance if tools cannot access the
+page. Do not invent a write API or use Actions/Agents variables as a replacement
+for Internet access settings. If organization policy forbids repository custom
+rules, identify the required organization-administrator action; do not change
+organization policy implicitly.
+
+After approval, re-read the repository configuration, preserve existing rules,
+and add only approved entries not already covered. Verify the saved repository
+rules and firewall flags through the read API without requiring an inheritance
+inventory. Request owner assistance only to perform approved UI-only changes;
+request administrator help only when a known restriction or an actual attempt
+blocks application. Never probe write permission by mutating during discovery.
+If an approved change cannot be applied, report it as pending and stop rather
+than declaring setup complete.
 On re-entry, reuse completed rules and resume the remaining approved work.
 
 Keep saved firewall configuration separate from cloud-runtime connectivity
@@ -340,6 +363,36 @@ optimization. Record this as `not attempted` until actual session evidence is
 available; do not start optimization jobs or evaluation runs merely to test
 network access. Report DNS/firewall blocks separately from Azure authentication
 or RBAC failures.
+
+### Allowlist owner handoff
+
+When additions are needed, show **Allowlist additions** in the combined approval
+and bootstrap report. Repeat the same approved entries when manual action is
+needed; do not ask the owner to derive them. Include:
+
+- the target repository URL and **Settings > Copilot > Internet access >
+  Copilot cloud agent > Custom allowlist**
+- a copy-ready text block containing only the exact entries to add, one per
+  line, with no placeholders, bullets, or explanatory text inside the block
+- each entry's purpose outside the block: Azure sign-in, access to the confirmed
+  Foundry project, or an evidenced cloud-session dependency; include
+  `packagefeedproxy.microsoft.io` only when the approved cloud-session package
+  source requires it
+- who must act and the current status: proposed, awaiting manual save, or
+  confirmed saved; state explicitly when available tools can read settings but
+  cannot save them
+
+Use actual resolved hostnames, never an example account name or the full
+Foundry project URL as a domain entry. Omit entries with established coverage
+from the additions block and list them separately as already covered. If no
+additions remain, say **No allowlist additions required** and skip manual work.
+
+Before approval, label the entries **Proposed - do not apply yet**. After
+approval, if manual action is needed, instruct the owner to add each approved
+entry separately with **Add rule**, then click **Save changes**. Preserve
+existing rules and keep the firewall enabled. Ask the owner to confirm saving,
+then re-query the configuration API; confirmation alone is not saved-rule
+evidence. Keep an unsaved or blocked action pending rather than marking it done.
 
 ## Approved package-feed fallback
 
@@ -395,8 +448,9 @@ Record the sources actually used in the bootstrap report.
   federated credentials, and role assignments needed by the selected agents.
 - Independently inventory the dedicated Agents variable store and compare the
   required optimizer values with the selected identity and project.
-- Inventory effective cloud-agent Internet access policy and derive the
-  required allowlist coverage from the confirmed project and Azure authority.
+- Read repository cloud-agent Internet access settings and derive the required
+  destinations from the confirmed project and Azure authority. Record
+  unavailable inheritance and edit permission as unknown without prompting.
 - Record repository branch protection separately from each environment's
   deployment policy mode and allowed branch/tag entries.
 - Resolve the confirmed endpoint to exactly one Foundry project, then inventory
@@ -551,8 +605,9 @@ Show:
 - exact GitHub, Azure, and Foundry resources to reuse
 - required Agents variables and separate Actions variables, with exact
   destinations, names, values, and any approved identity client-ID binding
-- effective cloud-agent firewall policy, existing coverage, exact missing
-  allowlist rules and their purpose/scope, and any administrator action needed
+- observed cloud-agent firewall settings, existing repository rules, exact
+  additive repository allowlist rules and their purpose, unknown inheritance
+  or edit permission, and any already-known administrator restriction
 - for each GitHub environment, one explicit deployment branch mode:
   unrestricted, protected branches, or a custom allowed-entry list
 - exact missing resources to create, including names, types, scopes, regions,
@@ -599,8 +654,10 @@ approval.
    Actions variables, and read back each store-specific value before marking
    cloud-agent configuration complete.
    Apply approved cloud-agent allowlist additions without replacing existing
-   rules, and verify saved effective coverage. Stop and report pending work
-   when a required administrator action remains incomplete.
+   rules, and verify saved repository rules and firewall flags. Unknown
+   inheritance is not a read-back prerequisite. Stop and report pending work
+   if the approved additions cannot be applied, including any administrator
+   action required by an actual permission failure or known restriction.
    For custom environment branch policies, enable the mode, create every
    approved entry, and then verify both surfaces. Do not store credentials in
    the repository.
@@ -630,7 +687,8 @@ approval.
 12. Complete `.foundry-opt/bootstrap-report.md` with versions, commit, reused
     and created resources, scan scope, selected and excluded agents, shared
     endpoint, per-agent deployment results, all previously onboarded entries,
-    effective firewall coverage, separate cloud-session preflight evidence,
+    repository firewall configuration, unknown inheritance where applicable,
+    separate cloud-session preflight evidence,
     and remaining work.
 
 At successful handoff, tell the user to rerun `/foundry-bootstrap` for another

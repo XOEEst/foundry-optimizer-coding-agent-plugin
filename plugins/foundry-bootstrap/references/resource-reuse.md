@@ -60,6 +60,13 @@ Stop when:
 Do not delete, rename, replace, repurpose, or edit the conflicting resource.
 Document the blocker for the owner.
 
+Unknown firewall inheritance or repository rule-edit permission does not make a
+readable repository custom allowlist an unknown resource. Plan exact additive
+repository rules while preserving the observed list, even if an addition may
+duplicate inherited coverage. Do not ask the owner to resolve that inheritance.
+Apply only after approval; stop on an actual write failure or known restriction.
+Unreadable repository configuration remains a blocker.
+
 An environment with custom policy mode enabled and no allowed entries is
 partial state rather than a conflicting resource. A new approved plan may add
 the intended entries or disable custom mode.

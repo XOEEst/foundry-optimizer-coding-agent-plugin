@@ -56,6 +56,22 @@ The skill does not copy that guide into its own instructions.
 The owner gives one combined approval. If the plan changes, the coding agent
 shows a fresh exact diff and asks again.
 
+## Manual allowlist changes
+
+The review and report must show **Allowlist additions** with the repository,
+exact entries in a copy-ready block, each entry's purpose, and who must save
+them. The owner does not need to derive hostnames or investigate inherited
+rules. Existing coverage is listed separately; package-feed entries appear only
+when required by the approved cloud-session configuration.
+
+Entries are proposed, not permission to act, until the combined approval.
+After approval, if automated saving is unavailable, the coding agent says so
+and directs the owner to **Settings > Copilot > Internet access > Copilot cloud
+agent > Custom allowlist**. Add each approved entry with **Add rule**, then
+**Save changes**, preserving existing rules and leaving the firewall enabled.
+The coding agent reads the saved configuration back after the owner's
+confirmation. If there are no additions, no manual action is requested.
+
 ## Expected result
 
 - `.foundry-opt/registry.yaml` is version 2 and contains exact `foundry-opt`

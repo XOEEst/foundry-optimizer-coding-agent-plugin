@@ -217,19 +217,52 @@ distinguish `deployment_branch_policy` from `protection_rules` and from
 
 ### Cloud-agent firewall inventory
 
-Inspect **Settings > Copilot > Internet access > Copilot cloud agent** separately
-from Agents variables and Actions environments. Record the firewall mode,
-recommended allowlist, organization rules, repository rules, and whether the
-organization permits repository custom rules. Use the documented settings UI
-when no supported read API is available; unknown policy is not an empty list.
+First call the documented
+[repository cloud-agent configuration API](https://docs.github.com/en/rest/copilot/copilot-cloud-agent-management#get-copilot-cloud-agent-configuration-for-a-repository)
+with the verified repository owner/name. This is a read-only public-preview
+endpoint; do not defer discovery to the owner without attempting it.
+
+```powershell
+gh api --method GET -H "Accept: application/vnd.github+json" `
+  -H "X-GitHub-Api-Version: 2026-03-10" `
+  "repos/{owner}/{repo}/copilot/cloud-agent/configuration" `
+  --jq '{is_firewall_enabled, is_firewall_recommended_allowlist_enabled, custom_allowlist}'
+```
+
+Record those three fields and the query outcome. Project only firewall fields;
+do not dump unrelated MCP configuration, which can contain credentials.
+Preserve boolean `false` and empty arrays as returned values, but treat missing,
+null, or malformed fields as unknown. A `401`, `403`, `404`, or server error
+does not mean the firewall is disabled or the allowlist is empty; report the
+actual failure before requesting narrowly scoped settings evidence.
+
+The response does not separately expose inherited organization rules or
+whether repository custom additions are permitted. Do not infer either from an
+empty `custom_allowlist`, or assume a host absent there is blocked: recommended
+or inherited rules may cover it. Record unavailable inheritance and edit
+permission as `unknown`. Do not ask for inherited rules, matching organization
+rules, or permission confirmation during discovery. A valid empty
+`custom_allowlist` with unknown inheritance is enough to plan exact repository
+additions without an owner question about inheritance.
 
 For each required hostname derived by the skill's Internet access rules, record
-its purpose, effective coverage and scope, and the exact missing rule to propose.
-Include the Azure authority and the confirmed Foundry endpoint hostname.
-Preserve rules for other onboarded projects. An organization restriction must
-name the administrator action needed, not trigger a firewall bypass.
-Read-back of saved rules establishes configuration only; cloud-session online
-preflight evidence must be recorded separately.
+its purpose and any known coverage. Reuse known matching rules; otherwise
+propose an explicit repository allowance, even if it may duplicate unknown
+inherited coverage. Include the Azure authority and the confirmed Foundry
+endpoint hostname. Keep the existing custom list intact and show only exact,
+deduplicated additions; do not require proof that a host is currently blocked.
+Do not interpret the recommended-allowlist flag alone as coverage for every
+required host: match its documented entries.
+
+An unknown edit permission is not a reason to query the owner before approval
+or to probe it with a write. Apply approved additions through an available
+supported write surface; if no automated write surface exists, request the
+owner's help with the approved UI action, not inheritance discovery. Escalate
+only a known restriction or actual application failure to an administrator,
+preserving completed work. Never change organization policy implicitly.
+Re-query the repository API after approved changes. Saved repository rules and
+flags establish configuration without an inherited-rule inventory; actual
+cloud-session online preflight evidence must still be recorded separately.
 
 ## Azure and Foundry inventory
 
@@ -261,6 +294,13 @@ For each resource needed by the selected onboarding group:
 
 Only exact and missing resources may appear in an approval plan. A conflict or
 unknown result blocks mutation.
+
+For additive repository firewall rules, unknown inheritance and edit
+permission are context, not an unknown target resource: a successful
+repository configuration read establishes the current list to preserve and the
+exact additions to approve. Do not block that plan or query the owner for
+inheritance. This exception does not apply to unreadable repository settings,
+unknown Azure resources, or known prohibitions.
 
 For an existing project used by an `azure.ai.agent` service, plan
 `AZURE_AI_PROJECT_ID=<full-project-ARM-resource-ID>` in the selected azd

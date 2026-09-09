@@ -217,9 +217,56 @@ def test_bootstrap_plans_scoped_cloud_firewall_rules_before_approval() -> None:
     assert "hostname parsed from the confirmed Foundry project endpoint" in section
     assert "Preserve unrelated rules" in section
     assert "Keep the firewall enabled" in section
-    assert "Unreadable effective policy blocks approval" in section
+    assert "Unknown inheritance or edit permission does not block approval" in section
     assert "organization-administrator action" in section
-    assert "exact missing allowlist rules" in approval
+    assert "exact additive repository allowlist rules" in approval
+
+
+def test_bootstrap_reads_firewall_api_before_requesting_owner_evidence() -> None:
+    _, body = _parse_frontmatter(BOOTSTRAP_ROOT / "SKILL.md")
+    normalized = " ".join(body.split())
+    discovery = _read(BOOTSTRAP_ROOT / "references" / "discovery.md")
+    firewall = discovery.split("### Cloud-agent firewall inventory", 1)[1]
+    firewall = firewall.split("## Azure and Foundry inventory", 1)[0]
+
+    assert "GET /repos/{owner}/{repo}/copilot/cloud-agent/configuration" in body
+    assert "Do this before requesting screenshots or manual settings evidence" in normalized
+    assert "Do not ask the owner to repeat settings already returned by the API" in normalized
+    assert "gh api --method GET" in firewall
+    assert "X-GitHub-Api-Version: 2026-03-10" in firewall
+    assert "--jq '{is_firewall_enabled, is_firewall_recommended_allowlist_enabled, custom_allowlist}'" in firewall
+    assert "the GET endpoint does not establish write support" in normalized
+
+
+def test_bootstrap_plans_additive_rules_without_inheritance_questions() -> None:
+    _, body = _parse_frontmatter(BOOTSTRAP_ROOT / "SKILL.md")
+    normalized = " ".join(body.split())
+    discovery = " ".join(
+        _read(BOOTSTRAP_ROOT / "references" / "discovery.md").split()
+    )
+    reuse = " ".join(
+        _read(BOOTSTRAP_ROOT / "references" / "resource-reuse.md").split()
+    )
+    report = _read(BOOTSTRAP_ROOT / "templates" / "bootstrap-report.md")
+
+    assert "does not separately expose inherited organization rules" in discovery
+    assert "recommended or inherited rules may cover it" in discovery
+    assert "missing, null, or malformed fields as unknown" in discovery
+    assert "`401`, `403`, `404`, or server error" in discovery
+    assert "Do not ask for inherited rules" in discovery
+    assert "valid empty `custom_allowlist` with unknown inheritance is enough" in discovery
+    assert "show only exact, deduplicated additions" in discovery
+    assert "unknown inheritance and edit permission are context" in discovery
+    assert "not an unknown target resource" in discovery
+    assert "Do not ask the owner to resolve that inheritance" in reuse
+    assert "Unreadable repository configuration remains a blocker" in reuse
+    assert "Do not ask the owner to investigate inherited rules" in normalized
+    assert "Never probe write permission by mutating during discovery" in normalized
+    assert "do not dump unrelated MCP configuration" in discovery
+    assert "Repository configuration API outcome" in report
+    assert "Inherited coverage: `unknown` (not a prerequisite" in report
+    assert "Blocked approved action and required owner/administrator help: `none`" in report
+    assert "Relevant unresolved inheritance or rule-editing permissions" not in report
 
 
 def test_bootstrap_separates_firewall_configuration_from_runtime_evidence() -> None:
@@ -229,12 +276,38 @@ def test_bootstrap_separates_firewall_configuration_from_runtime_evidence() -> N
     report = _read(BOOTSTRAP_ROOT / "templates" / "bootstrap-report.md")
 
     assert "Apply approved cloud-agent allowlist additions" in apply
-    assert "verify saved effective coverage" in apply
+    assert "verify saved repository rules and firewall flags" in apply
+    assert "Unknown\n   inheritance is not a read-back prerequisite" in apply
     assert "report it as pending and stop" in normalized
     assert "do not prove access from agent-issued commands" in normalized
     assert "do not start optimization jobs or evaluation runs" in normalized
     assert "## Cloud-agent internet access" in report
     assert "Fresh cloud-session online preflight: `not attempted`" in report
+
+
+def test_bootstrap_gives_owners_exact_allowlist_additions_and_save_steps() -> None:
+    _, body = _parse_frontmatter(BOOTSTRAP_ROOT / "SKILL.md")
+    handoff = body.split("### Allowlist owner handoff", 1)[1]
+    handoff = " ".join(handoff.split("## Approved package-feed fallback", 1)[0].split())
+    owner_flow = " ".join(
+        _read(BOOTSTRAP_ROOT / "references" / "owner-flow.md").split()
+    )
+    report = _read(BOOTSTRAP_ROOT / "templates" / "bootstrap-report.md")
+
+    assert "copy-ready text block containing only the exact entries to add" in handoff
+    assert "one per line" in handoff
+    assert "no placeholders" in handoff
+    assert "each entry's purpose outside the block" in handoff
+    assert "`packagefeedproxy.microsoft.io` only when" in handoff
+    assert "cannot save them" in handoff
+    assert "Proposed - do not apply yet" in handoff
+    assert "After approval" in handoff
+    assert "**Add rule**, then click **Save changes**" in handoff
+    assert "confirmation alone is not saved-rule evidence" in handoff
+    assert "No allowlist additions required" in handoff
+    assert "exact entries in a copy-ready block" in owner_flow
+    assert "### Allowlist additions" in report
+    assert "Who must save the entries" in report
 
 
 def test_optimizer_instructions_fail_closed_before_direct_edits() -> None:

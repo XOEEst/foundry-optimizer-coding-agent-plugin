@@ -102,11 +102,27 @@ See [GitHub's Agents configuration guide](https://docs.github.com/en/copilot/how
 
 ## Cloud-agent internet access
 
-Bootstrap also reviews **Settings > Copilot > Internet access > Copilot cloud
-agent**. Its approval includes missing allowlist coverage for the Azure authority
+Bootstrap first reads the repository's firewall flags and custom allowlist
+through `GET /repos/{owner}/{repo}/copilot/cloud-agent/configuration`. It does
+not ask you to supply settings it can read automatically. Only relevant
+API failures require help obtaining the repository configuration. Unavailable
+inheritance and edit permission are recorded as unknown, not questions for you.
+The approval includes exact additive repository rules for the Azure authority
 (`login.microsoftonline.com` in Azure public cloud) and the hostname of the
 confirmed Foundry project endpoint. It preserves existing rules and keeps the
-firewall enabled; organization-locked changes require an authorized administrator.
+firewall enabled. An explicit allowance may duplicate inherited coverage; you do
+not need to investigate that redundancy. Approved UI-only changes may require
+owner assistance under **Settings > Copilot > Internet access > Copilot cloud
+agent**. Administrator help is requested only if a known restriction or an
+actual application failure blocks the approved changes.
+
+When manual changes are needed, bootstrap gives you a copy-ready **Allowlist
+additions** block with the exact entries, why each is needed, and the target
+repository. You do not need to work out the hostnames. Package-feed entries are
+included only when required. After the combined approval, open **Custom
+allowlist**, use **Add rule** for each listed entry, then **Save changes**.
+Leave existing rules and the firewall enabled; bootstrap reads the saved
+settings back. If no additions are needed, no manual action is requested.
 
 Saved rules and successful setup steps do not prove connectivity from
 agent-issued commands. The report tracks configuration separately from online

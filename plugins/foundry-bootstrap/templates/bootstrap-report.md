@@ -87,19 +87,41 @@ verified effective scope when reused. Do not record secrets.
 
 ## Cloud-agent internet access
 
-Record effective organization/repository policy, exact required destinations,
-their purpose, existing coverage, approved additions, and saved-rule evidence.
+Record observed repository settings, exact required destinations, their purpose,
+known coverage, approved repository additions, and saved-rule evidence.
 Use the confirmed project's hostname, not a sample endpoint. Preserve existing
-rules and list any pending administrator action.
+rules. Record unavailable inheritance and edit permission as `unknown`, without
+requesting an owner investigation or treating them as pending prerequisites.
 
-- Effective firewall mode and organization restrictions: `pending`
-- Required destinations and effective allowlist coverage: `pending`
+- Repository configuration API outcome and returned firewall fields: `pending`
+- Inherited coverage: `unknown` (not a prerequisite for additive repository rules)
+- Repository rule-edit permission: `unknown` (resolve when applying approved changes)
+- Known organization restrictions, if any: `not observed`
+- Required destinations and known coverage: `pending`
 - Approved additions and saved-rule evidence: `pending`
-- Pending administrator action: `pending`
+- Blocked approved action and required owner/administrator help: `none`
 - Fresh cloud-session online preflight: `not attempted`
 
 Saved rules and successful setup steps are not evidence of cloud-session Azure
 access. Record the session link and actual result only after online preflight.
+
+### Allowlist additions
+
+- Repository: `__GITHUB_REPOSITORY_SLUG__`
+- Where: **Settings > Copilot > Internet access > Copilot cloud agent > Custom allowlist**
+- Status: `Proposed - do not apply yet`
+- Who must save the entries: `pending`
+
+Render only the exact additions as a copy-ready text block, one entry per line.
+Use actual resolved values, not placeholders. Explain each entry's purpose
+outside the block and list already-covered entries separately. Include package
+hosts only when required. If nothing needs adding, replace the action/status
+with **No allowlist additions required**.
+
+After approval, for manual saving, tell the owner to use **Add rule** for each
+entry, then **Save changes**, preserving existing rules and keeping the firewall
+enabled. Record awaiting manual save or confirmed saved based on API read-back;
+an owner confirmation alone does not establish saved configuration.
 
 ## Created resources
 
