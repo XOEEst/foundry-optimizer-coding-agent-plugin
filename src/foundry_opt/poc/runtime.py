@@ -74,6 +74,7 @@ from foundry_opt.poc.registry_runtime import (
     resolve_registered_repository_context,
 )
 from foundry_opt.repository_contracts import RepositoryRegistry
+from foundry_opt.runtime_provenance import resolve_optimizer_distribution
 from foundry_opt.repository_selection import (
     RegistrySelection,
     protected_editable_patterns_for_repository,
@@ -653,7 +654,14 @@ def load_runtime_settings(
         raise RuntimeIntegrationError(
             "optimizer runtime requires registry v2 exact runtime provenance"
         )
-    distribution = registry.distribution
+    try:
+        distribution = resolve_optimizer_distribution(
+            registry,
+            environment=environment,
+            repository_root=paths.repository_root,
+        )
+    except (ValueError, OSError) as error:
+        raise RuntimeIntegrationError(str(error)) from error
     assert distribution.pin is not None
     assert distribution.uv_lock_sha256 is not None
     pin = SharedPin.from_document(

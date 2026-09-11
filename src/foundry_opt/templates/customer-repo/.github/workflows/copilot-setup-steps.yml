@@ -51,16 +51,24 @@ jobs:
         run: |
           set -euo pipefail
           repository="https://github.com/XOEEst/foundry-optimizer-coding-agent-plugin.git"
+          runtime_mode="pinned"
           commit="2ef6af071142281c9c9943ab165e15827bf97493"
           shared_root="$RUNNER_TEMP/foundry-opt-shared"
           rm -rf "$shared_root"
           git init "$shared_root"
           git -C "$shared_root" remote add origin "$repository"
-          git -C "$shared_root" fetch --depth=1 origin "$commit"
+          if [[ "$GITHUB_EVENT_NAME" == "dynamic" && "$runtime_mode" == "main" ]]; then
+            git -C "$shared_root" fetch --depth=1 origin refs/heads/main:refs/remotes/origin/main
+            commit="$(git -C "$shared_root" rev-parse refs/remotes/origin/main)"
+          else
+            git -C "$shared_root" fetch --depth=1 origin "$commit"
+          fi
           git -C "$shared_root" checkout --detach FETCH_HEAD
           resolved_commit="$(git -C "$shared_root" rev-parse HEAD)"
           test "$resolved_commit" = "$commit"
           echo "FOUNDRY_OPT_SHARED_ROOT=$shared_root" >>"$GITHUB_ENV"
+          echo "FOUNDRY_OPT_RUNTIME_MODE=$runtime_mode" >>"$GITHUB_ENV"
+          echo "FOUNDRY_OPT_RUNTIME_SHA=$commit" >>"$GITHUB_ENV"
           echo "FOUNDRY_OPT_PACKAGE_ROOT=$shared_root" >>"$GITHUB_ENV"
           echo "FOUNDRY_OPT_SKILL_SOURCE=$shared_root/plugins/foundry-agent-optimizer" >>"$GITHUB_ENV"
 
@@ -72,7 +80,11 @@ jobs:
             python3 -m pip install --disable-pip-version-check --no-input "uv==0.11.6"
           fi
           actual_lock="$(sha256sum "$FOUNDRY_OPT_PACKAGE_ROOT/uv.lock" | awk '{print $1}')"
-          test "$actual_lock" = "e2d5957b893c84498ba33301a959fbdc146fc2efb72d9fdf0e6d207b4c8341c9"
+          expected_lock="e2d5957b893c84498ba33301a959fbdc146fc2efb72d9fdf0e6d207b4c8341c9"
+          if [[ "$GITHUB_EVENT_NAME" == "dynamic" && "$FOUNDRY_OPT_RUNTIME_MODE" == "main" ]]; then
+            expected_lock="$(git -C "$FOUNDRY_OPT_SHARED_ROOT" show "$FOUNDRY_OPT_RUNTIME_SHA:uv.lock" | sha256sum | awk '{print $1}')"
+          fi
+          test "$actual_lock" = "$expected_lock"
           uv sync --frozen --project "$FOUNDRY_OPT_PACKAGE_ROOT"
           launcher_root="$HOME/.local/bin"
           mkdir -p "$launcher_root"
@@ -84,7 +96,9 @@ jobs:
           echo "$FOUNDRY_OPT_PACKAGE_ROOT/.venv/bin" >>"$GITHUB_PATH"
           project_skill_root="$GITHUB_WORKSPACE/.github/skills/foundry-agent-optimizer"
           test -f "$project_skill_root/SKILL.md"
-          diff -qr "$FOUNDRY_OPT_SKILL_SOURCE" "$project_skill_root"
+          if [[ "$FOUNDRY_OPT_RUNTIME_MODE" == "pinned" ]]; then
+            diff -qr "$FOUNDRY_OPT_SKILL_SOURCE" "$project_skill_root"
+          fi
 
       - name: Record trusted state paths
         shell: bash
@@ -99,7 +113,6 @@ jobs:
           echo "FOUNDRY_OPT_BROKER_SOCKET=$trusted_root/broker/github.sock" >>"$GITHUB_ENV"
           echo "FOUNDRY_OPT_STATE_ROOT=$trusted_root/jobs" >>"$GITHUB_ENV"
           echo "FOUNDRY_OPT_REGISTRY=$GITHUB_WORKSPACE/.foundry-opt/registry.yaml" >>"$GITHUB_ENV"
-          echo "FOUNDRY_OPT_RUNTIME_SHA=2ef6af071142281c9c9943ab165e15827bf97493" >>"$GITHUB_ENV"
           echo "FOUNDRY_OPT_RESUME_RECORD=$trusted_root/resume.json" >>"$GITHUB_ENV"
 
       - name: Validate registry and agent profiles

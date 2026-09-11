@@ -29,7 +29,11 @@ from foundry_opt.repository_selection import (
     verify_issue_evaluator_authority,
 )
 from foundry_opt.repository_contracts import RepositoryRegistry
-from foundry_opt.runtime_provenance import verify_runtime_checkout
+from foundry_opt.runtime_provenance import (
+    resolve_optimizer_distribution,
+    uses_copilot_main_runtime,
+    verify_runtime_checkout,
+)
 from foundry_opt.poc import runtime as poc_runtime
 from foundry_opt.poc.registry_runtime import (
     build_agent_runtime_contracts,
@@ -271,16 +275,26 @@ def validate_config(
     registry = RepositoryRegistry.from_document(
         registry_path.read_text(encoding="utf-8")
     )
+    distribution = resolve_optimizer_distribution(registry, repository_root=root)
+    main_runtime = uses_copilot_main_runtime(registry)
+    runtime_details = (
+        {"optimizer_skill_source": str(Path(os.environ["FOUNDRY_OPT_SKILL_SOURCE"]).resolve())}
+        if main_runtime else {}
+    )
     selections = _enabled_sidecar_selections(
         root,
         registry=registry,
         registry_path=registry_path,
     )
     checkout = (
-        verify_runtime_checkout(registry, shared_checkout)
+        verify_runtime_checkout(registry, shared_checkout, repository_root=root)
         if shared_checkout is not None
         else None
     )
+    if checkout is not None and shared_checkout is not None:
+        runtime_details["optimizer_skill_source"] = str(
+            (shared_checkout.resolve(strict=True) / checkout.optimizer_skill_path).resolve(strict=True)
+        )
     if selections is not None:
         _echo_json(
             {
@@ -290,10 +304,12 @@ def validate_config(
                 "repo_agent_ids": [
                     selection.repo_agent_id for selection in selections
                 ],
-                "shared_commit": registry.distribution.pin,
+                "shared_commit": distribution.pin,
                 "shared_uv_lock_sha256": (
-                    checkout.uv_lock_sha256 if checkout is not None else None
+                    distribution.uv_lock_sha256 if main_runtime
+                    else checkout.uv_lock_sha256 if checkout is not None else None
                 ),
+                **runtime_details,
                 "status": "valid",
             }
         )
@@ -314,10 +330,12 @@ def validate_config(
             "allowed_models": list(policy.allowed_models),
             "metadata_path": policy.metadata_path,
             "repository": metadata.repository_identity,
-            "shared_commit": registry.distribution.pin,
+            "shared_commit": distribution.pin,
             "shared_uv_lock_sha256": (
-                checkout.uv_lock_sha256 if checkout is not None else None
+                distribution.uv_lock_sha256 if main_runtime
+                else checkout.uv_lock_sha256 if checkout is not None else None
             ),
+            **runtime_details,
             "source_root": policy.source_root,
             "status": "valid",
         }
@@ -339,6 +357,7 @@ def preflight(
     registry = RepositoryRegistry.from_document(
         registry_path.read_text(encoding="utf-8")
     )
+    distribution = resolve_optimizer_distribution(registry, repository_root=root)
     selections = _enabled_sidecar_selections(
         root,
         registry=registry,
@@ -369,7 +388,7 @@ def preflight(
                 "repo_agent_ids": [
                     selection.repo_agent_id for selection in selections
                 ],
-                "shared_commit": registry.distribution.pin,
+                "shared_commit": distribution.pin,
                 "status": "ready",
             }
         )
@@ -404,7 +423,7 @@ def preflight(
                 "oidc": True,
                 "repo_agent_ids": [settings.metadata.agent_name],
                 "repository": settings.metadata.repository_identity,
-                "shared_commit": registry.distribution.pin,
+                "shared_commit": settings.pin.commit,
                 "status": "ready",
             }
         )
@@ -444,7 +463,7 @@ def preflight(
             ),
             "oidc": not offline,
             "repository": metadata.repository_identity,
-            "shared_commit": registry.distribution.pin,
+            "shared_commit": distribution.pin,
             "status": "ready",
         }
     )
@@ -1752,7 +1771,6 @@ def _load_job_snapshot(
     job_id: str | None,
     state_root: Path | None,
 ) -> tuple[JobState, OptimizeIssueRequest, str, _LoadedBinding | None]:
-    del repository
     resolved_job_id, loaded_binding = _resolve_job_reference(
         event=event,
         binding=binding,
@@ -1768,6 +1786,22 @@ def _load_job_snapshot(
     )
     state = JobStateStore(job_root / STATE_FILENAME).load()
     if _is_copilot_dynamic_event():
+        repository_root = _repository_from_environment(repository)
+        registry_path = Path(
+            os.environ.get(REGISTRY_PATH_ENV, repository_root / _REGISTRY_PATH)
+        )
+        registry = RepositoryRegistry.from_document(registry_path.read_text(encoding="utf-8"))
+        if uses_copilot_main_runtime(registry):
+            try:
+                distribution = resolve_optimizer_distribution(
+                    registry, repository_root=repository_root,
+                )
+            except (ValueError, OSError) as error:
+                raise RuntimeIntegrationError(str(error)) from error
+            if state.identity.shared_commit != distribution.pin:
+                raise RuntimeIntegrationError(
+                    "shared_commit does not match the session runtime commit"
+                )
         _, current_request = _load_runtime_issue_event(event, binding=loaded_binding)
         if current_request != request:
             raise RuntimeIntegrationError(

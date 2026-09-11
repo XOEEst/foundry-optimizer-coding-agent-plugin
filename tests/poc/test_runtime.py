@@ -56,6 +56,7 @@ from foundry_opt.poc.verification import (
     VerificationResolution,
 )
 from foundry_opt.verification import VerificationDatasetInput
+from tests.test_runtime_provenance import create_main_session
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -555,6 +556,42 @@ def test_build_hosted_definition_emits_exact_payload(tmp_path: Path) -> None:
     }
     with pytest.raises(RuntimeIntegrationError, match="selected model"):
         build_hosted_definition(settings.metadata, "missing-model")
+
+
+def test_main_runtime_identity_uses_session_commit_and_rejects_resume_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from foundry_opt.poc.runtime import _assert_identity_matches_settings
+
+    repository, _, environment = _create_runtime_repository(tmp_path)
+    registry, session = create_main_session(repository, monkeypatch)
+    environment.update(session)
+    paths = load_runtime_paths(repository, environment=environment, job_id="job-7")
+    settings = load_runtime_settings(paths, environment=environment)
+    identity = build_job_identity(
+        settings=settings, issue_number=7, route_fingerprint=_route(), job_id="job-7",
+    )
+    assert settings.pin.commit == session["FOUNDRY_OPT_RUNTIME_SHA"]
+    assert settings.pin.commit != registry.distribution.pin
+    assert identity.shared_commit == settings.pin.commit
+    _assert_identity_matches_settings(identity, settings)
+
+    runtime = Path(session["FOUNDRY_OPT_SHARED_ROOT"])
+    (runtime / "uv.lock").write_text("version = 2\n", encoding="utf-8")
+    _git(runtime, "add", ".")
+    _git(runtime, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+         "commit", "-m", "next main session")
+    next_sha = _git(runtime, "rev-parse", "HEAD")
+    _git(runtime, "update-ref", "refs/remotes/origin/main", next_sha)
+    environment["FOUNDRY_OPT_RUNTIME_SHA"] = next_sha
+    next_settings = load_runtime_settings(paths, environment=environment)
+    with pytest.raises(RuntimeIntegrationError, match="shared_commit"):
+        _assert_identity_matches_settings(identity, next_settings)
+
+    environment["GITHUB_EVENT_NAME"] = "push"
+    pinned_settings = load_runtime_settings(paths, environment=environment)
+    assert pinned_settings.pin.commit == registry.distribution.pin
+    assert pinned_settings.pin.uv_lock_sha256 == registry.distribution.uv_lock_sha256
 
 
 def test_controller_foundry_operations_baseline_create_eval_and_cleanup(

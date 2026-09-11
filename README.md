@@ -39,10 +39,12 @@ After pulling, switching branches, or editing the skill, `/skills reload` is
 enough. Re-add the directory only when the repository checkout path changes.
 Start a new conversation if the skill was already invoked before reloading.
 
-Bootstrap still prepares the complete optimization experience. The generated
-repository commits `foundry-agent-optimizer` as an exact project skill under
-`.github/skills`, while the Copilot setup workflow verifies it against the
-pinned runtime and launches the issue broker. Bootstrap also creates the
+Bootstrap still prepares the complete optimization experience. New repositories
+commit a stable `foundry-agent-optimizer` project skill loader under
+`.github/skills`. Copilot setup resolves the runtime's latest `main` once per
+session, records the exact SHA, and loads that revision's optimizer skill.
+Deployment retains its recorded runtime pin. Existing pinned configurations
+keep exact skill copies unless an upgrade is approved. Bootstrap also creates the
 optimizer issue form, Copilot environment, OIDC identity, and required workflow
 configuration. Repository owners do not install the optimizer skill manually.
 

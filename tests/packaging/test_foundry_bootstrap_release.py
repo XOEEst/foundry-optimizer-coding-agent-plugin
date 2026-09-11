@@ -107,6 +107,7 @@ def test_static_skill_has_release_contract_templates_schemas_and_no_executables(
         "templates/azure.yaml",
         "templates/bootstrap-report.md",
         "templates/copilot-setup-steps.yml",
+        "templates/optimizer-runtime-skill.md",
         "templates/foundry-opt-deploy.yml",
         "templates/foundry-opt.instructions.md",
         "templates/foundry-optimize-agent.yml",
@@ -156,6 +157,7 @@ def test_registry_and_sidecar_templates_render_to_current_contracts() -> None:
 
     assert registry.schema_version == 2
     assert registry.has_exact_runtime_provenance is True
+    assert registry.github.copilot_runtime == "main"
     assert registry.distribution.pin == "a" * 40
     assert registry.distribution.uv_lock_sha256 == "b" * 64
     assert registry.distribution.optimizer_skill_path == (

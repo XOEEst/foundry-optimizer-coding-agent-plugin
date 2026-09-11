@@ -82,6 +82,13 @@
           "type": "string",
           "minLength": 1
         },
+        "copilot_runtime": {
+          "enum": [
+            "pinned",
+            "main"
+          ],
+          "default": "pinned"
+        },
         "oidc_subject_prefix": {
           "type": [
             "string",

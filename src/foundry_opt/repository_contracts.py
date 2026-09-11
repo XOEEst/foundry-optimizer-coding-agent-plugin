@@ -216,6 +216,7 @@ class GitHubSettings(BootstrapDocument):
     optimizer_environment: str
     deployment_environment: str
     client_id_variable: str
+    copilot_runtime: Literal["pinned", "main"] = "pinned"
     oidc_subject_prefix: GitHubOidcSubjectPrefix | None = None
 
     @field_validator("oidc_subject_prefix")

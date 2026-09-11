@@ -44,6 +44,10 @@
 - Package path: `__FOUNDRY_OPT_PACKAGE_PATH__`
 - `uv.lock` SHA-256: `__FOUNDRY_OPT_UV_LOCK_SHA256__`
 - Optimizer skill path: `__FOUNDRY_OPT_OPTIMIZER_SKILL_PATH__`
+- Copilot runtime mode: `main` (record the approved mode; omitted settings mean pinned)
+- Session selection: latest upstream main resolved once at startup; actual SHA in session logs and job state
+- Project skill delivery: stable runtime loader for main mode; exact skill copy for pinned mode
+- Deployment/ordinary Actions provenance: recorded commit and lock digest above
 
 ## Repository patch
 

@@ -36,6 +36,7 @@ EXPECTED_BOOTSTRAP_FILES = {
     "templates/azure.yaml",
     "templates/bootstrap-report.md",
     "templates/copilot-setup-steps.yml",
+    "templates/optimizer-runtime-skill.md",
     "templates/foundry-opt-deploy.yml",
     "templates/foundry-opt.instructions.md",
     "templates/foundry-optimize-agent.yml",
@@ -79,7 +80,7 @@ def test_readme_installs_only_bootstrap_for_repository_owners() -> None:
     assert 'copilot skill add ".\\plugins\\foundry-bootstrap"' in readme
     assert "/skills reload" in readme
     assert "/skills info foundry-bootstrap" in readme
-    assert "commits `foundry-agent-optimizer` as an exact project skill" in readme
+    assert "stable `foundry-agent-optimizer` project skill loader" in readme
     assert 'copilot skill add ".\\plugins"' not in readme
     assert "dist\\foundry-bootstrap-skill" not in readme
 
@@ -153,6 +154,23 @@ def test_bootstrap_commits_optimizer_as_a_project_skill() -> None:
     assert ".github/skills/foundry-agent-optimizer" in body
     assert "copy the exact optimizer skill from the verified runtime checkout" in normalized
     assert "Do not rely on setup-time installation under the runner home directory" in normalized
+    assert "github.copilot_runtime: main" in normalized
+    assert "Do not rewrite the customer registry, project skill, Git index, or commits" in normalized
+
+
+def test_main_runtime_loader_reads_only_verified_session_skill() -> None:
+    loader = _read(BOOTSTRAP_ROOT / "templates" / "optimizer-runtime-skill.md")
+    setup = _read(BOOTSTRAP_ROOT / "templates" / "copilot-setup-steps.yml")
+    assert "name: foundry-agent-optimizer" in loader
+    assert "foundry-opt validate-config" in loader
+    assert "optimizer_skill_source" in loader
+    assert "stop\nwithout editing" in loader
+    assert 'runtime_mode="main"' in setup
+    assert "refs/heads/main:refs/remotes/origin/main" in setup
+    assert 'FOUNDRY_OPT_RUNTIME_SHA=$runtime_commit' in setup
+    assert 'FOUNDRY_OPT_RUNTIME_SHA=__FOUNDRY_OPT_COMMIT__' not in setup
+    assert 'if [[ "$runtime_mode" == "pinned" ]]' in setup
+    assert "uv sync --frozen" in setup
 
 
 def test_copilot_setup_launches_broker_and_verifies_project_skill() -> None:
@@ -450,6 +468,7 @@ def test_static_template_map_and_release_contract_are_complete() -> None:
         "azure.yaml",
         "foundry-opt-deploy.yml",
         "copilot-setup-steps.yml",
+        "optimizer-runtime-skill.md",
         "foundry-opt.instructions.md",
         "foundry-optimize-agent.yml",
         "bootstrap-report.md",

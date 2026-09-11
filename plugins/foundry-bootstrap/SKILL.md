@@ -19,10 +19,11 @@ JSON schemas only. Do not look for or run a bundled bootstrap program.
   commands.
 - Render every proposed repository file in the coding session's staging area.
   Do not modify the repository or a remote service during discovery.
-- Commit the exact optimizer project skill under
+- Commit the optimizer project skill entry point under
   `.github/skills/foundry-agent-optimizer` so Copilot cloud agent discovers it
-  before processing an issue. Do not rely on setup-time installation under the
-  runner home directory.
+  before processing an issue. For main-tracking sessions use the stable runtime
+  loader; for pinned sessions use the exact runtime skill copy. Do not rely on
+  setup-time installation under the runner home directory.
 - Present one combined approval request containing the exact repository diffs,
   exact remote resources to reuse or create, local commit plan, and deployment
   plan.
@@ -235,6 +236,11 @@ entries.
      inspected repository and refs plus the instruction for the plugin
      maintainer to publish a compatible runtime. Do not ask the owner to supply
      runtime provenance or choose among provenance sources.
+   - For main-tracking setup, also require the fetched runtime to accept
+     `github.copilot_runtime: main` in the staged registry. Fetch the configured
+     runtime repository's actual `refs/heads/main` during discovery and confirm
+     that it supports session-resolved provenance and the loader contract. An
+     older compatible offline-only runtime is not sufficient for this mode.
 2. Read all files under [references](references/).
 3. Use files under [templates](templates/) as editable starting points, not as
    blind replacements.
@@ -242,6 +248,48 @@ entries.
 
 `release.json` intentionally does not select an Azure Developer CLI version or
 an `azure.ai.agents` extension version.
+
+## Runtime selection at Copilot startup
+
+For newly bootstrapped repositories, configure `github.copilot_runtime: main`.
+Include that choice in the combined approval: each fresh Copilot cloud session
+will trust the latest commit on the configured runtime repository's `main`,
+including future code, dependency, and optimizer-skill changes without a
+customer-repository repin. This does not mean the latest successful CI run.
+Preserve an existing explicit pinned choice unless its change is approved;
+an omitted setting remains `pinned` for backwards compatibility.
+For an older generated setup with no mode, propose the main-mode migration in
+the combined approval, including its loader and workflow changes. Ensure the
+retained pin can parse the new setting; include a one-time compatible repin
+when necessary so ordinary Actions and deployment do not use an older parser.
+
+Setup fetches `refs/heads/main` once per fresh `dynamic` session into a separate
+runner-temporary checkout, detaches at the resolved SHA, and derives the
+`uv.lock` digest from that same tree. Install with `uv sync --frozen`. Record
+the actual SHA in setup output and `FOUNDRY_OPT_RUNTIME_SHA`; export the exact
+checkout, package, and skill paths. Never cache away this branch-resolution
+step, fetch again during job commands, or silently fall back when `main` is
+unavailable or incompatible.
+
+Keep `distribution.pin` and its lock digest as recorded immutable provenance
+for deployment and ordinary Actions/local execution. Do not rewrite the
+customer registry, project skill, Git index, or commits at session startup.
+Runtime validation resolves the approved session provenance in memory. Job
+state records the selected SHA and rejects resuming with a different runtime
+commit; an existing session stays on its original SHA even if `main` advances.
+
+For main mode, commit [optimizer-runtime-skill.md](templates/optimizer-runtime-skill.md)
+as `.github/skills/foundry-agent-optimizer/SKILL.md`. This stable loader validates
+the runtime checkout, reads the optimizer skill from its verified source path,
+and follows that revision's instructions and references. Remove only a previous
+exact skill copy's files as part of the approved loader migration. Do not replace
+tracked skill files during setup or rely on a home-directory skill install.
+
+For pinned mode, copy the exact optimizer skill from the verified runtime
+checkout and set the setup template's `runtime_mode="pinned"`. The workflow mode
+and registry setting must agree. The recorded pin, lock digest, and recursive
+skill comparison remain authoritative in that mode. Existing deployments do
+not opt into main tracking when Copilot does.
 
 ## GitHub Agents variables
 
@@ -501,8 +549,9 @@ In the session staging area:
 - create or patch `azure.yaml`
 - create or patch `.github/workflows/foundry-opt-deploy.yml`
 - create or patch `.github/workflows/copilot-setup-steps.yml`
-- copy the exact optimizer skill from the verified runtime checkout to
-  `.github/skills/foundry-agent-optimizer`, preserving every file and byte
+- create the main-mode project skill loader, or copy the exact optimizer skill
+  from the verified runtime checkout to `.github/skills/foundry-agent-optimizer`
+  for pinned mode, preserving every file and byte
 - create or patch `.github/instructions/foundry-opt.instructions.md`
 - create or patch
   `.github/ISSUE_TEMPLATE/foundry-optimize-agent.yml`
@@ -512,9 +561,10 @@ In the session staging area:
 
 Preserve unrelated content in existing files. Never silently replace an
 existing workflow, environment, identity, Foundry target, or agent definition.
-Treat `.github/skills/foundry-agent-optimizer` as an exact runtime-derived
-directory: compare it recursively with the verified source and replace only
-that skill directory when updating its pinned runtime.
+Treat `.github/skills/foundry-agent-optimizer` as either the stable loader or an
+exact runtime-derived directory according to the approved mode. For pinned
+mode, compare it recursively with the verified source. Replace only that skill
+directory during an approved mode change.
 Validate YAML, validate registry and sidecars with the bundled schemas, and
 search the staged tree for unresolved `__TOKEN__` values and secrets.
 Re-run `git check-ignore -v --no-index` against every planned tracked path after
@@ -597,7 +647,8 @@ Show:
   unchanged
 - actual tool versions already present and any approved install/upgrade action
 - exact Python and NuGet sources and any persistent source-configuration change
-- exact optimizer project-skill source, destination, and recursive diff
+- Copilot runtime mode, its upstream repository and trust implications, the
+  retained deployment pin, and the project-skill loader or exact-copy diff
 - exact staged file diffs
 - static patch SHA-256 and the successful index-aware preflight
 - any approved managed-identity client-ID late-binding rule, including its

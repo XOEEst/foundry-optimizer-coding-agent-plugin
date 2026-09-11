@@ -68,6 +68,15 @@ The skill performs read-only inspection:
 
 Conflicting existing remote resources must be resolved before approval.
 
+New repositories default to `github.copilot_runtime: main`: Copilot setup
+fetches the runtime's latest main at each fresh session, then keeps that exact
+SHA for the session. A stable project skill loader reads the matching optimizer
+instructions without changing tracked files. This trusts future upstream main
+changes, including dependencies, and is included in the approval. Deployment
+and normal Actions runs retain the recorded pin. Existing omitted/pinned
+settings are not silently migrated; bootstrap must show that mode change.
+See [Distribution](../distribution.md).
+
 Repository branch protection is optional and its absence does not block
 bootstrap. Deployment-environment branch restrictions are reviewed separately;
 new environments are unrestricted unless the owner explicitly approves a

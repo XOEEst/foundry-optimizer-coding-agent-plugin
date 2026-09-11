@@ -19,14 +19,21 @@ ordinary reviewed patch content.
 | `azure.yaml` | `azure.yaml` |
 | `foundry-opt-deploy.yml` | `.github/workflows/foundry-opt-deploy.yml` |
 | `copilot-setup-steps.yml` | `.github/workflows/copilot-setup-steps.yml` |
+| `optimizer-runtime-skill.md` | `.github/skills/foundry-agent-optimizer/SKILL.md` for main mode |
 | `foundry-opt.instructions.md` | `.github/instructions/foundry-opt.instructions.md` |
 | `foundry-optimize-agent.yml` | `.github/ISSUE_TEMPLATE/foundry-optimize-agent.yml` |
 | `bootstrap-report.md` | `.foundry-opt/bootstrap-report.md` |
 
-Copy the optimizer directory named by `release.json.optimizer_skill_path` from
-the verified runtime checkout to
-`.github/skills/foundry-agent-optimizer`. It is runtime-derived content rather
-than an editable bootstrap template.
+New repositories use `github.copilot_runtime: main` and the stable optimizer
+loader. Copilot setup resolves main once per session and loads the matching
+runtime skill without changing tracked files. The registry's exact pin remains
+for deployment and non-cloud-session execution.
+
+For explicit pinned mode, set `github.copilot_runtime: pinned` and the workflow's
+`runtime_mode="pinned"`, then copy the optimizer directory named by
+`release.json.optimizer_skill_path` from the verified runtime checkout to
+`.github/skills/foundry-agent-optimizer` instead of using the loader. Existing
+registries without a mode retain pinned behavior.
 
 Replace every `__TOKEN__` from discovered and approved values. Duplicate the
 sidecar and `azure.ai.agent` service for each selected agent. Reuse one existing

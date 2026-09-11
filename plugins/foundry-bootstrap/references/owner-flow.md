@@ -33,7 +33,8 @@ session staging area and shows one review containing:
 4. exact repository diffs
 5. exact patch SHA-256 and successful `git apply --check --index` result
 6. cloud resources that exactly match and will be reused
-7. missing cloud resources that will be created
+7. missing cloud resources that will be created, plus the Copilot runtime mode
+   and any change from pinned execution to tracking the runtime's main branch
 8. conflicts that prevent safe progress
 9. the exact local commit and ordered selected-service `azd deploy` plan
 
@@ -85,7 +86,11 @@ confirmation. If there are no additions, no manual action is requested.
   project while preserving other project and agent services.
 - GitHub workflows use OIDC and the reviewed identity without static Azure
   credentials.
-- The optimizer skill and runtime are installed from exact retained provenance.
+- Main-tracking Copilot sessions resolve the latest upstream main once and load
+  the matching runtime skill through a committed stable loader. The actual
+  runtime SHA stays fixed within the session; deployment retains its saved pin.
+- Existing pinned repositories keep their exact-copy behavior unless a mode
+  migration is approved.
 - A local commit is created and deployed with `azd deploy`.
 - No branch or tag is pushed.
 - `.foundry-opt/bootstrap-report.md` records what happened and the actual tool

@@ -23,6 +23,9 @@ within policy.
 - Invoke `/foundry-agent-optimizer` before editing any selected agent source.
   If the skill is unavailable, stop without editing and report that the
   project skill was not discovered.
+- In main-tracking mode, follow the project loader to the verified session
+  runtime's skill. Keep its resolved SHA for the entire job; do not change
+  registry pins, fetch a newer runtime mid-job, or commit session setup files.
 - `foundry-opt job start` must succeed before any source edit. A failed
   preflight, missing broker socket, or missing state root is a setup failure,
   not permission to continue manually.

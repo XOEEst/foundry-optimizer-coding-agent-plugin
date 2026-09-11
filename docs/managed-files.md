@@ -21,9 +21,12 @@ The validation workflow is optional.
 Existing unrelated files and unrelated dirty paths are preserved and are not
 staged into the bootstrap commit.
 
-The optimizer project skill is copied byte-for-byte from the exact runtime
-revision. The setup workflow verifies that committed directory and launches the
-broker/state paths required by Copilot cloud optimize jobs.
+For main-tracking sessions, the optimizer project skill is a stable loader
+that reads instructions from the verified session runtime. For pinned mode it
+is copied byte-for-byte from the recorded runtime revision. Setup never
+rewrites either project skill or the registry; it selects the session runtime
+outside the checkout and launches the broker/state paths required by Copilot
+cloud optimize jobs.
 
 ## Removed legacy artifacts
 

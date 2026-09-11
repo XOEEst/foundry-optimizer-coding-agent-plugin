@@ -16,9 +16,11 @@ unchanged.
 The legacy single-agent pin files are migration input, not the active
 optimize-job contract.
 
-Bootstrap commits the exact optimizer project skill at
-`.github/skills/foundry-agent-optimizer`. Copilot setup verifies it against the
-pinned runtime, creates trusted job-state paths, and launches the issue broker
+Bootstrap commits the optimizer project skill at
+`.github/skills/foundry-agent-optimizer`: a stable loader for main tracking, or an
+exact runtime skill copy for pinned mode. Main-tracking setup resolves one
+upstream main commit per session; job identity records that exact shared commit.
+Setup validates the runtime, creates trusted job-state paths, and launches the issue broker
 for the cloud agent's `dynamic` event. If skill discovery or broker launch
 fails, the cloud agent must stop without editing.
 

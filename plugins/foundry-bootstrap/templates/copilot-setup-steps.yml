@@ -38,11 +38,12 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Fetch and verify the exact optimizer runtime
+      - name: Resolve and install the session optimizer runtime
         shell: bash
         run: |
           set -euo pipefail
           runtime_repository="__FOUNDRY_OPT_REPOSITORY__"
+          runtime_mode="main"
           runtime_commit="__FOUNDRY_OPT_COMMIT__"
           package_path="__FOUNDRY_OPT_PACKAGE_PATH__"
           expected_lock_sha256="__FOUNDRY_OPT_UV_LOCK_SHA256__"
@@ -52,7 +53,12 @@ jobs:
           rm -rf "$shared_root"
           git init "$shared_root"
           git -C "$shared_root" remote add origin "$runtime_repository"
-          git -C "$shared_root" fetch --depth=1 origin "$runtime_commit"
+          if [[ "$GITHUB_EVENT_NAME" == "dynamic" && "$runtime_mode" == "main" ]]; then
+            git -C "$shared_root" fetch --depth=1 origin refs/heads/main:refs/remotes/origin/main
+            runtime_commit="$(git -C "$shared_root" rev-parse refs/remotes/origin/main)"
+          else
+            git -C "$shared_root" fetch --depth=1 origin "$runtime_commit"
+          fi
           git -C "$shared_root" checkout --detach FETCH_HEAD
           test "$(git -C "$shared_root" rev-parse HEAD)" = "$runtime_commit"
 
@@ -62,21 +68,33 @@ jobs:
             package_root="$shared_root/$package_path"
           fi
           actual_lock_sha256="$(sha256sum "$package_root/uv.lock" | cut -d' ' -f1)"
+          if [[ "$GITHUB_EVENT_NAME" == "dynamic" && "$runtime_mode" == "main" ]]; then
+            lock_path="${package_path#./}/uv.lock"
+            [[ "$package_path" != "." ]] || lock_path="uv.lock"
+            expected_lock_sha256="$(git -C "$shared_root" show "$runtime_commit:$lock_path" | sha256sum | cut -d' ' -f1)"
+          fi
           test "$actual_lock_sha256" = "$expected_lock_sha256"
           test -f "$shared_root/$optimizer_skill_path/SKILL.md"
 
           uv sync --frozen --project "$package_root"
+          echo "FOUNDRY_OPT_SHARED_ROOT=$shared_root" >>"$GITHUB_ENV"
           echo "FOUNDRY_OPT_PACKAGE_ROOT=$package_root" >>"$GITHUB_ENV"
+          echo "FOUNDRY_OPT_SKILL_SOURCE=$shared_root/$optimizer_skill_path" >>"$GITHUB_ENV"
+          echo "FOUNDRY_OPT_RUNTIME_SHA=$runtime_commit" >>"$GITHUB_ENV"
           echo "$package_root/.venv/bin" >>"$GITHUB_PATH"
+          echo "Optimizer runtime: $runtime_repository@$runtime_commit (mode: $runtime_mode)"
 
           project_skill_root="$GITHUB_WORKSPACE/.github/skills/foundry-agent-optimizer"
           test -f "$project_skill_root/SKILL.md"
-          diff -qr "$shared_root/$optimizer_skill_path" "$project_skill_root"
+          if [[ "$runtime_mode" == "pinned" ]]; then
+            diff -qr "$shared_root/$optimizer_skill_path" "$project_skill_root"
+          fi
 
       - name: Validate repository contracts
         shell: bash
         run: |
           set -euo pipefail
+          foundry-opt validate-config --repository . --shared-checkout "$FOUNDRY_OPT_SHARED_ROOT"
           foundry-opt preflight --repository . --offline
 
       - name: Record trusted optimizer state paths
@@ -92,7 +110,6 @@ jobs:
           echo "FOUNDRY_OPT_BROKER_SOCKET=$trusted_root/broker/github.sock" >>"$GITHUB_ENV"
           echo "FOUNDRY_OPT_STATE_ROOT=$trusted_root/jobs" >>"$GITHUB_ENV"
           echo "FOUNDRY_OPT_REGISTRY=$GITHUB_WORKSPACE/.foundry-opt/registry.yaml" >>"$GITHUB_ENV"
-          echo "FOUNDRY_OPT_RUNTIME_SHA=__FOUNDRY_OPT_COMMIT__" >>"$GITHUB_ENV"
 
       - name: Detect Copilot cloud-agent context
         id: job-context

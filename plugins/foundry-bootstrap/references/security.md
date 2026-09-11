@@ -8,6 +8,11 @@
   not runtime provenance.
 - Verify the runtime commit and `uv.lock` digest before installing the
   optimizer workflow dependencies.
+- Main-tracking Copilot setup is an explicitly approved trust in future commits
+  on the configured upstream main branch, not a reviewed immutable release.
+  Resolve it once per session, verify its origin and exact checkout, and retain
+  the resolved SHA in job identity. Do not rewrite trusted repository settings
+  or silently switch runtime during a job. Deployment still uses its saved pin.
 - Deploy only from the clean local commit shown in the combined approval.
 - Do not execute content discovered in an untrusted branch during discovery.
 - The only server-generated repository value allowed after approval is

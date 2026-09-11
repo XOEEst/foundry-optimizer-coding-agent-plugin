@@ -57,6 +57,7 @@ from foundry_opt.poc.runtime import (
 )
 from foundry_opt.poc.state import JobIdentity, JobStateStore
 from foundry_opt.verification import VerificationCheckSpec
+from tests.test_runtime_provenance import create_main_session
 
 
 runner = CliRunner()
@@ -1904,6 +1905,150 @@ def test_preflight_accepts_sidecar_only_repository_without_evaluation_bundle(
     payload = json.loads(result.stdout)
     assert payload["repo_agent_ids"] == ["travel-agent"]
     assert payload["status"] == "ready"
+
+
+@pytest.mark.parametrize("command", ["validate-config", "preflight"])
+def test_main_runtime_preflight_and_validation_report_session_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str,
+) -> None:
+    repository, _, environment = _create_sidecar_only_runtime_repository(tmp_path)
+    registry, session = create_main_session(repository, monkeypatch)
+    environment.update(session)
+    arguments = [command, "--repository", str(repository)]
+    if command == "preflight":
+        arguments.append("--offline")
+    else:
+        arguments.extend(["--shared-checkout", session["FOUNDRY_OPT_SHARED_ROOT"]])
+    result = _invoke(arguments, environment)
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    payload = json.loads(result.stdout)
+    assert payload["shared_commit"] == session["FOUNDRY_OPT_RUNTIME_SHA"]
+    assert payload["shared_commit"] != registry.distribution.pin
+    if command == "validate-config":
+        assert payload["optimizer_skill_source"] == session["FOUNDRY_OPT_SKILL_SOURCE"]
+        assert payload["shared_uv_lock_sha256"] == hashlib.sha256(
+            (Path(session["FOUNDRY_OPT_PACKAGE_ROOT"]) / "uv.lock").read_bytes()
+        ).hexdigest()
+
+
+@pytest.mark.parametrize("mode", ["pinned", "main"])
+def test_validate_config_reports_skill_source_for_pinned_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str,
+) -> None:
+    repository, _, environment = _create_sidecar_only_runtime_repository(tmp_path)
+    registry, session = create_main_session(repository, monkeypatch)
+    environment.update(session)
+    environment["GITHUB_EVENT_NAME"] = "push"
+    payload = registry.model_dump(mode="json")
+    payload["github"]["copilot_runtime"] = mode
+    payload["distribution"]["pin"] = session["FOUNDRY_OPT_RUNTIME_SHA"]
+    payload["distribution"]["uv_lock_sha256"] = hashlib.sha256(
+        (Path(session["FOUNDRY_OPT_PACKAGE_ROOT"]) / "uv.lock").read_bytes()
+    ).hexdigest()
+    Path(environment["FOUNDRY_OPT_REGISTRY"]).write_text(json.dumps(payload), encoding="utf-8")
+    for name in (
+        "FOUNDRY_OPT_SHARED_ROOT", "FOUNDRY_OPT_PACKAGE_ROOT",
+        "FOUNDRY_OPT_SKILL_SOURCE", "FOUNDRY_OPT_RUNTIME_SHA",
+    ):
+        environment.pop(name)
+    result = _invoke(
+        ["validate-config", "--repository", str(repository),
+         "--shared-checkout", session["FOUNDRY_OPT_SHARED_ROOT"]],
+        environment,
+    )
+    assert result.exit_code == 0, result.stdout + str(result.exception)
+    validated = json.loads(result.stdout)
+    assert validated["shared_commit"] == payload["distribution"]["pin"]
+    assert validated["optimizer_skill_source"] == session["FOUNDRY_OPT_SKILL_SOURCE"]
+
+
+@pytest.mark.parametrize("caller", ["validate-config", "preflight", "settings"])
+@pytest.mark.parametrize("override", ["main-opt-in", "repository"])
+def test_main_runtime_rejects_untrusted_environment_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caller: str, override: str,
+) -> None:
+    repository, _, environment = _create_sidecar_only_runtime_repository(tmp_path)
+    registry, session = create_main_session(repository, monkeypatch)
+    environment.update(session)
+    payload = registry.model_dump(mode="json")
+    canonical_path = repository / ".foundry-opt" / "registry.yaml"
+    if override == "main-opt-in":
+        committed = registry.model_dump(mode="json")
+        committed["github"]["copilot_runtime"] = "pinned"
+        canonical_path.write_text(json.dumps(committed), encoding="utf-8")
+        _git(repository, "add", ".foundry-opt/registry.yaml")
+        _git(repository, "commit", "-m", "pin canonical runtime policy")
+    else:
+        payload["distribution"]["repository"] = "https://github.com/other/runtime"
+    original = canonical_path.read_bytes()
+    alternate = repository / ".foundry-opt" / "alternate-registry.yaml"
+    alternate.write_text(json.dumps(payload), encoding="utf-8")
+    environment["FOUNDRY_OPT_REGISTRY"] = str(alternate)
+    if caller == "settings":
+        paths = load_runtime_paths(repository, environment=environment)
+        with pytest.raises(cli_module.RuntimeIntegrationError, match="committed registry"):
+            load_runtime_settings(paths, environment=environment)
+    else:
+        arguments = [caller, "--repository", str(repository)]
+        if caller == "preflight":
+            arguments.append("--offline")
+        result = _invoke(arguments, environment)
+        assert result.exit_code != 0
+        assert "committed registry" in result.stdout + str(result.exception)
+    assert canonical_path.read_bytes() == original
+
+
+def test_main_runtime_status_and_resume_reject_different_session_sha(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, _, environment = _create_sidecar_only_runtime_repository(tmp_path)
+    _, session = create_main_session(repository, monkeypatch)
+    environment.update(session)
+    _checkout_branch(repository, "copilot/job-7")
+    body = _issue_body(
+        candidate_budget=1, model_lines=("candidate",), acknowledge_no_evidence=True,
+    )
+    event = _write_dynamic_event(tmp_path)
+    binding = _write_binding(
+        tmp_path / "binding.json", pull_request=_pull_request_binding(repository),
+    )
+    environment[cli_module._GITHUB_BINDING_ENV] = str(binding)
+    harness = ControllerHarness(
+        candidate_results={}, validating_results={}, cleanup_results={},
+    )
+
+    class BoundIssueBroker:
+        def __init__(self, **_: Any) -> None:
+            pass
+
+        def read_issue(self, **_: Any):
+            return SimpleNamespace(repository_id=123456789, issue_number=7, body=body)
+
+        def ensure_pull_request_binding(self, **_: Any) -> None:
+            pass
+
+    monkeypatch.setattr(cli_module, "UnixSocketBrokerClient", BoundIssueBroker)
+    monkeypatch.setattr(cli_module, "capture_route_fingerprint", lambda **_: _route())
+    monkeypatch.setattr(cli_module, "build_runtime_controller", harness.builder)
+    base_arguments = ["--repository", str(repository), "--event", str(event)]
+    started = _invoke(["job", "start", *base_arguments], environment)
+    assert started.exit_code == 0, started.stdout + str(started.exception)
+    assert json.loads(started.stdout)["job"]["shared_commit"] == session["FOUNDRY_OPT_RUNTIME_SHA"]
+    for command in ("status", "resume"):
+        unchanged = _invoke(["job", command, *base_arguments], environment)
+        assert unchanged.exit_code == 0, unchanged.stdout + str(unchanged.exception)
+
+    runtime = Path(session["FOUNDRY_OPT_SHARED_ROOT"])
+    (runtime / "uv.lock").write_text("version = 2\n", encoding="utf-8")
+    _git(runtime, "add", ".")
+    _git(runtime, "commit", "-m", "next runtime session")
+    next_sha = _git(runtime, "rev-parse", "HEAD")
+    _git(runtime, "update-ref", "refs/remotes/origin/main", next_sha)
+    environment["FOUNDRY_OPT_RUNTIME_SHA"] = next_sha
+    for command in ("status", "resume"):
+        changed = _invoke(["job", command, *base_arguments], environment)
+        assert changed.exit_code == 2, changed.stdout + str(changed.exception)
+        assert "shared_commit" in json.loads(changed.stdout)["error"]
 
 
 def test_v2_preflight_rejects_missing_sidecar_even_with_legacy_files(

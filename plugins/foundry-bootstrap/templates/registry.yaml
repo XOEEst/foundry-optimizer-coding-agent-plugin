@@ -9,6 +9,7 @@ distribution:
   optimizer_skill_path: "__FOUNDRY_OPT_OPTIMIZER_SKILL_PATH__"
 github:
   schema_version: 1
+  copilot_runtime: main
   optimizer_environment: copilot
   deployment_environment: foundry-production
   client_id_variable: AZURE_OPTIMIZER_CLIENT_ID
