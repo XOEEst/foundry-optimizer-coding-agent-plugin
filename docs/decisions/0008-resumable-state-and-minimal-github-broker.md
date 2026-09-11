@@ -12,6 +12,22 @@ This ADR originated in the earlier pre-public optimizer lineage and is still ref
 
 Persist optimize-job state as trusted, atomic JSON with generation checks, digests, receipts, and runtime identity. Keep GitHub interaction behind a minimal broker seam that binds the exact issue and pull request, upserts redacted issue comments by stable markers, and performs only the narrow writes required by the optimize job.
 
+The closed `issue.read` operation supplies the bound issue body when a Copilot
+dynamic event contains repository and input metadata but no top-level issue.
+Callers supply only a request ID and timeout; the broker uses its own credential
+for exactly `GET /repos/{bound owner}/{bound repo}/issues/{bound number}`.
+It checks the issue number, API/HTML/repository URLs, any returned repository
+identity, and rejects pull-request-shaped responses. The typed `IssueReadReceipt`
+contains the bound `repository_id`, `issue_number`, and nonblank, size-bounded,
+token-redacted `body`; the caller independently compares the receipt identity
+with its loaded binding. This is not an arbitrary GET or snapshot interface.
+
+When the binding carries an `issue_author_id`, reads verify the fetched author's
+immutable GitHub ID before returning the body. Legacy author-bearing bindings
+without this ID instead require a case-insensitive match of the fetched author
+login to the bound login. This preserves their compatibility, but cannot detect
+login reuse; bindings with immutable IDs provide the stronger identity check.
+
 ## Consequences
 
 Benefits:
@@ -24,6 +40,7 @@ Tradeoffs:
 
 - The system must maintain sidecar, receipt, and digest compatibility over time.
 - Broker availability becomes an explicit runtime dependency when evidence or closure work is required.
+- Broker availability is also required to load the bound issue body from a dynamic event.
 - The append-only evidence model is simpler than a richer dashboard, but less expressive for arbitrary reporting.
 
 ## Alternatives considered

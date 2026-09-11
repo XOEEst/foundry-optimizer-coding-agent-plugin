@@ -6,6 +6,14 @@ issues, and watch the evidence that comes back.
 Assign the issue to standard Copilot. The setup workflow and repository
 instructions direct it to the installed optimizer skill and CLI.
 
+Copilot cloud sessions resolve the issue through the setup-created broker
+binding; owners do not need to create an issue-event JSON file or pass a copied
+issue body. If a pinned older runtime reports `event issue is invalid` for a
+`dynamic` event, update the exact runtime pin and matching setup workflow.
+Do not bypass preflight or unset event context to force the job to run.
+Editing the issue after a job has started blocks resumption when its parsed
+request no longer matches the recorded request.
+
 If your team explicitly installs the optional custom-agent example, you may
 select that profile from the assignment dropdown instead. It is not selected
 automatically.

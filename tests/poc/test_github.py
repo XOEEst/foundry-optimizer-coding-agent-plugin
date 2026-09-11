@@ -111,6 +111,14 @@ class FakeGitHubAPI:
         self.pr_head_sha = PULL_REQUEST_HEAD_SHA
         self.requests: list[tuple[str, str]] = []
         self.authorization_headers: list[str | None] = []
+        self.issue_payload: dict[str, Any] = {
+            "number": ISSUE_BINDING.issue_number,
+            "url": REPOSITORY.issue_api_url(ISSUE_BINDING.issue_number),
+            "html_url": f"{REPOSITORY.repository_html_url}/issues/41",
+            "repository_url": REPOSITORY.repository_api_url,
+            "user": {"id": 12345, "login": "issue-author"},
+            "body": "### Optimize job\n\nRun the bound agent optimization.\n",
+        }
         self.pr_payload_transform: Callable[[dict[str, Any]], dict[str, Any]] | None = None
         self.redirect_target: dict[tuple[str, str], str] = {}
         self.timeline_pull_request_numbers: list[int] = [
@@ -191,6 +199,10 @@ class FakeGitHubAPI:
             pull_request_path = REPOSITORY.pull_request_api_path(
                 PULL_REQUEST_BINDING.pull_request_number
             )
+            if key == ("GET", "/repos/contoso/travel-agent/issues/41"):
+                assert not request.url.query
+                assert not request.content
+                return httpx.Response(200, json=self.issue_payload, request=request)
             if request.method == "GET" and request.url.path == comments_path:
                 page = int(request.url.params.get("page", "1"))
                 per_page = int(request.url.params.get("per_page", str(github.COMMENTS_PER_PAGE)))
@@ -276,14 +288,257 @@ class FakeGitHubAPI:
 def _backend(
     fake: FakeGitHubAPI,
     *,
+    issue_binding: github.IssueBinding = ISSUE_BINDING,
     pull_request_binding: github.PullRequestBinding | None = PULL_REQUEST_BINDING,
 ) -> github.GitHubRestBackend:
     return github.GitHubRestBackend(
-        issue_binding=ISSUE_BINDING,
+        issue_binding=issue_binding,
         pull_request_binding=pull_request_binding,
         token=TOKEN,
         transport=fake.transport(),
     )
+
+
+def test_read_issue_fetches_only_the_bound_issue_with_broker_credential() -> None:
+    fake = FakeGitHubAPI()
+    with _backend(fake, pull_request_binding=None) as backend:
+        receipt = backend.read_issue(timeout_seconds=5.0)
+
+    assert isinstance(receipt, github.IssueReadReceipt)
+    assert receipt.model_dump() == {
+        "repository_id": 918273645,
+        "issue_number": 41,
+        "body": "### Optimize job\n\nRun the bound agent optimization.\n",
+    }
+    assert fake.requests == [("GET", "/repos/contoso/travel-agent/issues/41")]
+    assert fake.authorization_headers == ["Bearer " + TOKEN]
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error_type", "message"),
+    [
+        ("number", 42, github.GitHubPolicyError, "issue number"),
+        ("number", True, github.GitHubContractError, "issue.number"),
+        ("number", "41", github.GitHubContractError, "issue.number"),
+        (
+            "url",
+            "https://api.github.com/repos/contoso/travel-agent/issues/42",
+            github.GitHubPolicyError,
+            "issue API URL",
+        ),
+        (
+            "url",
+            "https://evil.example/repos/contoso/travel-agent/issues/41",
+            github.GitHubPolicyError,
+            "issue API URL",
+        ),
+        (
+            "html_url",
+            "https://github.com/contoso/other/issues/41",
+            github.GitHubPolicyError,
+            "issue HTML URL",
+        ),
+        (
+            "repository_url",
+            "https://api.github.com/repos/contoso/other",
+            github.GitHubPolicyError,
+            "issue repository URL",
+        ),
+        ("repository_url", None, github.GitHubContractError, "issue.repository_url"),
+        ("repository", {"id": 999}, github.GitHubPolicyError, "repository ID"),
+        ("pull_request", {}, github.GitHubPolicyError, "pull request"),
+        ("pull_request", None, github.GitHubPolicyError, "pull request"),
+    ],
+)
+def test_read_issue_rejects_unbound_remote_identity(
+    field: str,
+    value: object,
+    error_type: type[github.GitHubWriteLayerError],
+    message: str,
+) -> None:
+    fake = FakeGitHubAPI()
+    fake.issue_payload[field] = value
+    with _backend(fake) as backend:
+        with pytest.raises(error_type, match=message):
+            backend.read_issue(timeout_seconds=5.0)
+    assert fake.requests == [("GET", "/repos/contoso/travel-agent/issues/41")]
+
+
+@pytest.mark.parametrize("author_id", [12345, 67890, None, True, "12345"])
+def test_read_issue_checks_bound_author_immutable_id(author_id: object) -> None:
+    fake = FakeGitHubAPI()
+    fake.issue_payload["user"] = {"id": author_id, "login": "issue-author"}
+    binding = github.IssueBinding(
+        **ISSUE_BINDING.model_dump(exclude_none=True),
+        issue_author_login="issue-author",
+        issue_author_permission="write",
+        issue_author_id=12345,
+    )
+    with _backend(fake, issue_binding=binding) as backend:
+        if author_id == 12345:
+            assert backend.read_issue(timeout_seconds=5.0).issue_number == 41
+        else:
+            with pytest.raises(github.GitHubWriteLayerError, match="author|user.id"):
+                backend.read_issue(timeout_seconds=5.0)
+
+
+@pytest.mark.parametrize("login", ["issue-author", "ISSUE-AUTHOR", "other-author", None, ""])
+def test_read_issue_checks_legacy_author_login_without_immutable_id(
+    login: str | None,
+) -> None:
+    fake = FakeGitHubAPI()
+    fake.issue_payload["user"] = {"id": 12345, "login": login}
+    binding = github.IssueBinding(
+        **ISSUE_BINDING.model_dump(exclude_none=True),
+        issue_author_login="issue-author",
+        issue_author_permission="write",
+    )
+    with _backend(fake, issue_binding=binding) as backend:
+        if login in {"issue-author", "ISSUE-AUTHOR"}:
+            assert backend.read_issue(timeout_seconds=5.0).issue_number == 41
+        elif login:
+            with pytest.raises(github.GitHubPolicyError, match="author login"):
+                backend.read_issue(timeout_seconds=5.0)
+        else:
+            with pytest.raises(github.GitHubContractError, match="issue.user.login"):
+                backend.read_issue(timeout_seconds=5.0)
+    assert fake.requests == [("GET", "/repos/contoso/travel-agent/issues/41")]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        None,
+        "",
+        " \r\n\t",
+        123,
+        "x" * 60_001,
+        "\u00e9" * 40_000,
+        "\x00" * 50_000,
+        "\u0080" * 13_000 + "\x00" * 38_000,
+    ],
+    ids=[
+        "missing", "empty", "blank", "non-string", "characters", "utf8-bytes",
+        "http-bytes", "socket-bytes",
+    ],
+)
+def test_read_issue_rejects_invalid_or_oversized_bodies(body: object) -> None:
+    fake = FakeGitHubAPI()
+    if body is None:
+        fake.issue_payload.pop("body")
+    else:
+        fake.issue_payload["body"] = body
+    with _backend(fake) as backend:
+        with pytest.raises(github.GitHubContractError):
+            backend.read_issue(timeout_seconds=5.0)
+
+
+@pytest.mark.parametrize(
+    "body",
+    ["x" * 60_000, "\u00e9" * 32_768],
+    ids=["character-limit", "utf8-byte-limit"],
+)
+def test_read_issue_accepts_bounded_long_bodies(body: str) -> None:
+    fake = FakeGitHubAPI()
+    fake.issue_payload["body"] = body
+    with _backend(fake) as backend:
+        assert backend.read_issue(timeout_seconds=5.0).body == body
+
+
+@pytest.mark.parametrize("token", [TOKEN, "opaque-secret-123456"])
+def test_read_issue_redacts_broker_credential_and_token_shapes_from_body(token: str) -> None:
+    fake = FakeGitHubAPI()
+    fake.issue_payload["body"] = f"Never expose {token} or github_pat_{'a' * 30}"
+    with github.GitHubRestBackend(
+        issue_binding=ISSUE_BINDING, token=token, transport=fake.transport()
+    ) as backend:
+        receipt = backend.read_issue(timeout_seconds=5.0)
+    assert receipt.body == "Never expose ****** or ******"
+    assert token not in receipt.model_dump_json()
+
+
+@pytest.mark.parametrize("timeout", [0, -1, 31, True, "5"])
+def test_read_issue_rejects_invalid_timeout_before_http(timeout: object) -> None:
+    fake = FakeGitHubAPI()
+    with _backend(fake) as backend:
+        with pytest.raises(github.GitHubPolicyError, match="timeout_seconds"):
+            backend.read_issue(timeout_seconds=timeout)
+    assert fake.requests == []
+
+
+@pytest.mark.parametrize(
+    ("failure", "error_type", "message"),
+    [
+        (401, github.GitHubTransportError, "status 401"),
+        (404, github.GitHubTransportError, "status 404"),
+        (500, github.GitHubTransportError, "status 500"),
+        (302, github.GitHubContractError, "redirect responses"),
+        ("invalid-json", github.GitHubContractError, "valid JSON"),
+        ("non-object", github.GitHubContractError, "JSON object"),
+        ("timeout", github.GitHubTransportError, "timed out"),
+        ("connect", github.GitHubTransportError, "transport failed"),
+    ],
+)
+def test_read_issue_reports_redacted_github_errors(
+    failure: int | str,
+    error_type: type[github.GitHubWriteLayerError],
+    message: str,
+) -> None:
+    requests: list[tuple[str, str]] = []
+    token = "opaque-secret-123456"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path))
+        if failure == "timeout":
+            raise httpx.ReadTimeout(token, request=request)
+        if failure == "connect":
+            raise httpx.ConnectError(token, request=request)
+        if failure == "invalid-json":
+            return httpx.Response(200, content=b"not-json", request=request)
+        if failure == "non-object":
+            return httpx.Response(200, json=[token], request=request)
+        assert isinstance(failure, int)
+        return httpx.Response(
+            failure,
+            json={"message": token},
+            headers={"Location": "https://evil.example"},
+            request=request,
+        )
+
+    with github.GitHubRestBackend(
+        issue_binding=ISSUE_BINDING,
+        token=token,
+        transport=httpx.MockTransport(handler),
+    ) as backend:
+        with pytest.raises(error_type, match=message) as captured:
+            backend.read_issue(timeout_seconds=5.0)
+    assert token not in str(captured.value)
+    assert requests == [("GET", "/repos/contoso/travel-agent/issues/41")]
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("GET", "/repos/contoso/travel-agent/issues/42"),
+        ("GET", "/repos/contoso/other/issues/41"),
+        ("GET", "https://api.github.com/repos/contoso/travel-agent/issues/41"),
+        ("GET", "//evil.example/repos/contoso/travel-agent/issues/41"),
+        ("GET", "/repos/contoso/travel-agent/issues/41?other=42"),
+        ("POST", "/repos/contoso/travel-agent/issues/41"),
+        ("PATCH", "/repos/contoso/travel-agent/issues/41"),
+        ("DELETE", "/repos/contoso/travel-agent/issues/41"),
+    ],
+)
+def test_issue_read_does_not_grant_arbitrary_get_or_issue_writes(
+    method: str, path: str
+) -> None:
+    fake = FakeGitHubAPI()
+    with _backend(fake) as backend:
+        with pytest.raises(github.GitHubPolicyError, match="closed GitHub policy"):
+            backend._request_json(
+                method, path, expected_status=(200,), timeout_seconds=5.0
+            )
+    assert fake.requests == []
 
 
 def test_comment_upsert_create_update_and_idempotent_behavior() -> None:
@@ -668,6 +923,91 @@ def test_broker_models_forbid_unknown_fields() -> None:
         )
 
 
+def test_broker_issue_read_request_and_exclusive_response_contract() -> None:
+    request = github.BrokerRequest(
+        request_id="read-issue",
+        operation=github.BrokerOperation.ISSUE_READ,
+        timeout_seconds=5.0,
+    )
+    assert request.model_dump(mode="json", exclude_none=True) == {
+        "request_id": "read-issue",
+        "operation": "issue.read",
+        "timeout_seconds": 5.0,
+    }
+    receipt = github.IssueReadReceipt(
+        repository_id=918273645, issue_number=41, body="issue body"
+    )
+    response = github.BrokerResponse(
+        request_id=request.request_id, ok=True, issue_read_receipt=receipt
+    )
+    assert github.BrokerResponse.model_validate_json(
+        response.model_dump_json()
+    ).issue_read_receipt == receipt
+    with pytest.raises(ValidationError, match="exactly one receipt"):
+        github.BrokerResponse(
+            ok=True,
+            issue_read_receipt=receipt,
+            comment_receipt=_final_comment_receipt(),
+        )
+    with pytest.raises(ValidationError, match="cannot carry receipts"):
+        github.BrokerResponse(
+            ok=False,
+            issue_read_receipt=receipt,
+            error_type="GitHubPolicyError",
+            error_message="refused",
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("repository_id", 999),
+        ("repository", REPOSITORY.model_dump()),
+        ("owner", "other"),
+        ("repo", "other"),
+        ("issue_number", 42),
+        ("issue", 42),
+        ("url", "https://evil.example/issue"),
+        ("path", "/repos/contoso/other/issues/41"),
+        ("method", "DELETE"),
+        ("unexpected", True),
+        ("logical_kind", "baseline"),
+        ("markdown", "evidence"),
+        ("head_branch", "main"),
+        (
+            "final_decision_receipt",
+            {
+                "decision": "no_winner",
+                "comment_receipt": _final_comment_receipt().model_dump(),
+            },
+        ),
+        ("logical_kind", None),
+        ("markdown", None),
+        ("head_branch", None),
+        ("final_decision_receipt", None),
+    ],
+)
+def test_broker_issue_read_rejects_target_and_irrelevant_fields(
+    field: str, value: object
+) -> None:
+    with pytest.raises(ValidationError):
+        github.BrokerRequest.model_validate(
+            {
+                "request_id": "read-issue",
+                "operation": "issue.read",
+                "timeout_seconds": 5.0,
+                field: value,
+            }
+        )
+
+
+@pytest.mark.parametrize("field", ["issue_number", "repository", "url", "markdown"])
+def test_issue_read_client_does_not_accept_caller_targets(field: str) -> None:
+    client = github.UnixSocketBrokerClient(socket_path=Path("unused-broker.sock"))
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+        client.read_issue(request_id="read-issue", timeout_seconds=5.0, **{field: "other"})
+
+
 @pytest.mark.parametrize("pull_request_mode", ["omitted", "null"])
 def test_binding_document_allows_issue_only_pull_request_modes(
     tmp_path: Path,
@@ -711,6 +1051,49 @@ def test_unix_socket_broker_round_trips_a_comment_request(tmp_path: Path) -> Non
         )
         assert receipt.action == "created"
         assert fake.comments[0]["body"].endswith("baseline evidence")
+    finally:
+        server.close()
+        thread.join(timeout=5.0)
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or not hasattr(socket, "AF_UNIX"),
+    reason="Unix socket transport is Linux only",
+)
+@pytest.mark.parametrize("body", ["bound issue body", None])
+def test_unix_socket_broker_round_trips_issue_read(
+    tmp_path: Path, body: str | None
+) -> None:
+    fake = FakeGitHubAPI()
+    fake.issue_payload["body"] = body
+    binding_path = tmp_path / "binding.json"
+    _write_binding(binding_path, pull_request_mode="omitted")
+    socket_path = tmp_path / "private" / "broker.sock"
+    server = github.UnixSocketBrokerServer(
+        socket_path=socket_path,
+        binding_path=binding_path,
+        token=TOKEN,
+        transport=fake.transport(),
+    )
+    thread = threading.Thread(
+        target=server.serve_forever,
+        kwargs={"max_requests": 1},
+        daemon=True,
+    )
+    thread.start()
+    try:
+        client = github.UnixSocketBrokerClient(socket_path=socket_path)
+        if body is None:
+            with pytest.raises(github.BrokerRemoteError, match="GitHubContractError"):
+                client.read_issue(request_id="read-issue", timeout_seconds=5.0)
+        else:
+            receipt = client.read_issue(request_id="read-issue", timeout_seconds=5.0)
+            assert receipt.model_dump() == {
+                "repository_id": 918273645,
+                "issue_number": 41,
+                "body": "bound issue body",
+            }
+        assert fake.requests == [("GET", "/repos/contoso/travel-agent/issues/41")]
     finally:
         server.close()
         thread.join(timeout=5.0)
@@ -882,6 +1265,18 @@ def test_unix_socket_broker_rejects_close_until_pull_request_binding_is_added(
             b'{"request_id":"req-3","operation":"issue.delete","timeout_seconds":1.0,"logical_kind":"baseline","markdown":"ok"}\n',
             "BrokerOperationError",
         ),
+        (
+            b'{"request_id":"req-read-target","operation":"issue.read","timeout_seconds":1.0,"issue_number":42}\n',
+            "BrokerProtocolError",
+        ),
+        (
+            b'{"request_id":"req-read-extra","operation":"issue.read","timeout_seconds":1.0,"markdown":null}\n',
+            "BrokerProtocolError",
+        ),
+        (
+            b'{"request_id":"req-read-timeout","operation":"issue.read","timeout_seconds":true}\n',
+            "BrokerProtocolError",
+        ),
     ],
 )
 def test_unix_socket_broker_rejects_malformed_frames(
@@ -912,6 +1307,7 @@ def test_unix_socket_broker_rejects_malformed_frames(
         assert response.ok is False
         assert response.error_type == expected
         assert TOKEN not in response.model_dump_json()
+        assert fake.requests == []
     finally:
         server.close()
         thread.join(timeout=5.0)

@@ -22,6 +22,15 @@ pinned runtime, creates trusted job-state paths, and launches the issue broker
 for the cloud agent's `dynamic` event. If skill discovery or broker launch
 fails, the cloud agent must stop without editing.
 
+Copilot's `dynamic` event is an execution envelope, not an issue webhook.
+Job commands validate its repository against the setup-created binding and use
+the broker's closed `issue.read` operation to retrieve only that bound issue.
+The broker credential stays outside the agent process. Explicit issue inputs
+must agree with the binding and fetched body; malformed or conflicting inputs
+do not trigger a fallback. Normal issue webhooks keep their strict parsing.
+Subsequent dynamic job commands re-read the bound issue and reject changes to
+the persisted request rather than silently changing an in-progress job.
+
 ## Main modules
 
 - skill adapter:
@@ -52,6 +61,8 @@ sequenceDiagram
 
     Issue->>Skill: assign optimize issue
     Skill->>CLI: job start
+    CLI->>Broker: read bound issue for dynamic session
+    Broker-->>CLI: exact issue identity and body
     CLI->>Runtime: build identity and capture route
     Runtime->>Foundry: evaluate fresh baseline draft
     Runtime->>Broker: write baseline evidence

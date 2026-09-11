@@ -77,6 +77,7 @@ from foundry_opt.poc.foundry import (
 from foundry_opt.poc.github import (
     BrokerRemoteError,
     BrokerUnavailableError,
+    GitHubWriteLayerError,
     IssueBinding,
     PullRequestBinding,
     RepositoryIdentity,
@@ -1400,6 +1401,8 @@ def _prepare_start_runtime(
         binding=binding,
         issue_number=issue_number,
         job_id=job_id,
+        broker_socket_path=broker_socket_path,
+        deadline_seconds=deadline_seconds,
     )
     selected_repo_agent_id = _request_repo_agent_id(
         start.request,
@@ -1428,6 +1431,14 @@ def _prepare_start_runtime(
     _verify_issue_override_authority(start.request, binding=start.binding)
     if not paths.job_state_path.is_file():
         _delete_file_if_present(_issue_request_path(paths.job_root))
+    elif _is_copilot_dynamic_event():
+        previous_request, _ = _load_persisted_issue_request(
+            _issue_request_path(paths.job_root)
+        )
+        if previous_request != start.request:
+            raise RuntimeIntegrationError(
+                "persisted optimize-job issue request does not match the current issue body"
+            )
     request_digest_sha256 = _request_digest(start.request)
     verification_resolution = _resolve_runtime_verification(
         repository_root=repository_root,
@@ -1512,7 +1523,12 @@ def _load_existing_runtime(
     )
     state_store = JobStateStore(paths.job_state_path)
     state = state_store.load()
-    event_binding, event_request = _load_runtime_issue_event(event)
+    event_binding, event_request = _load_runtime_issue_event(
+        event,
+        binding=loaded_binding,
+        broker_socket_path=paths.broker_socket_path,
+        deadline_seconds=deadline_seconds,
+    )
     settings = load_runtime_settings(
         paths,
         environment=os.environ,
@@ -1582,16 +1598,104 @@ def _load_existing_runtime(
 
 def _load_runtime_issue_event(
     event: Path | None,
+    *,
+    binding: _LoadedBinding | None = None,
+    broker_socket_path: Path | None = None,
+    deadline_seconds: float = DEFAULT_DEADLINE_SECONDS,
 ) -> tuple[IssueBinding | None, OptimizeIssueRequest | None]:
+    event_binding, body = _load_runtime_event_context(
+        event,
+        binding=binding,
+        broker_socket_path=broker_socket_path,
+        deadline_seconds=deadline_seconds,
+    )
+    if type(body) is not str or not body.strip():
+        return event_binding, None
+    return event_binding, _issue_request_from_body(body)
+
+
+def _is_copilot_dynamic_event() -> bool:
+    return (
+        os.environ.get("GITHUB_ACTIONS") == "true"
+        and os.environ.get("GITHUB_EVENT_NAME") == "dynamic"
+    )
+
+
+def _runtime_event_binding(
+    payload: dict[str, Any],
+    binding: _LoadedBinding | None,
+) -> IssueBinding:
+    if not _is_copilot_dynamic_event():
+        return _issue_binding_from_event_payload(payload)
+    if binding is None:
+        raise typer.BadParameter("Copilot dynamic events require a trusted issue binding")
+    repository = _repository_identity_from_event_payload(payload)
+    if repository != binding.issue.repository:
+        raise typer.BadParameter("dynamic event repository does not match the trusted binding")
+    for name, expected in (
+        ("GITHUB_REPOSITORY", repository.full_name),
+        ("GITHUB_REPOSITORY_ID", str(repository.repository_id)),
+    ):
+        value = os.environ.get(name)
+        if value and value != expected:
+            raise typer.BadParameter(f"{name} does not match the trusted binding")
+    if "issue" in payload or "pull_request" in payload:
+        explicit = _issue_binding_from_event_payload(payload)
+        if not _same_issue_binding_identity(explicit, binding.issue):
+            raise typer.BadParameter(
+                "issue event and trusted binding do not describe the same optimize job"
+            )
+    return binding.issue
+
+
+def _load_runtime_event_context(
+    event: Path | None,
+    *,
+    binding: _LoadedBinding | None,
+    broker_socket_path: Path | None = None,
+    deadline_seconds: float = DEFAULT_DEADLINE_SECONDS,
+) -> tuple[IssueBinding | None, str | None]:
     if event is None:
+        if _is_copilot_dynamic_event():
+            raise typer.BadParameter("Copilot dynamic sessions require their event context")
         return None, None
     payload = _read_json_object(event, max_bytes=_MAX_EVENT_BYTES)
-    binding = _issue_binding_from_event_payload(payload)
-    issue = _mapping(payload.get("issue"), "issue")
-    body = issue.get("body")
-    if type(body) is not str or not body.strip():
-        return binding, None
-    return binding, _issue_request_from_body(body)
+    event_binding = _runtime_event_binding(payload, binding)
+    if not _is_copilot_dynamic_event():
+        issue = _mapping(payload.get("issue"), "issue")
+        body = issue.get("body")
+        return event_binding, body if isinstance(body, str) else None
+
+    socket_path = broker_socket_path or _required_environment_path(
+        BROKER_SOCKET_ENV, offline=False
+    )
+    if socket_path is None:
+        raise RuntimeIntegrationError("GitHub issue broker socket is unavailable")
+    try:
+        broker = UnixSocketBrokerClient(socket_path=socket_path)
+        receipt = broker.read_issue(
+            request_id="read-bound-issue",
+            timeout_seconds=min(deadline_seconds, 10.0),
+        )
+    except GitHubWriteLayerError as error:
+        raise RuntimeIntegrationError(
+            f"bound issue read failed: {_redact_text(str(error))}"
+        ) from error
+    if (
+        receipt.repository_id != event_binding.repository.repository_id
+        or receipt.issue_number != event_binding.issue_number
+    ):
+        raise RuntimeIntegrationError("broker issue does not match the trusted binding")
+    # A direct issue body, when present, must agree with the broker's source.
+    issue = payload.get("issue")
+    if isinstance(issue, dict) and "pull_request" not in issue and "body" in issue:
+        body = issue["body"]
+        if (
+            not isinstance(body, str)
+            or _issue_request_from_body(body) != _issue_request_from_body(receipt.body)
+        ):
+            raise RuntimeIntegrationError("event issue body does not match the broker-bound issue")
+    return event_binding, receipt.body
 
 
 def _resolve_existing_issue_number(
@@ -1663,6 +1767,12 @@ def _load_job_snapshot(
         _issue_request_path(job_root)
     )
     state = JobStateStore(job_root / STATE_FILENAME).load()
+    if _is_copilot_dynamic_event():
+        _, current_request = _load_runtime_issue_event(event, binding=loaded_binding)
+        if current_request != request:
+            raise RuntimeIntegrationError(
+                "persisted optimize-job issue request does not match the current issue body"
+            )
     if state.identity.min_candidates != request.candidate_budget:
         raise RuntimeIntegrationError(
             "persisted optimize-job issue request does not match the trusted optimize-job identity"
@@ -1677,12 +1787,19 @@ def _resolve_start_context(
     binding: Path | None,
     issue_number: int | None,
     job_id: str | None,
+    broker_socket_path: Path | None = None,
+    deadline_seconds: float = DEFAULT_DEADLINE_SECONDS,
 ) -> _IssueStartContext:
     loaded_binding = _load_binding(binding) if binding is not None else None
-    event_binding: IssueBinding | None = None
-    event_body: str | None = None
-    if event is not None:
+    if event is not None and not _is_copilot_dynamic_event():
         event_binding, event_body = _load_issue_event(event)
+    else:
+        event_binding, event_body = _load_runtime_event_context(
+            event,
+            binding=loaded_binding,
+            broker_socket_path=broker_socket_path,
+            deadline_seconds=deadline_seconds,
+        )
     if (
         loaded_binding is not None
         and event_binding is not None
@@ -1703,10 +1820,14 @@ def _resolve_start_context(
     body = _load_body_file(body_file) if body_file is not None else event_body
     if body is None:
         raise typer.BadParameter("--body-file or --event with issue.body is required")
+    request = _issue_request_from_body(body)
+    if _is_copilot_dynamic_event() and body_file is not None:
+        if event_body is None or request != _issue_request_from_body(event_body):
+            raise typer.BadParameter("--body-file does not match the broker-bound issue")
     return _IssueStartContext(
         issue_number=resolved_issue_number,
         job_id=resolved_job_id,
-        request=_issue_request_from_body(body),
+        request=request,
         issue_binding=event_binding or (None if loaded_binding is None else loaded_binding.issue),
         binding=loaded_binding,
     )
@@ -1720,7 +1841,12 @@ def _resolve_job_reference(
     job_id: str | None,
 ) -> tuple[str, _LoadedBinding | None]:
     loaded_binding = _load_binding(binding) if binding is not None else None
-    event_binding = _issue_binding_from_event(event) if event is not None else None
+    event_binding = (
+        _runtime_event_binding(
+            _read_json_object(event, max_bytes=_MAX_EVENT_BYTES), loaded_binding
+        )
+        if event is not None else None
+    )
     if (
         loaded_binding is not None
         and event_binding is not None
@@ -3215,7 +3341,7 @@ def _issue_binding_from_event_context(
         raise error
 
 
-def _issue_binding_from_event_payload(event: dict[str, Any]) -> IssueBinding:
+def _repository_identity_from_event_payload(event: dict[str, Any]) -> RepositoryIdentity:
     repository = _mapping(event.get("repository"), "repository")
     full_name = _required_string(repository.get("full_name"), "repository.full_name")
     owner, separator, name = full_name.partition("/")
@@ -3224,7 +3350,13 @@ def _issue_binding_from_event_payload(event: dict[str, Any]) -> IssueBinding:
     repository_id = repository.get("id")
     if type(repository_id) is not int or repository_id <= 0:
         raise typer.BadParameter("event repository.id is invalid")
-    issue = _mapping(event.get("issue"), "issue")
+    return RepositoryIdentity(owner=owner, name=name, repository_id=repository_id)
+
+
+def _issue_binding_from_event_payload(event: dict[str, Any]) -> IssueBinding:
+    repository = _repository_identity_from_event_payload(event)
+    full_name = repository.full_name
+    issue = _mapping(event["issue"], "issue") if "issue" in event else {}
     issue_number = issue.get("number")
     if (
         type(issue_number) is int
@@ -3232,11 +3364,7 @@ def _issue_binding_from_event_payload(event: dict[str, Any]) -> IssueBinding:
         and not isinstance(issue.get("pull_request"), dict)
     ):
         return IssueBinding(
-            repository=RepositoryIdentity(
-                owner=owner,
-                name=name,
-                repository_id=repository_id,
-            ),
+            repository=repository,
             issue_number=issue_number,
             job_id=f"optimize-{issue_number}",
             comment_author_login="github-actions[bot]",
@@ -3268,11 +3396,7 @@ def _issue_binding_from_event_payload(event: dict[str, Any]) -> IssueBinding:
         raise typer.BadParameter("event does not identify an optimize-job issue")
     issue_number = next(iter(linked_issue_numbers))
     return IssueBinding(
-        repository=RepositoryIdentity(
-            owner=owner,
-            name=name,
-            repository_id=repository_id,
-        ),
+        repository=repository,
         issue_number=issue_number,
         job_id=f"optimize-{issue_number}",
         comment_author_login="github-actions[bot]",

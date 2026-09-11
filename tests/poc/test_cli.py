@@ -6,6 +6,7 @@ import os
 import subprocess
 from collections import defaultdict
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -674,6 +675,207 @@ def _write_issue_event(tmp_path: Path, *, body: str, issue_number: int = 7) -> P
         encoding="utf-8",
     )
     return event
+
+
+def _write_dynamic_event(tmp_path: Path) -> Path:
+    event = tmp_path / "dynamic-event.json"
+    event.write_text(
+        json.dumps(
+            {
+                "repository": {
+                    "full_name": "example-org/example-agent",
+                    "id": 123456789,
+                },
+                "inputs": {"COPILOT_AGENT_INPUTS": "{}"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    return event
+
+
+def test_dynamic_job_start_reads_bound_issue_without_top_level_issue(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repository, _, environment = _create_sidecar_only_runtime_repository(tmp_path)
+    _checkout_branch(repository, "copilot/job-7")
+    body = (
+        "### Repository agent ID or explicit Foundry target\n\ntravel-agent\n\n"
+        + _issue_body(candidate_budget=2, acknowledge_no_evidence=True)
+    )
+    binding = _write_binding(
+        tmp_path / "binding.json",
+        pull_request=_pull_request_binding(repository),
+    )
+    environment.update(
+        GITHUB_ACTIONS="true",
+        GITHUB_EVENT_NAME="dynamic",
+        GITHUB_EVENT_PATH=str(_write_dynamic_event(tmp_path)),
+        FOUNDRY_OPT_GITHUB_BINDING=str(binding),
+    )
+    harness = ControllerHarness(
+        candidate_results={}, validating_results={}, cleanup_results={}
+    )
+    reads: list[str] = []
+    broker_available = True
+
+    class BoundIssueBroker:
+        def __init__(self, *, socket_path: Path) -> None:
+            assert str(socket_path) == environment[BROKER_SOCKET_ENV]
+
+        def read_issue(self, *, request_id: str, timeout_seconds: float):
+            reads.append(request_id)
+            if not broker_available:
+                raise BrokerUnavailableError("socket missing")
+            return SimpleNamespace(repository_id=123456789, issue_number=7, body=body)
+
+        def ensure_pull_request_binding(self, **_: Any) -> None:
+            pass
+
+    monkeypatch.setattr(cli_module, "UnixSocketBrokerClient", BoundIssueBroker)
+    monkeypatch.setattr(cli_module, "capture_route_fingerprint", lambda **_: _route())
+    monkeypatch.setattr(cli_module, "build_runtime_controller", harness.builder)
+    result = _invoke(["job", "start", "--repository", str(repository)], environment)
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["next_action"] == "handoff-candidate"
+    assert payload["request"]["candidate_budget"] == 2
+    assert payload["job"]["verification"]["mode"] == "none"
+    assert payload["baseline"]["evaluation"] is None
+    assert reads
+    assert harness.foundry.baseline_calls == 0
+
+    for candidate_id in ("candidate-one", "candidate-two"):
+        handoff = _invoke(
+            [
+                "job", "handoff", "--repository", str(repository),
+                "--candidate", candidate_id, "--model", "candidate",
+                "--hypothesis", f"Instructions for {candidate_id}",
+            ],
+            environment,
+        )
+        assert handoff.exit_code == 0, handoff.stdout
+        workspace = Path(json.loads(handoff.stdout)["candidate"]["workspace"])
+        (workspace / "src" / "main.py").write_text(
+            f"VALUE = '{candidate_id}'\n", encoding="utf-8"
+        )
+        complete = _invoke(
+            ["job", "complete", "--repository", str(repository), "--candidate", candidate_id],
+            environment,
+        )
+        assert complete.exit_code == 0, complete.stdout
+
+    for command in ("status", "resume", "finish"):
+        result = _invoke(["job", command, "--repository", str(repository)], environment)
+        assert result.exit_code == 0, result.stdout
+    assert json.loads(result.stdout)["job"]["terminal_outcome"] == "proposed_unverified"
+    assert harness.foundry.baseline_calls == 0
+    assert harness.foundry.candidate_calls == []
+    assert harness.foundry.validating_calls == []
+    job_root = Path(environment[STATE_ROOT_ENV]) / "optimize-7"
+    original_request = (job_root / cli_module._ISSUE_REQUEST_FILENAME).read_bytes()
+    body = body.replace("Improve coverage.", "Changed goal after start.")
+    for command in ("start", "status", "resume", "finish"):
+        drifted = _invoke(["job", command, "--repository", str(repository)], environment)
+        assert drifted.exit_code == 2, drifted.stdout
+        assert "does not match the current issue body" in drifted.stdout
+    assert (job_root / cli_module._ISSUE_REQUEST_FILENAME).read_bytes() == original_request
+    broker_available = False
+    for command in ("start", "status", "resume", "finish"):
+        blocked = _invoke(["job", command, "--repository", str(repository)], environment)
+        assert blocked.exit_code == 2, blocked.stdout
+        assert "bound issue read failed" in blocked.stdout
+    assert (job_root / cli_module._ISSUE_REQUEST_FILENAME).read_bytes() == original_request
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("missing-binding", "require a trusted issue binding"),
+        ("missing-event", "require their event context"),
+        ("missing-socket", "FOUNDRY_OPT_BROKER_SOCKET is required"),
+        ("repository-name", "repository does not match"),
+        ("repository-id", "repository does not match"),
+        ("environment-repository", "GITHUB_REPOSITORY does not match"),
+        ("environment-id", "GITHUB_REPOSITORY_ID does not match"),
+        ("explicit-issue", "same optimize job"),
+        ("malformed-issue", "event issue is invalid"),
+        ("body-file", "--body-file does not match"),
+        ("event-body", "event issue body does not match"),
+        ("issue-number", "issue_number is inconsistent"),
+        ("job-id", "job_id is inconsistent"),
+        ("broker-repository", "broker issue does not match"),
+        ("broker-issue", "broker issue does not match"),
+        ("broker-unavailable", "bound issue read failed"),
+        ("not-dynamic", "event does not identify an optimize-job issue"),
+        ("not-actions", "event does not identify an optimize-job issue"),
+    ],
+)
+def test_dynamic_start_fails_closed_on_untrusted_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    case: str,
+    message: str,
+) -> None:
+    event = _write_dynamic_event(tmp_path)
+    binding = _write_binding(tmp_path / "binding.json")
+    body = _issue_body(candidate_budget=2, acknowledge_no_evidence=True)
+    payload = json.loads(event.read_text(encoding="utf-8"))
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "dynamic")
+    monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
+    monkeypatch.delenv("GITHUB_REPOSITORY_ID", raising=False)
+    monkeypatch.setenv(BROKER_SOCKET_ENV, str(tmp_path / "broker.sock"))
+    if case == "repository-name":
+        payload["repository"]["full_name"] = "example-org/other"
+    if case == "repository-id":
+        payload["repository"]["id"] = 42
+    if case == "environment-repository":
+        monkeypatch.setenv("GITHUB_REPOSITORY", "example-org/other")
+    if case == "environment-id":
+        monkeypatch.setenv("GITHUB_REPOSITORY_ID", "42")
+    if case == "explicit-issue":
+        payload["issue"] = {"number": 9, "body": body}
+    if case == "malformed-issue":
+        payload["issue"] = None
+    if case == "event-body":
+        payload["issue"] = {"number": 7, "body": body.replace("Improve coverage.", "Another goal.")}
+    if case == "not-dynamic":
+        monkeypatch.setenv("GITHUB_EVENT_NAME", "issues")
+    if case == "not-actions":
+        monkeypatch.setenv("GITHUB_ACTIONS", "false")
+    if case == "missing-socket":
+        monkeypatch.delenv(BROKER_SOCKET_ENV)
+    event.write_text(json.dumps(payload), encoding="utf-8")
+    body_file = None
+    if case == "body-file":
+        body_file = tmp_path / "body.txt"
+        body_file.write_text(body.replace("Improve coverage.", "Another goal."), encoding="utf-8")
+
+    class BoundIssueBroker:
+        def __init__(self, *, socket_path: Path) -> None:
+            pass
+
+        def read_issue(self, *, request_id: str, timeout_seconds: float):
+            if case == "broker-unavailable":
+                raise BrokerUnavailableError("socket missing")
+            return SimpleNamespace(
+                repository_id=42 if case == "broker-repository" else 123456789,
+                issue_number=9 if case == "broker-issue" else 7,
+                body=body,
+            )
+
+    monkeypatch.setattr(cli_module, "UnixSocketBrokerClient", BoundIssueBroker)
+    with pytest.raises((typer.BadParameter, cli_module.RuntimeIntegrationError), match=message):
+        cli_module._resolve_start_context(
+            event=None if case == "missing-event" else event,
+            body_file=body_file,
+            binding=None if case == "missing-binding" else binding,
+            issue_number=9 if case == "issue-number" else None,
+            job_id="optimize-9" if case == "job-id" else None,
+        )
 
 
 def test_issue_binding_from_event_payload_accepts_direct_issue_context() -> None:
@@ -1612,6 +1814,10 @@ def _add_second_sidecar_agent(
 def _invoke(arguments: list[str], env: dict[str, str]) -> Any:
     invocation_environment = {**os.environ, **env}
     for key in (
+        "GITHUB_ACTIONS",
+        "GITHUB_EVENT_NAME",
+        "GITHUB_REPOSITORY",
+        "GITHUB_REPOSITORY_ID",
         "GITHUB_EVENT_PATH",
         "GITHUB_WORKSPACE",
         "GITHUB_HEAD_REF",
@@ -3161,9 +3367,11 @@ def test_job_start_route_failure_does_not_leave_sticky_issue_request(
     assert (job_root / "optimize-job-poc-issue-request.json").exists()
 
 
+@pytest.mark.parametrize("dynamic_event", [False, True])
 def test_job_replay_status_and_resume_are_idempotent(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    dynamic_event: bool,
 ) -> None:
     repository, _, environment = _create_runtime_repository(tmp_path)
     _checkout_branch(repository, "copilot/job-7")
@@ -3176,6 +3384,10 @@ def test_job_replay_status_and_resume_are_idempotent(
         pull_request=_pull_request_binding(repository),
     )
     environment[cli_module._GITHUB_BINDING_ENV] = str(binding)
+    issue_body = json.loads(event.read_text(encoding="utf-8"))["issue"]["body"]
+    if dynamic_event:
+        event = _write_dynamic_event(tmp_path)
+        environment.update(GITHUB_ACTIONS="true", GITHUB_EVENT_NAME="dynamic")
     harness = ControllerHarness(
         candidate_results={
             "candidate-one": RunResult(
@@ -3198,6 +3410,11 @@ def test_job_replay_status_and_resume_are_idempotent(
     class StableBroker:
         def __init__(self, *, socket_path: Path) -> None:
             del socket_path
+
+        def read_issue(self, *, request_id: str, timeout_seconds: float):
+            return SimpleNamespace(
+                repository_id=123456789, issue_number=7, body=issue_body
+            )
 
         def ensure_pull_request_binding(
             self,

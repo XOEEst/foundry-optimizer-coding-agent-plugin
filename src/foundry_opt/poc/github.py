@@ -1,4 +1,4 @@
-"""Minimal GitHub issue-evidence write layer for the optimize-job POC."""
+"""Minimal bound-issue reader and evidence write layer for the optimize-job POC."""
 
 from __future__ import annotations
 
@@ -34,6 +34,9 @@ MAX_HTTP_RESPONSE_BYTES: Final = 256 * 1024
 MAX_SOCKET_FRAME_BYTES: Final = 256 * 1024
 MAX_BINDING_FILE_BYTES: Final = 32 * 1024
 MAX_COMMENT_BODY_BYTES: Final = 64 * 1024
+MAX_ISSUE_BODY_BYTES: Final = 64 * 1024
+# Reserve space for the receipt identity and broker response envelope.
+MAX_ISSUE_BODY_JSON_BYTES: Final = MAX_SOCKET_FRAME_BYTES - 1024
 MAX_MARKDOWN_CHARACTERS: Final = 60_000
 MAX_TIMEOUT_SECONDS: Final = 30.0
 COMMENTS_PER_PAGE: Final = 100
@@ -274,6 +277,7 @@ def _load_json_object(
 
 
 class BrokerOperation(StrEnum):
+    ISSUE_READ = "issue.read"
     COMMENT_UPSERT = "comment.upsert"
     PULL_REQUEST_ENSURE_BINDING = "pull_request.ensure_binding"
     PULL_REQUEST_CLOSE_NO_WINNER = "pull_request.close_no_winner"
@@ -372,6 +376,9 @@ class RepositoryIdentity(FrozenModel):
     def issue_api_url(self, issue_number: int) -> str:
         return f"{self.repository_api_url}/issues/{issue_number}"
 
+    def issue_api_path(self, issue_number: int) -> str:
+        return f"/repos/{self.full_name}/issues/{issue_number}"
+
     def issue_comments_api_url(self, issue_number: int) -> str:
         return f"{self.issue_api_url(issue_number)}/comments"
 
@@ -414,6 +421,7 @@ class IssueBinding(FrozenModel):
     comment_author_login: GitHubLogin
     issue_author_login: GitHubLogin | None = None
     issue_author_permission: GitHubPermissionText | None = None
+    issue_author_id: PositiveId | None = None
 
     @model_validator(mode="after")
     def validate_issue_author_binding(self) -> "IssueBinding":
@@ -447,6 +455,27 @@ class CommentReceipt(FrozenModel):
     html_url: UrlText
     body_sha256: Sha256Hex
     action: Literal["created", "updated", "unchanged"]
+
+
+class IssueReadReceipt(FrozenModel):
+    repository_id: PositiveId
+    issue_number: PositiveInt
+    body: MarkdownText
+
+    @field_validator("body")
+    @classmethod
+    def validate_body(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("issue body must not be blank")
+        if len(value.encode("utf-8")) > MAX_ISSUE_BODY_BYTES:
+            raise ValueError("issue body exceeds its byte budget")
+        _dump_json_bytes(
+            value,
+            max_bytes=MAX_ISSUE_BODY_JSON_BYTES,
+            subject="issue body",
+            error_type=ValueError,
+        )
+        return value
 
 
 class PullRequestReceipt(FrozenModel):
@@ -499,11 +528,15 @@ class BrokerRequest(FrozenModel):
     @classmethod
     def validate_timeout_type(cls, value: object) -> float:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise TypeError("timeout_seconds must be numeric")
+            raise ValueError("timeout_seconds must be numeric")
         return float(value)
 
     @model_validator(mode="after")
     def validate_operation_payload(self) -> BrokerRequest:
+        if self.operation == BrokerOperation.ISSUE_READ:
+            if self.model_fields_set - {"request_id", "operation", "timeout_seconds"}:
+                raise ValueError("issue.read does not accept operation arguments")
+            return self
         if self.operation == BrokerOperation.COMMENT_UPSERT:
             if self.logical_kind is None or self.markdown is None:
                 raise ValueError(
@@ -548,6 +581,7 @@ class BrokerRequest(FrozenModel):
 class BrokerResponse(FrozenModel):
     request_id: RequestId | None = None
     ok: StrictBool
+    issue_read_receipt: IssueReadReceipt | None = None
     comment_receipt: CommentReceipt | None = None
     pull_request_binding_receipt: PullRequestBindingReceipt | None = None
     pull_request_receipt: PullRequestReceipt | None = None
@@ -558,6 +592,7 @@ class BrokerResponse(FrozenModel):
     def validate_result(self) -> BrokerResponse:
         if self.ok:
             receipts = (
+                self.issue_read_receipt,
                 self.comment_receipt,
                 self.pull_request_binding_receipt,
                 self.pull_request_receipt,
@@ -570,7 +605,8 @@ class BrokerResponse(FrozenModel):
                 raise ValueError("successful responses cannot carry error fields")
             return self
         if (
-            self.comment_receipt is not None
+            self.issue_read_receipt is not None
+            or self.comment_receipt is not None
             or self.pull_request_binding_receipt is not None
             or self.pull_request_receipt is not None
         ):
@@ -691,7 +727,7 @@ def _write_binding_document(
 
 
 class GitHubRestBackend:
-    """Closed-policy GitHub REST backend for issue comments and PR closure."""
+    """Closed-policy backend for bound-issue reads, comments, and PR closure."""
 
     def __init__(
         self,
@@ -724,6 +760,9 @@ class GitHubRestBackend:
             },
         )
         self._comments_path = self._issue_binding.repository.issue_comments_api_path(
+            self._issue_binding.issue_number
+        )
+        self._issue_path = self._issue_binding.repository.issue_api_path(
             self._issue_binding.issue_number
         )
         self._pulls_path = self._issue_binding.repository.pull_requests_api_path
@@ -791,6 +830,7 @@ class GitHubRestBackend:
         ):
             return
         if normalized_method == "GET" and path in {
+            self._issue_path,
             self._pulls_path,
             self._issue_timeline_path,
         }:
@@ -888,6 +928,69 @@ class GitHubRestBackend:
         )
         if html_url != self._issue_binding.repository.repository_html_url:
             raise GitHubPolicyError("repository HTML URL is not the trusted origin")
+
+    def read_issue(self, *, timeout_seconds: float) -> IssueReadReceipt:
+        try:
+            request = BrokerRequest(
+                request_id="local-issue-read",
+                operation=BrokerOperation.ISSUE_READ,
+                timeout_seconds=timeout_seconds,
+            )
+        except ValidationError as error:
+            raise GitHubPolicyError(_validation_message(error)) from error
+        binding = self._issue_binding
+        issue = _require_mapping(
+            self._request_json(
+                "GET",
+                self._issue_path,
+                expected_status=(200,),
+                timeout_seconds=request.timeout_seconds,
+            ),
+            field="issue",
+        )
+        if "pull_request" in issue:
+            raise GitHubPolicyError("the bound issue must not be a pull request")
+        number = _require_positive_int(issue.get("number"), field="issue.number")
+        if number != binding.issue_number:
+            raise GitHubPolicyError("issue number does not match the trusted binding")
+        api_url = _require_string(issue.get("url"), field="issue.url")
+        if api_url != binding.repository.issue_api_url(number):
+            raise GitHubPolicyError("issue API URL is not the trusted origin")
+        html_url = _require_string(issue.get("html_url"), field="issue.html_url")
+        if html_url != f"{binding.repository.repository_html_url}/issues/{number}":
+            raise GitHubPolicyError("issue HTML URL is not the trusted origin")
+        repository_url = _require_string(
+            issue.get("repository_url"), field="issue.repository_url"
+        )
+        if repository_url != binding.repository.repository_api_url:
+            raise GitHubPolicyError("issue repository URL is not the trusted origin")
+        if "repository" in issue:
+            self._verify_repository_payload(issue["repository"], field="issue.repository")
+        if binding.issue_author_id is not None:
+            author = _require_mapping(issue.get("user"), field="issue.user")
+            author_id = _require_positive_int(author.get("id"), field="issue.user.id")
+            if author_id != binding.issue_author_id:
+                raise GitHubPolicyError(
+                    "issue author ID does not match the trusted binding"
+                )
+        elif binding.issue_author_login is not None:
+            author = _require_mapping(issue.get("user"), field="issue.user")
+            login = _require_string(author.get("login"), field="issue.user.login")
+            if login.casefold() != binding.issue_author_login.casefold():
+                raise GitHubPolicyError(
+                    "issue author login does not match the trusted binding"
+                )
+        try:
+            receipt = IssueReadReceipt(
+                repository_id=binding.repository.repository_id,
+                issue_number=number,
+                body=issue.get("body"),
+            )
+        except ValidationError as error:
+            raise GitHubContractError(_validation_message(error)) from error
+        return receipt.model_copy(
+            update={"body": _redact_text(receipt.body, secrets=(self._token.value,))}
+        )
 
     def _parse_pull_request(
         self,
@@ -1602,7 +1705,15 @@ class UnixSocketBrokerServer:
                 token=self._token.value,
                 transport=self._transport,
             ) as backend:
-                if request.operation == BrokerOperation.COMMENT_UPSERT:
+                if request.operation == BrokerOperation.ISSUE_READ:
+                    response = BrokerResponse(
+                        request_id=request.request_id,
+                        ok=True,
+                        issue_read_receipt=backend.read_issue(
+                            timeout_seconds=request.timeout_seconds
+                        ),
+                    )
+                elif request.operation == BrokerOperation.COMMENT_UPSERT:
                     assert request.logical_kind is not None
                     assert request.markdown is not None
                     comment_receipt = backend.upsert_issue_comment(
@@ -1768,6 +1879,25 @@ class UnixSocketBrokerClient:
             )
         return response
 
+    def read_issue(
+        self,
+        *,
+        request_id: str,
+        timeout_seconds: float,
+    ) -> IssueReadReceipt:
+        response = self.send(
+            BrokerRequest(
+                request_id=request_id,
+                operation=BrokerOperation.ISSUE_READ,
+                timeout_seconds=timeout_seconds,
+            )
+        )
+        if not response.ok or response.issue_read_receipt is None:
+            raise BrokerRemoteError(
+                f"{response.error_type}: {response.error_message}"
+            )
+        return response.issue_read_receipt
+
     def upsert_comment(
         self,
         *,
@@ -1851,6 +1981,7 @@ __all__ = [
     "GitHubTransportError",
     "GitHubWriteLayerError",
     "IssueBinding",
+    "IssueReadReceipt",
     "PullRequestBinding",
     "PullRequestBindingReceipt",
     "PullRequestReceipt",
