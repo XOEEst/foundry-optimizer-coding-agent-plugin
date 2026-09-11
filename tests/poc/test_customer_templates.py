@@ -23,7 +23,7 @@ CUSTOMER_OPTIMIZER_SKILL_ROOT = (
     CUSTOMER_TEMPLATE_ROOT / ".github" / "skills" / "foundry-agent-optimizer"
 )
 EXPECTED_WORKFLOWS = {"agent-ci.yml", "copilot-setup-steps.yml", "foundry-opt-validation.yml", "foundry-opt-deploy.yml"}
-RUNTIME_SHA = "30500751c96cdff4880f69b6b5eb3cb011e6af70"
+RUNTIME_SHA = "2ef6af071142281c9c9943ab165e15827bf97493"
 FORBIDDEN_STRINGS = ("FOUNDRY_OPT_SHARED_REPO_SSH_KEY", "git@github.com", "known_hosts", "StrictHostKeyChecking")
 
 

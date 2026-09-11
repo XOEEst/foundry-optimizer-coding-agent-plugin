@@ -51,7 +51,7 @@ jobs:
         run: |
           set -euo pipefail
           repository="https://github.com/XOEEst/foundry-optimizer-coding-agent-plugin.git"
-          commit="30500751c96cdff4880f69b6b5eb3cb011e6af70"
+          commit="2ef6af071142281c9c9943ab165e15827bf97493"
           shared_root="$RUNNER_TEMP/foundry-opt-shared"
           rm -rf "$shared_root"
           git init "$shared_root"
@@ -99,7 +99,7 @@ jobs:
           echo "FOUNDRY_OPT_BROKER_SOCKET=$trusted_root/broker/github.sock" >>"$GITHUB_ENV"
           echo "FOUNDRY_OPT_STATE_ROOT=$trusted_root/jobs" >>"$GITHUB_ENV"
           echo "FOUNDRY_OPT_REGISTRY=$GITHUB_WORKSPACE/.foundry-opt/registry.yaml" >>"$GITHUB_ENV"
-          echo "FOUNDRY_OPT_RUNTIME_SHA=30500751c96cdff4880f69b6b5eb3cb011e6af70" >>"$GITHUB_ENV"
+          echo "FOUNDRY_OPT_RUNTIME_SHA=2ef6af071142281c9c9943ab165e15827bf97493" >>"$GITHUB_ENV"
           echo "FOUNDRY_OPT_RESUME_RECORD=$trusted_root/resume.json" >>"$GITHUB_ENV"
 
       - name: Validate registry and agent profiles
